@@ -1,0 +1,4 @@
+{"model": "openai/gpt-5", "status": 200, "expect": {"stop": "error", "class": "retryable", "blocks": ["text"]}, "synthetic": true}
+data: {"id":"chatcmpl-CKq1","object":"chat.completion.chunk","created":1760000000,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"role":"assistant","content":"Half a sent"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-CKq1","obj

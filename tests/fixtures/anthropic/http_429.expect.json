@@ -1,0 +1,1 @@
+{"events":"error","message":{"role":"assistant","api":"anthropic-messages","provider":"anthropic","model":"claude-opus-5-5","content":[],"usage":{"input":0,"output":0},"stop":"error","error":"HTTP 429 rate_limit_error: This request would exceed the rate limit for your organization of 50 requests per minute."},"error":{"class":"retryable","status":429,"retry_after_ms":30000}}

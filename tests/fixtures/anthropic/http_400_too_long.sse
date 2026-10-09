@@ -1,0 +1,2 @@
+{"model": "anthropic/claude-opus-5-5", "status": 400, "expect": {"class": "overflow"}, "synthetic": true}
+{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 1012345 tokens > 1000000 maximum"}}

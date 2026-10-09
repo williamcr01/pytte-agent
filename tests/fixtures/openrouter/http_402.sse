@@ -1,0 +1,2 @@
+{"model": "openrouter/anthropic/claude-sonnet-4.5", "status": 402, "expect": {"class": "fatal"}, "synthetic": true}
+{"error":{"code":402,"message":"Insufficient credits. Add more using https://openrouter.ai/settings/credits"}}

@@ -1,0 +1,2 @@
+{"model": "anthropic/claude-opus-5-5", "status": 529, "expect": {"stop": "error", "class": "retryable", "blocks": []}, "synthetic": true}
+{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},"request_id":"req_011CSHoEeqs5C35K2UUqR7Fy"}

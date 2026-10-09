@@ -1,0 +1,17 @@
+{"model": "openrouter/anthropic/claude-sonnet-4.5", "status": 200, "expect": {"stop": "tool_use", "blocks": ["text", "tool_call"]}, "synthetic": true}
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-1760000000-AbCdEf","provider":"Anthropic","model":"anthropic/claude-sonnet-4.5","object":"chat.completion.chunk","created":1760000000,"choices":[{"index":0,"delta":{"role":"assistant","content":"Calling echo."},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1760000000-AbCdEf","provider":"Anthropic","model":"anthropic/claude-sonnet-4.5","object":"chat.completion.chunk","created":1760000000,"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"toolu_vrtx_01JqWkLQ8hq3cF1m","type":"function","function":{"name":"echo","arguments":""}}]},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1760000000-AbCdEf","provider":"Anthropic","model":"anthropic/claude-sonnet-4.5","object":"chat.completion.chunk","created":1760000000,"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"type":"function","function":{"arguments":"{\"text\": "}}]},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1760000000-AbCdEf","provider":"Anthropic","model":"anthropic/claude-sonnet-4.5","object":"chat.completion.chunk","created":1760000000,"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"type":"function","function":{"arguments":"\"hi\"}"}}]},"finish_reason":null,"native_finish_reason":null,"logprobs":null}]}
+
+data: {"id":"gen-1760000000-AbCdEf","provider":"Anthropic","model":"anthropic/claude-sonnet-4.5","object":"chat.completion.chunk","created":1760000000,"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":"tool_calls","native_finish_reason":"tool_calls","logprobs":null}]}
+
+data: {"id":"gen-1760000000-AbCdEf","provider":"Anthropic","model":"anthropic/claude-sonnet-4.5","object":"chat.completion.chunk","created":1760000000,"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":30,"total_tokens":150,"cost":0.00123,"is_byok":false,"prompt_tokens_details":{"cached_tokens":100},"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]
+

@@ -1,0 +1,15 @@
+{"model": "openai/gpt-5", "status": 200, "expect": {"stop": "tool_use", "blocks": ["tool_call"]}, "synthetic": true}
+data: {"id":"chatcmpl-CKq1","object":"chat.completion.chunk","created":1760000000,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"role":"assistant","content":null,"refusal":null},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-CKq1","object":"chat.completion.chunk","created":1760000000,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_mXk3QZbS1yO7gYfTLlJ0E9rP","type":"function","function":{"name":"echo","arguments":""}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-CKq1","object":"chat.completion.chunk","created":1760000000,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"te"}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-CKq1","object":"chat.completion.chunk","created":1760000000,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"xt\":\"hi\"}"}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-CKq1","object":"chat.completion.chunk","created":1760000000,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"tool_calls"}],"usage":null}
+
+data: {"id":"chatcmpl-CKq1","object":"chat.completion.chunk","created":1760000000,"model":"gpt-5-2025-08-07","service_tier":"default","system_fingerprint":null,"choices":[],"usage":{"prompt_tokens":80,"completion_tokens":22,"total_tokens":102,"prompt_tokens_details":{"cached_tokens":64,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0}}}
+
+data: [DONE]
+

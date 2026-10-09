@@ -1,0 +1,1 @@
+{"events":"error","message":{"role":"assistant","api":"anthropic-messages","provider":"anthropic","model":"claude-opus-5-5","content":[],"usage":{"input":0,"output":0},"stop":"error","error":"HTTP 400 invalid_request_error: prompt is too long: 1012345 tokens > 1000000 maximum"},"error":{"class":"overflow","status":400,"retry_after_ms":-1}}

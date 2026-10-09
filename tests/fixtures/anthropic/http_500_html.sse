@@ -1,0 +1,2 @@
+{"model": "anthropic/claude-opus-5-5", "status": 500, "expect": {"class": "retryable"}, "synthetic": true}
+<html><body>Internal Server Error</body></html>

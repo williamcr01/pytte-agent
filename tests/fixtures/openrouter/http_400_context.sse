@@ -1,0 +1,2 @@
+{"model": "openrouter/anthropic/claude-sonnet-4.5", "status": 400, "expect": {"class": "overflow"}, "synthetic": true}
+{"error":{"code":400,"message":"This endpoint's maximum context length is 200000 tokens. However, you requested about 250123 tokens. Please reduce the length of either one, or use the \"middle-out\" transform to compress your prompt automatically.","metadata":{"provider_name":null}}}

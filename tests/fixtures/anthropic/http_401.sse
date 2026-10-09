@@ -1,0 +1,2 @@
+{"model": "anthropic/claude-opus-5-5", "status": 401, "expect": {"class": "fatal"}, "synthetic": true}
+{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}
