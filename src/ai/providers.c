@@ -83,6 +83,8 @@ static const pt_model models[] = {
     {"openai", "gpt-5-mini", "GPT-5 mini", NULL, 400000, 128000, true, true, {0, 0, 0, 0}, {0}},
     {"openai", "gpt-4.1", "GPT-4.1", NULL, 1047576, 32768, false, true, {0, 0, 0, 0}, {0}},
     {"openai", "gpt-4o-mini", "GPT-4o mini", NULL, 128000, 16384, false, true, {0, 0, 0, 0}, {0}},
+
+    {"faux", "faux", "Faux", NULL, 100000, 4096, true, false, {0, 0, 0, 0}, {0}},
 };
 
 static const pt_ai_catalog builtin = {

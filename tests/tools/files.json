@@ -1,0 +1,20 @@
+[
+  {
+    "name": "read",
+    "description": "Read a file and return its contents.",
+    "parameters": {
+      "type": "object",
+      "properties": {"path": {"type": "string"}},
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "write",
+    "description": "Write text to a file, replacing it.",
+    "parameters": {
+      "type": "object",
+      "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+      "required": ["path", "content"]
+    }
+  }
+]

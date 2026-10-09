@@ -1,0 +1,7 @@
+{
+  "turns": [
+    {"status": 529, "body": {"class": "retryable", "message": "overloaded (scripted)"}},
+    {"content": [{"type": "text", "text": "This answer is cut off half"}], "cut": 150},
+    {"content": [{"type": "text", "text": "Oops"}], "error": "scripted failure", "class": "fatal"}
+  ]
+}

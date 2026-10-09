@@ -1,0 +1,17 @@
+{
+  "chunk": 8,
+  "delay_ms": 10,
+  "turns": [
+    {
+      "content": [
+        {"type": "text", "text": "I'll echo that."},
+        {"type": "tool_call", "name": "echo", "args": {"text": "hi"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "The echo tool said: hi"}
+      ]
+    }
+  ]
+}

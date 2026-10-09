@@ -16,7 +16,7 @@ BASE_SRC := $(wildcard src/base/*.c)
 AI_SRC   := $(wildcard src/ai/*.c)
 LIB_SRC  := $(BASE_SRC) $(AI_SRC)
 # Host parts.
-SYS_SRC  := $(wildcard src/drv/sys_posix.c src/drv/http_faux.c)
+SYS_SRC  := src/drv/sys_posix.c src/drv/http_faux.c
 CURL_SRC := src/drv/http_curl.c
 CLI_SRC  := src/cli/pytte_ai.c
 
@@ -45,8 +45,9 @@ $(BUILD)/test/%: tests/%.c tests/t.h $(LIB_SRC) $(SYS_SRC) $(wildcard include/*.
 	@mkdir -p $(dir $@)
 	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) -o $@
 
-test: $(TESTS)
+test: $(TESTS) $(BUILD)/pytte-ai
 	@for t in $(TESTS); do ./$$t || exit 1; done
+	@echo "cli:" && sh tests/cli.sh $(BUILD)/pytte-ai
 
 # Regenerate the expected results of the stream fixtures (review the diff!).
 fixtures-update: $(BUILD)/test/test_fixtures
