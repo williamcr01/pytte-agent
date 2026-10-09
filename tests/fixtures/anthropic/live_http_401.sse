@@ -1,0 +1,2 @@
+{"model":"anthropic/claude-opus-5-5","status":401,"retry_after":"","recorded_ms":1791556925124}
+{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":null}

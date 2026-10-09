@@ -1,0 +1,10 @@
+{"model":"openai/gpt-5","status":401,"retry_after":"","recorded_ms":1791556926199}
+{
+  "error": {
+    "message": "Incorrect API key provided: sk-inval****robe. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "code": "invalid_api_key",
+    "param": null
+  },
+  "status": 401
+}

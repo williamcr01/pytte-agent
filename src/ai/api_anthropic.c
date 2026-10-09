@@ -129,10 +129,11 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
         pt_jw_raw(&w, PT_S("{\"type\":\"ephemeral\"}"));
     }
     if (t->model.reasoning) {
-        if (t->compat.thinking_display == PT_YES) {
-            pt_jw_key(&w, "thinking");
-            pt_jw_raw(&w, PT_S("{\"type\":\"adaptive\",\"display\":\"summarized\"}"));
-        }
+        /* Always explicit: on older models omitting it means no thinking. */
+        pt_jw_key(&w, "thinking");
+        pt_jw_raw(&w, t->compat.thinking_display == PT_YES
+                          ? PT_S("{\"type\":\"adaptive\",\"display\":\"summarized\"}")
+                          : PT_S("{\"type\":\"adaptive\"}"));
         pt_jw_key(&w, "output_config");
         pt_jw_obj(&w);
         pt_jw_key(&w, "effort");
@@ -203,8 +204,10 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
                 pt_jw_strz(&w, "tool_result");
                 pt_jw_key(&w, "tool_use_id");
                 pt_jw_str(&w, m->call_id);
-                pt_jw_key(&w, "content");
-                pt_jw_str(&w, m->text);
+                if (m->text.n) {
+                    pt_jw_key(&w, "content");
+                    pt_jw_str(&w, m->text);
+                }
                 if (m->is_error) {
                     pt_jw_key(&w, "is_error");
                     pt_jw_bool(&w, true);

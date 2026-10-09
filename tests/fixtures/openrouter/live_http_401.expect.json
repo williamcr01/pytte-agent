@@ -1,0 +1,1 @@
+{"events":"error","message":{"role":"assistant","api":"openai-completions","provider":"openrouter","model":"openai/gpt-5-mini","content":[],"usage":{"input":0,"output":0},"stop":"error","error":"HTTP 401 Missing Authentication header"},"error":{"class":"fatal","status":401,"retry_after_ms":-1}}
