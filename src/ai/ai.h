@@ -49,6 +49,9 @@ void pt_emit_start(pt_ai_stream *s);
 long pt_emit_block(pt_ai_stream *s, pt_block_kind kind, pt_str id, pt_str name);
 void pt_emit_delta(pt_ai_stream *s, long idx, pt_str delta);
 void pt_emit_signature(pt_ai_stream *s, long idx, pt_str sig);
+/* Replace an open block's content (text, thinking or arguments) with the
+ * server's final version, without an event. */
+void pt_emit_set_content(pt_ai_stream *s, long idx, pt_str content);
 void pt_emit_end(pt_ai_stream *s, long idx); /* emits *_end; no-op when closed */
 bool pt_emit_is_open(const pt_ai_stream *s, long idx);
 void pt_emit_end_all(pt_ai_stream *s);

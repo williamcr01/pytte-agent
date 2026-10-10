@@ -1,0 +1,1 @@
+{"model":"gpt-6-luna","stream":true,"store":false,"max_output_tokens":40,"reasoning":{"summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"Write a long story about a lighthouse keeper."}]}]}

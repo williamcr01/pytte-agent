@@ -239,6 +239,9 @@ typedef enum {
 
 const char *pt_ev_name(pt_ev_kind k);
 
+/* The *_end event's block holds the final content. Usually it is the sum of
+ * the deltas, but a server may revise a stream (OpenAI rewrites reasoning
+ * summaries mid-stream), and then the final version wins. */
 typedef struct pt_ai_event {
     pt_ev_kind kind;
     uint32_t index;   /* block index for block events */

@@ -1,0 +1,5 @@
+{"model":"gpt-6-luna","stream":true,"store":false,"reasoning":{"summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"Use the echo tool to echo 'hi', then tell me what it said."}]}],"tools":[{"type":"function","name":"echo","description":"Echo the given text back. Use it whenever the user asks you to echo something.","parameters":{
+      "type": "object",
+      "properties": {"text": {"type": "string", "description": "The text to echo."}},
+      "required": ["text"]
+    }}]}

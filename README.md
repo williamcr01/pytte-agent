@@ -57,8 +57,8 @@ Every `tests/fixtures/<provider>/*.sse` file is a response (one JSON header
 line, then the raw body). The tests replay each one at several chunk sizes and
 compare the result with its `.expect.json` golden file.
 
-The current fixtures are synthetic, written to match each wire format. To add
-real recordings (costs a little money):
+`live_*` fixtures are real recordings; the rest are synthetic, written to match
+each wire format and cover the edge cases. To record again (costs a little money):
 
 ```sh
 tests/record.sh anthropic openai openrouter

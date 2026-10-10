@@ -1,0 +1,1 @@
+{"model":"gpt-6-luna","stream":true,"store":false,"reasoning":{"summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}

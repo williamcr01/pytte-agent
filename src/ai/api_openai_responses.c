@@ -290,6 +290,26 @@ static void finished(pt_ai_stream *s, state *st, const pt_json *resp, pt_arena *
     pt_emit_done(s);
 }
 
+/* The `field` strings of an item's `list` array, joined by blank lines. */
+static pt_str joined(const pt_json *item, const char *list, const char *field, pt_arena *a)
+{
+    const pt_json *arr = pt_json_get(item, list), *c;
+    pt_buf b;
+    pt_str r;
+    pt_buf_init(&b, a->al);
+    for (c = pt_json_is(arr, PT_J_ARR) ? arr->child : NULL; c; c = c->next) {
+        pt_str t = pt_json_gets(c, field, a);
+        if (!t.n)
+            continue;
+        if (b.n)
+            pt_buf_putz(&b, "\n\n");
+        pt_buf_puts(&b, t);
+    }
+    r = pt_arena_dup(a, pt_buf_str(&b));
+    pt_buf_free(&b);
+    return r;
+}
+
 static int feed(pt_ai_stream *s, void *vst, const pt_sse_event *ev)
 {
     state *st = (state *)vst;
@@ -340,12 +360,21 @@ static int feed(pt_ai_stream *s, void *vst, const pt_sse_event *ev)
         const pt_json *item = pt_json_get(d, "item");
         pt_str it = pt_json_gets(item, "type", sa);
         long i = block_at(s, st, d);
+        /* The finished item is authoritative: the deltas may have been
+         * revised along the way (reasoning summaries are). */
         if (pt_str_eqz(it, "reasoning")) {
+            pt_emit_set_content(s, i, joined(item, "summary", "text", sa));
             pt_emit_signature(s, i, item->raw);
         } else if (pt_str_eqz(it, "function_call")) {
-            if (pt_emit_is_open(s, i) && !m->blocks[i].args.n)
-                pt_emit_delta(s, i, pt_json_gets(item, "arguments", sa));
-        } else if (!pt_str_eqz(it, "message") && item) {
+            const pt_json *args = pt_json_get(item, "arguments");
+            if (pt_json_is(args, PT_J_STR))
+                pt_emit_set_content(s, i, pt_json_str(args, sa));
+        } else if (pt_str_eqz(it, "message")) {
+            pt_str text = joined(item, "content", "text", sa);
+            if (!text.n)
+                text = joined(item, "content", "refusal", sa);
+            pt_emit_set_content(s, i, text);
+        } else if (item) {
             pt_emit_opaque(s, item->raw);
             return 0;
         }

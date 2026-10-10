@@ -1,46 +1,49 @@
-{"model":"anthropic/claude-haiku-5-5","status":200,"retry_after":"","recorded_ms":1791630791543}
+{"model":"anthropic/claude-haiku-5-5","status":200,"retry_after":"","recorded_ms":1791631166481}
 event: message_start
-data: {"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011CftTVdmTrjSzAsG6Bj9Kz","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":24,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":4,"service_tier":"standard","inference_geo":"global"},"diagnostics":null}       }
+data: {"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011CftTyHAkhLcdfAKqRAUpD","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":24,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":8,"service_tier":"standard","inference_geo":"global"},"diagnostics":null}    }
 
 event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}        }
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""} }
 
 event: ping
 data: {"type": "ping"}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I'm planning a full"}   }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I'm thinking through"}             }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":", imm"}    }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" how"}  }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ersive story about a lighth"}       }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to craft a rich, liter"} }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ouse keeper, ai"}              }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ary story"}        }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ming for a substantial length"}    }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" about a lighthouse ke"}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" with rich det"}               }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"eper, consid"}            }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ail."}               }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ering tone and"}  }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}     }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" narrative structure."}        }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQStQUKEAgSGAI4AUIIdGhpbmtpbmcSDJM1Nj7m04WEcKnZahoMA6ziOgMR99poj4ymIjC32dBrs/7quIrAoamwQtingGTEbFHxyMNWvJZnHXNyopcLVDzM8hPcvxER+4thdaQq0gQ6WDC3vtiQLvR2WMjHN9oWtXs5VPR235xG6i6OM/AlWcuxU8iE0kfRqYYqNbf+O126l/fz0EVuYZIGxX66+gcP7YW4AhlXpJ07TdjA9RLBbdVYFTDZTDtxALF+9J6mwLvMN0Yv7hS3j9KQ/t8+8rU5K6jsnPQK6NOQERucxKLJBjbzXNGoj/Httt18gOYcBB0OOuphd/ZOz57IasfxuEIDs4QW/qzSTzy3qq6oUfDPF3tAUVrwhSyawIjfWiasliTDzHhZm6qB3DZcQxrPwiHA7+83yS95wgKG3ZyXK4v8c0+akeQXTtbiMLvlzo/mM0V/dtHRAsR2YlY0Gao+h8tG6la01DQqv2/IR7uuHRI7QVKB64TWeMaaXwzYJzqnPGLXVVPsW5NDB61dHLFxhYODUAwAkJGvmMbnJfwnK2prdpqfbsC0d+TVlaF2OEfIFvaLWekAbqvzfWASUUNhRC0MkF7P7EekHJHhUwEClGZboTpKqDMdymnndH/9lHz9uF5tP048KZD9wYdH/kl9JXbhCGuM/KEqAr+eYcaEx9xxewPu9JbAGfeX2LBNpacMjvVg7YoONNi35n6ES+ASlotVt+EhN2dJZYUpxu++fZ6dQb1RFuZUUtEOoTt+4NMp3kpqZNuauTpmZdmD4RbpXVWOcvFnYhsjJbyT9mPTbZPyynY4LqfzEyAwZ+ejTr4FVYkAHECwYVJWBreP2/hY7s9XyI60RnSDvygbCTAyRLJyN0MsXF9hGiXEzGEyX3EHsnu0DTTnFzSRFMs7GhjhVYsELm8YAQ=="}    }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}           }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQSvAUKEAgSGAI4AUIIdGhpbmtpbmcSDLvZU2D6u0VFiNWt3xoMe6hIgdruyDcbdlhfIjBABEpaW+JNUy87y03GQoMOSt77ortlRiNOnhQGLj0m6CD5xOoiUgUw8KbwyR4Zulsq2QR9+mJJKU2CXhXXPfIrNSUUPWOcbwnHUk6+xDvrlYDyhTKvGkk5Oy2kCXQCSt2ZVheWEVZEvC5Nid1URHkhmH508eI3ZEoGljg7dTLWbu4Vxk8bIr/60hoq3LAyOtOxT4qf3PkOZbbobnsQ7JM7Bpyaude2yJ1KDqnC5psmxVJbSj8EK3hT9ixgltQCMnBouYBhZJV5MjsPRwX3c0duTqNZCJyuOi7JC13O4UuLaN7QDtVQ8m798WmWqYdkAH+8c/xnsF0fCKHkyfZathz7Dtquu7Oh7xvj5zkXvf7vJPjUn95KArmin5DnKj/mBAHf396SLuU9TVjS3v0/5cxRJQjDSw8mQCvjVvua49K4HZ+GQw+hMjgVn2TNsscwgCSvkJNf7wylRdyzWHVPpyXtIMzp+yy0mCXTZGfv0tsZvovzvgy7WNrv9zUNgVybXR3p0emXWI8TjARcRsHF1dl+rPHW5ACm+sKeNBVRgFGh7uElh4iot1cmM0caRxeZyvFsfP65Qtrp6K7InKnZ83HfCF0OgbPPNJB+YK0kmJcwvsi3J7Nc9R0ja65Tdr36u6vYraBiKMJL4JZj8HotQ6Zgd3Vp8p0lYc2PTZhkRts51svl6Eh2PFkPgfC+j6Q5MGYG3y68DN06Y0ykYo19yDhjeqyiYVSk8RTs5f8Ja8jwSNhMCMa6PBECa//a4h97zKJ42YNEMQA4+DTBfJ9Bf4N68ZNKh62/Bu8hk22N7PLFYfF8OaQ5z2QU3NsyY/nLo4Y0m21v+DqCv9tr0Nt4rJ/sHKREZvROnvpiPUtqGAE="}}
 
 event: content_block_stop
-data: {"type":"content_block_stop","index":0      }
+data: {"type":"content_block_stop","index":0             }
 
 event: message_delta
 data: {"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":24,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":40,"output_tokens_details":{"thinking_tokens":40}} }
 
 event: message_stop
-data: {"type":"message_stop"          }
+data: {"type":"message_stop" }
 

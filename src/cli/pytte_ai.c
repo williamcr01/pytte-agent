@@ -64,6 +64,7 @@ typedef struct ui {
     bool events, tty_err;
     bool text_nl; /* last text output ended with a newline */
     bool any_text;
+    bool thinking_out; /* thinking text was printed for the current block */
     pt_buf line;
 } ui;
 
@@ -136,17 +137,20 @@ static void on_event(void *ud, const pt_ai_event *ev)
         return;
     }
     switch (ev->kind) {
-    case PT_EV_THINKING_START:
-        if (u->tty_err)
-            fputs("\x1b[2m", stderr);
-        break;
     case PT_EV_THINKING_DELTA:
+        if (!u->thinking_out && u->tty_err)
+            fputs("\x1b[2m", stderr);
+        u->thinking_out = true;
         out_str(stderr, ev->delta);
         break;
     case PT_EV_THINKING_END:
-        if (m->blocks[ev->index].redacted)
-            fputs("[redacted thinking]", stderr);
-        fputs(u->tty_err ? "\x1b[0m\n" : "\n", stderr);
+        if (m->blocks[ev->index].redacted) {
+            fputs(u->tty_err ? "\x1b[2m[redacted thinking]" : "[redacted thinking]", stderr);
+            u->thinking_out = true;
+        }
+        if (u->thinking_out) /* empty thinking (no summary) prints nothing */
+            fputs(u->tty_err ? "\x1b[0m\n" : "\n", stderr);
+        u->thinking_out = false;
         break;
     case PT_EV_TEXT_DELTA:
         out_str(stdout, ev->delta);

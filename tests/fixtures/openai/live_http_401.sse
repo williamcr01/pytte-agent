@@ -1,0 +1,9 @@
+{"model":"openai/gpt-6-luna","status":401,"retry_after":"","recorded_ms":1791631179752}
+{
+  "error": {
+    "message": "Incorrect API key provided: invalid-*************ding. You can find your API key at https://platform.openai.com/account/api-keys.",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": "invalid_api_key"
+  }
+}

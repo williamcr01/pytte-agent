@@ -216,6 +216,15 @@ void pt_emit_signature(pt_ai_stream *s, long idx, pt_str sig)
     sync_block(s, (uint32_t)idx);
 }
 
+void pt_emit_set_content(pt_ai_stream *s, long idx, pt_str content)
+{
+    if (s->finished || !pt_emit_is_open(s, idx))
+        return;
+    pt_buf_reset(&s->sb[idx].text);
+    pt_buf_puts(&s->sb[idx].text, content);
+    sync_block(s, (uint32_t)idx);
+}
+
 /* Copy a block's accumulated strings into the final arena. */
 static void settle_block(pt_ai_stream *s, uint32_t i)
 {
