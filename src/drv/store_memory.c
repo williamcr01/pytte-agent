@@ -11,11 +11,18 @@ typedef struct live_file {
     pt_buf b;
 } live_file;
 
+typedef struct blob {
+    char hex[65];
+    pt_buf b;
+} blob;
+
 typedef struct mem_store {
     pt_store vt;
     pt_buf log;
     live_file *live;
     uint32_t nlive, cap;
+    blob *blobs;
+    uint32_t nblobs, bcap;
     uint32_t appends, fail_in;
     long keep;
 } mem_store;
@@ -52,11 +59,87 @@ static int m_append(pt_store *vs, const void *p, size_t n, bool sync)
     return 0;
 }
 
-static int m_read_log(pt_store *vs, pt_buf *out)
+static int read_at(pt_str all, uint64_t off, void *p, size_t cap, size_t *got)
+{
+    size_t n = off < all.n ? all.n - (size_t)off : 0;
+    *got = n < cap ? n : cap;
+    if (*got)
+        memcpy(p, all.p + off, *got);
+    return 0;
+}
+
+static int m_read(pt_store *vs, uint64_t off, void *p, size_t cap, size_t *got)
+{
+    return read_at(pt_buf_str(&((mem_store *)vs)->log), off, p, cap, got);
+}
+
+/* Blobs: a pt_buf while written, then kept by name. */
+static void *m_blob_begin(pt_store *vs)
+{
+    pt_buf *b = (pt_buf *)malloc(sizeof *b);
+    if (!b) {
+        fail(vs, "out of memory");
+        return NULL;
+    }
+    pt_buf_init(b, pt_sys_allocator());
+    return b;
+}
+
+static int m_blob_write(pt_store *vs, void *h, const void *p, size_t n)
+{
+    pt_buf *b = (pt_buf *)h;
+    pt_buf_put(b, p, n);
+    return b->oom ? fail(vs, "out of memory") : 0;
+}
+
+static void m_blob_abort(pt_store *vs, void *h)
+{
+    (void)vs;
+    if (h)
+        pt_buf_free((pt_buf *)h);
+    free(h);
+}
+
+static blob *find_blob(mem_store *s, const char *hex)
+{
+    uint32_t i;
+    for (i = 0; i < s->nblobs; i++)
+        if (strcmp(s->blobs[i].hex, hex) == 0)
+            return &s->blobs[i];
+    return NULL;
+}
+
+static int m_blob_commit(pt_store *vs, void *h, const char *hex)
 {
     mem_store *s = (mem_store *)vs;
-    pt_buf_puts(out, pt_buf_str(&s->log));
-    return out->oom ? fail(vs, "out of memory") : 0;
+    blob *nb;
+    if (find_blob(s, hex) || strlen(hex) != 64) {
+        m_blob_abort(vs, h);
+        return find_blob(s, hex) ? 0 : fail(vs, "bad blob name");
+    }
+    if (s->nblobs == s->bcap) {
+        uint32_t ncap = s->bcap ? s->bcap * 2 : 8;
+        blob *n = (blob *)realloc(s->blobs, ncap * sizeof *n);
+        if (!n) {
+            m_blob_abort(vs, h);
+            return fail(vs, "out of memory");
+        }
+        s->blobs = n;
+        s->bcap = ncap;
+    }
+    nb = &s->blobs[s->nblobs++];
+    memcpy(nb->hex, hex, 65);
+    nb->b = *(pt_buf *)h;
+    free(h);
+    return 0;
+}
+
+static int m_blob_read(pt_store *vs, const char *hex, uint64_t off, void *p, size_t cap, size_t *got)
+{
+    blob *b = find_blob((mem_store *)vs, hex);
+    if (!b)
+        return fail(vs, "no such blob");
+    return read_at(pt_buf_str(&b->b), off, p, cap, got);
 }
 
 static int m_truncate(pt_store *vs, uint64_t off)
@@ -131,7 +214,12 @@ pt_store *pt_store_memory_new(void)
     pt_buf_init(&s->log, pt_sys_allocator());
     s->vt.size = m_size;
     s->vt.append = m_append;
-    s->vt.read_log = m_read_log;
+    s->vt.read = m_read;
+    s->vt.blob_begin = m_blob_begin;
+    s->vt.blob_write = m_blob_write;
+    s->vt.blob_commit = m_blob_commit;
+    s->vt.blob_abort = m_blob_abort;
+    s->vt.blob_read = m_blob_read;
     s->vt.truncate = m_truncate;
     s->vt.live_put = m_live_put;
     s->vt.live_del = m_live_del;
@@ -149,6 +237,9 @@ void pt_store_memory_free(pt_store *vs)
     for (i = 0; i < s->nlive; i++)
         pt_buf_free(&s->live[i].b);
     free(s->live);
+    for (i = 0; i < s->nblobs; i++)
+        pt_buf_free(&s->blobs[i].b);
+    free(s->blobs);
     pt_buf_free(&s->log);
     free(s);
 }

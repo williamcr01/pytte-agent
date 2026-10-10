@@ -174,42 +174,78 @@ static void on_live(void *ud, uint32_t task, pt_str bytes)
     pt_load_live((pt_agent *)ud, task, bytes);
 }
 
+/* The log is read in chunks: memory for one chunk and the longest line,
+ * however long the session has grown (open question 7). */
+#define READ_CHUNK 65536
+
 bool pt_rt_recover(pt_rt *rt, char *err, size_t cap)
 {
     pt_store *st = rt->c.store;
-    pt_buf b;
-    size_t start = 0, i;
-    unsigned long line = 1;
-    bool ok = true;
-    pt_buf_init(&b, pt_sys_allocator());
-    if (st->read_log(st, &b) != 0) {
-        snprintf(err, cap, "%s", st->err);
-        pt_buf_free(&b);
+    char *chunk = (char *)malloc(READ_CHUNK);
+    pt_buf line; /* a line that spans chunks */
+    uint64_t size, off = 0, start = 0; /* start: where the current line begins */
+    unsigned long lineno = 1;
+    bool ok = true, torn = false;
+    pt_buf_init(&line, pt_sys_allocator());
+    if (!chunk) {
+        snprintf(err, cap, "out of memory reading the log");
         return false;
     }
-    rt->log_end = b.n;
-    for (i = 0; i < b.n && ok; i++) {
-        pt_load_result r;
-        if (b.p[i] != '\n')
-            continue;
-        r = pt_load_line(rt->a, (pt_str){b.p + start, i - start}, true, i + 1 == b.n);
-        if (r == PT_LOAD_CORRUPT) {
-            snprintf(err, cap, "%s (line %lu, byte %lu)", pt_error(rt->a), line, (unsigned long)start);
+    if (st->size(st, &size) != 0) {
+        snprintf(err, cap, "%s", st->err);
+        ok = false;
+    }
+    while (ok && !torn && off < size) {
+        size_t got, i, from = 0;
+        if (st->read(st, off, chunk, READ_CHUNK, &got) != 0) {
+            snprintf(err, cap, "%s", st->err);
             ok = false;
-        } else if (r == PT_LOAD_TORN) {
             break;
         }
-        start = i + 1;
-        line++;
+        if (!got) { /* shorter than it said */
+            size = off;
+            break;
+        }
+        for (i = 0; i < got && ok; i++) {
+            pt_load_result r;
+            pt_str l;
+            if (chunk[i] != '\n')
+                continue;
+            if (line.n) {
+                pt_buf_put(&line, chunk + from, i - from);
+                l = pt_buf_str(&line);
+            } else {
+                l = (pt_str){chunk + from, i - from};
+            }
+            r = line.oom ? PT_LOAD_CORRUPT : pt_load_line(rt->a, l, true, off + i + 1 == size);
+            pt_buf_reset(&line);
+            if (r == PT_LOAD_CORRUPT) {
+                snprintf(err, cap, "%s (line %lu, byte %llu)", line.oom ? "out of memory" : pt_error(rt->a),
+                         lineno, (unsigned long long)start);
+                ok = false;
+            } else if (r == PT_LOAD_TORN) {
+                torn = true;
+                break;
+            } else {
+                start = off + i + 1;
+                from = i + 1;
+                lineno++;
+            }
+        }
+        if (ok && !torn && from < got)
+            pt_buf_put(&line, chunk + from, got - from);
+        off += got;
     }
-    if (ok && start < b.n) { /* a torn last line: the commit never happened */
+    free(chunk);
+    pt_buf_free(&line);
+    rt->log_end = size;
+    if (ok && start < size) { /* a torn last line: the commit never happened */
         if (st->truncate(st, start) != 0) {
             snprintf(err, cap, "%s", st->err);
             ok = false;
         }
         rt->log_end = start;
     }
-    pt_buf_free(&b);
     if (ok && st->live_list(st, on_live, rt->a) != 0) {
         snprintf(err, cap, "%s", st->err);
         ok = false;

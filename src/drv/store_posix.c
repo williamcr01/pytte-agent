@@ -2,7 +2,8 @@
  *
  *   <dir>/LOCK        flock'd by the owner; says who holds it
  *   <dir>/log.jsonl   the log, appended with O_APPEND, fdatasync per commit
- *   <dir>/live/       t<task>.json snapshots, replaced with rename */
+ *   <dir>/live/       t<task>.json snapshots, replaced with rename
+ *   <dir>/blobs/      ab/cdef... (SHA-256), written to blobs/tmp first */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE /* flock */
 #include "drv/drv.h"
@@ -87,35 +88,127 @@ static int p_append(pt_store *vs, const void *p, size_t n, bool sync)
     return 0;
 }
 
-static int p_read_log(pt_store *vs, pt_buf *out)
+static int read_at(int fd, uint64_t off, void *p, size_t cap, size_t *got)
+{
+    ssize_t r;
+    do
+        r = pread(fd, p, cap, (off_t)off);
+    while (r < 0 && errno == EINTR);
+    *got = r > 0 ? (size_t)r : 0;
+    return r < 0 ? -1 : 0;
+}
+
+static int p_read(pt_store *vs, uint64_t off, void *p, size_t cap, size_t *got)
 {
     posix_store *s = (posix_store *)vs;
-    char tmp[8192];
-    struct stat st;
-    off_t off = 0;
-    if (fstat(s->log_fd, &st) != 0)
-        return fail(vs, "cannot stat", "log.jsonl");
-    if (st.st_size < 0 || (uint64_t)st.st_size > SIZE_MAX ||
-        !pt_buf_reserve(out, (size_t)st.st_size)) {
-        snprintf(vs->err, sizeof vs->err, "out of memory reading log.jsonl");
-        return -1;
+    return read_at(s->log_fd, off, p, cap, got) == 0 ? 0 : fail(vs, "cannot read", "log.jsonl");
+}
+
+/* ---- blobs ---- */
+
+typedef struct blob_tmp {
+    int fd;
+    char path[4300]; /* the store's directory plus blobs/tmp/<16 hex> */
+} blob_tmp;
+
+static void blob_path(const posix_store *s, char *out, size_t cap, const char *hex)
+{
+    snprintf(out, cap, "%s/blobs/%.2s/%s", s->dir, hex, hex + 2);
+}
+
+static void *p_blob_begin(pt_store *vs)
+{
+    posix_store *s = (posix_store *)vs;
+    blob_tmp *t = (blob_tmp *)calloc(1, sizeof *t);
+    unsigned char r[8];
+    char dir[4200];
+    if (!t) {
+        snprintf(vs->err, sizeof vs->err, "out of memory");
+        return NULL;
     }
-    for (;;) {
-        ssize_t r = pread(s->log_fd, tmp, sizeof tmp, off);
-        if (r < 0 && errno == EINTR)
+    path(s, dir, sizeof dir, "blobs");
+    mkdir(dir, 0700);
+    path(s, dir, sizeof dir, "blobs/tmp");
+    mkdir(dir, 0700);
+    pt_sys_random(NULL, r, sizeof r);
+    snprintf(t->path, sizeof t->path, "%s/%02x%02x%02x%02x%02x%02x%02x%02x", dir, r[0], r[1], r[2], r[3], r[4],
+             r[5], r[6], r[7]);
+    t->fd = open(t->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (t->fd < 0) {
+        fail(vs, "cannot create", t->path);
+        free(t);
+        return NULL;
+    }
+    return t;
+}
+
+static int p_blob_write(pt_store *vs, void *h, const void *p, size_t n)
+{
+    blob_tmp *t = (blob_tmp *)h;
+    const char *c = (const char *)p;
+    while (n) {
+        ssize_t w = write(t->fd, c, n);
+        if (w < 0 && errno == EINTR)
             continue;
-        if (r < 0)
-            return fail(vs, "cannot read", "log.jsonl");
-        if (r == 0)
-            break;
-        pt_buf_put(out, tmp, (size_t)r);
-        off += r;
-    }
-    if (out->oom) {
-        snprintf(vs->err, sizeof vs->err, "out of memory reading log.jsonl");
-        return -1;
+        if (w <= 0)
+            return fail(vs, "cannot write", t->path);
+        c += w;
+        n -= (size_t)w;
     }
     return 0;
+}
+
+static void p_blob_abort(pt_store *vs, void *h)
+{
+    blob_tmp *t = (blob_tmp *)h;
+    (void)vs;
+    if (!t)
+        return;
+    close(t->fd);
+    unlink(t->path);
+    free(t);
+}
+
+static int p_blob_commit(pt_store *vs, void *h, const char *hex)
+{
+    posix_store *s = (posix_store *)vs;
+    blob_tmp *t = (blob_tmp *)h;
+    char dst[4200], dir[4200];
+    struct stat st;
+    blob_path(s, dst, sizeof dst, hex);
+    snprintf(dir, sizeof dir, "%s/blobs/%.2s", s->dir, hex);
+    if (stat(dst, &st) == 0) { /* already there: the same bytes */
+        p_blob_abort(vs, h);
+        return 0;
+    }
+    if (sync_fd(t->fd) != 0 || close(t->fd) != 0) {
+        t->fd = -1;
+        fail(vs, "cannot sync", t->path);
+        unlink(t->path);
+        free(t);
+        return -1;
+    }
+    if ((mkdir(dir, 0700) != 0 && errno != EEXIST) || rename(t->path, dst) != 0 || sync_dir(dir) != 0) {
+        fail(vs, "cannot store", dst);
+        unlink(t->path);
+        free(t);
+        return -1;
+    }
+    free(t);
+    return 0;
+}
+
+static int p_blob_read(pt_store *vs, const char *hex, uint64_t off, void *p, size_t cap, size_t *got)
+{
+    posix_store *s = (posix_store *)vs;
+    char src[4200];
+    int fd, r;
+    blob_path(s, src, sizeof src, hex);
+    if ((fd = open(src, O_RDONLY | O_CLOEXEC)) < 0)
+        return fail(vs, "cannot open", src);
+    r = read_at(fd, off, p, cap, got);
+    close(fd);
+    return r == 0 ? 0 : fail(vs, "cannot read", src);
 }
 
 static int p_truncate(pt_store *vs, uint64_t off)
@@ -265,7 +358,12 @@ pt_store *pt_store_posix_open(const char *dir, bool create, char *err, size_t ca
     }
     s->vt.size = p_size;
     s->vt.append = p_append;
-    s->vt.read_log = p_read_log;
+    s->vt.read = p_read;
+    s->vt.blob_begin = p_blob_begin;
+    s->vt.blob_write = p_blob_write;
+    s->vt.blob_commit = p_blob_commit;
+    s->vt.blob_abort = p_blob_abort;
+    s->vt.blob_read = p_blob_read;
     s->vt.truncate = p_truncate;
     s->vt.live_put = p_live_put;
     s->vt.live_del = p_live_del;

@@ -100,12 +100,24 @@ struct pt_store {
     /* One write at the end of the log; fsync when sync. A failure may leave
      * part of the bytes behind (the next open repairs the tail). */
     int (*append)(pt_store *s, const void *p, size_t n, bool sync);
-    int (*read_log)(pt_store *s, pt_buf *out);
+    /* Up to cap bytes of the log from off; *got = 0 at its end. Recovery
+     * reads in chunks, so a long log needs no memory of its size. */
+    int (*read)(pt_store *s, uint64_t off, void *p, size_t cap, size_t *got);
     int (*truncate)(pt_store *s, uint64_t off);
     /* Live files: best effort, replaced atomically. */
     int (*live_put)(pt_store *s, uint32_t task, const void *p, size_t n);
     int (*live_del)(pt_store *s, uint32_t task);
     int (*live_list)(pt_store *s, void (*fn)(void *ud, uint32_t task, pt_str bytes), void *ud);
+    /* Blobs (section 6.5): immutable, named by the SHA-256 of their bytes
+     * (64 hex digits). Written in pieces, then committed: durable before
+     * any record names it. A crash before that leaves only a temporary
+     * file. NULL blob_begin: the store keeps no blobs. */
+    void *(*blob_begin)(pt_store *s);
+    int (*blob_write)(pt_store *s, void *h, const void *p, size_t n);
+    int (*blob_commit)(pt_store *s, void *h, const char *hex); /* releases h */
+    void (*blob_abort)(pt_store *s, void *h);
+    /* Up to cap bytes from off; *got = 0 at its end. */
+    int (*blob_read)(pt_store *s, const char *hex, uint64_t off, void *p, size_t cap, size_t *got);
     void (*close)(pt_store *s);
     char err[512];
 };

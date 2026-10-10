@@ -81,10 +81,10 @@ static int h_append(pt_store *vs, const void *p, size_t n, bool sync)
     return rc;
 }
 
-static int h_read(pt_store *vs, pt_buf *out)
+static int h_read(pt_store *vs, uint64_t off, void *p, size_t cap, size_t *got)
 {
     held_store *s = (held_store *)vs;
-    return s->inner->read_log(s->inner, out);
+    return s->inner->read(s->inner, off, p, cap, got);
 }
 static int h_truncate(pt_store *vs, uint64_t off)
 {
@@ -157,7 +157,7 @@ static void test_runtime(bool fail, bool close_early)
     store.first = true;
     store.vt.size = h_size;
     store.vt.append = h_append;
-    store.vt.read_log = h_read;
+    store.vt.read = h_read;
     store.vt.truncate = h_truncate;
     store.vt.live_put = h_live_put;
     store.vt.live_del = h_live_del;

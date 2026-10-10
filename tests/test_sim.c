@@ -711,7 +711,7 @@ static int in_size(pt_store *s, uint64_t *out)
         return r;                                                               \
     }
 FWD(append, (pt_store * s, const void *p, size_t n, bool sync), (x->inner, p, n, sync))
-FWD(read_log, (pt_store * s, pt_buf *out), (x->inner, out))
+FWD(read, (pt_store * s, uint64_t off, void *p, size_t cap, size_t *got), (x->inner, off, p, cap, got))
 FWD(truncate, (pt_store * s, uint64_t off), (x->inner, off))
 FWD(live_put, (pt_store * s, uint32_t t, const void *p, size_t n), (x->inner, t, p, n))
 FWD(live_del, (pt_store * s, uint32_t t), (x->inner, t))
@@ -741,7 +741,7 @@ static void test_another_writer(void)
         x.at = at;
         x.vt.size = in_size;
         x.vt.append = in_append;
-        x.vt.read_log = in_read_log;
+        x.vt.read = in_read;
         x.vt.truncate = in_truncate;
         x.vt.live_put = in_live_put;
         x.vt.live_del = in_live_del;
