@@ -80,3 +80,14 @@ bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_a
     out->compat = merge(m ? &m->compat : &none, &p->compat, &out->api->defaults);
     return !a->oom;
 }
+
+bool pt_ai_retarget(pt_ai_target *t, pt_str api_id)
+{
+    const pt_api_vt *api = pt_ai_api(api_id);
+    if (!api)
+        return false;
+    t->api = api;
+    t->model.api = api->id;
+    t->compat = merge(&t->model.compat, &t->provider->compat, &api->defaults);
+    return true;
+}

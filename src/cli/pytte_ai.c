@@ -27,10 +27,12 @@ static const char usage[] =
     "  --turns N           answer tool calls with canned results, up to N requests\n"
     "  --script FILE       faux provider script (tests/faux/*.json)\n"
     "  --base-url URL      talk to another server (a proxy, a local test server)\n"
+    "  --api ID            use another API: anthropic-messages, openai-completions,\n"
+    "                      openai-responses\n"
     "  --list              list known providers and models\n";
 
 typedef struct opts {
-    const char *model, *prompt, *system, *tools, *record, *script, *temperature, *base_url;
+    const char *model, *prompt, *system, *tools, *record, *script, *temperature, *base_url, *api;
     pt_reasoning reasoning;
     uint32_t max_tokens;
     long turns;
@@ -336,6 +338,8 @@ static void parse_args(int argc, char **argv, opts *o)
             o->record = v;
         } else if (TAKES("--script")) {
             o->script = v;
+        } else if (TAKES("--api")) {
+            o->api = v;
         } else if (TAKES("--base-url")) {
             o->base_url = v;
         } else if (TAKES("--temperature")) {
@@ -481,6 +485,8 @@ int main(int argc, char **argv)
     pt_arena_init(&session, al, 0);
     if (!pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(o.model), &t, &session, &why))
         die(why, o.model);
+    if (o.api && !pt_ai_retarget(&t, pt_strz(o.api)))
+        die("unknown API", o.api);
     if (o.base_url) {
         provider = *t.provider;
         provider.base_url = o.base_url;

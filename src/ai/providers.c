@@ -19,14 +19,18 @@ static const pt_provider providers[] = {
         .id = "openai",
         .name = "OpenAI",
         .base_url = "https://api.openai.com/v1",
-        .api = "openai-completions",
+        .api = "openai-responses",
         .key_env = {"OPENAI_API_KEY", NULL},
         .auth = PT_AUTH_BEARER,
+        /* thinking_display: reasoning summaries on the Responses API; the
+         * rest applies when OpenAI is used through Chat Completions. */
         .compat = {.max_tokens_field = PT_MAXTOK_MAX_COMPLETION_TOKENS,
                    .reasoning_param = PT_RPARAM_EFFORT,
-                   .reasoning_delta = PT_NO},
+                   .reasoning_delta = PT_NO,
+                   .thinking_display = PT_YES},
         .default_model = "gpt-5",
         .context_window = 128000,
+        .reasoning = true,
     },
     {
         .id = "openrouter",
@@ -97,7 +101,8 @@ const pt_ai_catalog *pt_ai_builtin_catalog(void)
     return &builtin;
 }
 
-static const pt_api_vt *const apis[] = {&pt_api_anthropic, &pt_api_openai, &pt_api_faux};
+static const pt_api_vt *const apis[] = {&pt_api_anthropic, &pt_api_openai, &pt_api_openai_responses,
+                                        &pt_api_faux};
 
 const pt_api_vt *pt_ai_api(pt_str id)
 {

@@ -7,7 +7,8 @@
  *
  * Fixture format: one JSON header line, then the raw response body.
  *   {"model": "anthropic/claude-opus-5-5", "status": 200, "retry_after": "",
- *    "expect": {"stop": "stop", "class": "none", "blocks": ["thinking", "text"]}} */
+ *    "expect": {"stop": "stop", "class": "none", "blocks": ["thinking", "text"]}}
+ * An optional "api" names the API when it is not the provider's default. */
 #define _POSIX_C_SOURCE 200809L
 #include <dirent.h>
 
@@ -207,6 +208,10 @@ static void run_fixture(const char *dir, const char *file)
         free(data);
         pt_arena_free(&a);
         return;
+    }
+    if (pt_json_get(meta, "api") && !pt_ai_retarget(&t, pt_json_gets(meta, "api", &a))) {
+        fprintf(stderr, "%s: unknown api\n", path);
+        CHECK(0);
     }
     pt_buf_init(&first, T_AL);
     for (i = 0; i < sizeof chunks / sizeof chunks[0]; i++) {

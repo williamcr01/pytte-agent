@@ -33,6 +33,7 @@ struct pt_api_vt {
 
 extern const pt_api_vt pt_api_anthropic;
 extern const pt_api_vt pt_api_openai;
+extern const pt_api_vt pt_api_openai_responses;
 extern const pt_api_vt pt_api_faux;
 
 /* ---- what APIs use while streaming ---- */
@@ -71,6 +72,12 @@ void pt_req_header(pt_http_req *r, const char *name, const char *value);
 void pt_req_extra_headers(pt_http_req *r, const pt_ai_target *t, const pt_ai_opts *o);
 /* Finish the body; false when out of memory. */
 bool pt_req_body(pt_http_req *r, pt_buf *b, pt_arena *a);
+
+/* OpenAI's {"error":{"message","type","code"}} errors, shared by both of
+ * its APIs (and OpenRouter); status 0 when there is no HTTP status. */
+void pt_openai_error(const pt_json *err, pt_str fallback, int status, pt_ai_error *out, pt_arena *a);
+/* OpenAI's reasoning effort names. */
+const char *pt_openai_effort(pt_reasoning r);
 
 /* Shared error classification: retryable statuses, overflow phrases. */
 void pt_classify_status(int status, pt_str message, pt_ai_error *out);

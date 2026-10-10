@@ -1,0 +1,1 @@
+{"events":"error","message":{"role":"assistant","api":"openai-responses","provider":"openai","model":"gpt-5","content":[],"usage":{"input":0,"output":0},"stop":"error","error":"HTTP 400 context_length_exceeded: Your input exceeds the context window of this model. Please adjust your input and try again."},"error":{"class":"overflow","status":400,"retry_after_ms":-1}}

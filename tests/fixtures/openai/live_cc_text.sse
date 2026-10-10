@@ -1,4 +1,4 @@
-{"model":"openai/gpt-6-luna","status":200,"retry_after":"","recorded_ms":1791630792661}
+{"model":"openai/gpt-6-luna","status":200,"retry_after":"","recorded_ms":1791630792661,"api":"openai-completions"}
 data: {"id":"chatcmpl-EXPIlgoPfMu18kfAAz9YzJac23aBW","object":"chat.completion.chunk","created":1791630791,"model":"gpt-6-luna","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"role":"assistant","content":"","refusal":null},"finish_reason":null}],"usage":null,"obfuscation":""}
 
 data: {"id":"chatcmpl-EXPIlgoPfMu18kfAAz9YzJac23aBW","object":"chat.completion.chunk","created":1791630791,"model":"gpt-6-luna","service_tier":"default","system_fingerprint":null,"choices":[{"index":0,"delta":{"content":"450"},"finish_reason":null}],"usage":null,"obfuscation":"FUc4LgcNx3QRza2"}

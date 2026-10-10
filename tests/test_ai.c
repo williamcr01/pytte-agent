@@ -227,6 +227,8 @@ static void test_anthropic_folding_and_bad_args(void)
 static void test_openai_request(void)
 {
     pt_ai_target t = target("openai/gpt-5");
+    CHECK(strcmp(pt_ai_api_id(t.api), "openai-responses") == 0);
+    CHECK(pt_ai_retarget(&t, PT_S("openai-completions")));
     pt_ai_context c = conversation();
     pt_ai_opts o;
     pt_credentials cred = {PT_S("sk-test")};
@@ -265,6 +267,69 @@ static void test_openai_request(void)
     CHECK(header(&r, "X-Title") != NULL);
     CHECK_STR(jget(b, "reasoning.effort"), "high");
     CHECK(pt_json_get(b, "max_tokens") == NULL); /* unknown model: omitted */
+}
+
+static void test_responses_request(void)
+{
+    /* history from the same API: the reasoning item goes back whole */
+    pt_ai_target t = target("openai/gpt-5");
+    pt_ai_context c = conversation();
+    pt_ai_opts o;
+    pt_credentials cred = {PT_S("sk-test")};
+    pt_http_req r;
+    pt_json *b;
+    pt_str item = PT_S("{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ENC\"}");
+    memset(&o, 0, sizeof o);
+    CHECK(strcmp(pt_ai_api_id(t.api), "openai-responses") == 0);
+    conv[2].api = PT_S("openai-responses");
+    conv[2].provider = PT_S("openai");
+    blocks_a[0].signature = item;
+    blocks_a[2].id = PT_S("call_1");
+    conv[3].call_id = PT_S("call_1");
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK(strcmp(r.url, "https://api.openai.com/v1/responses") == 0);
+    CHECK(header(&r, "authorization") && strcmp(header(&r, "authorization"), "Bearer sk-test") == 0);
+    b = body_of(&r);
+    CHECK_STR(jget(b, "store"), "false");
+    CHECK_STR(jget(b, "instructions"), "You are pytte.");
+    CHECK_STR(jget(b, "max_output_tokens"), "128000");
+    CHECK_STR(jget(b, "reasoning.summary"), "auto");
+    CHECK(pt_json_get(pt_json_get(b, "reasoning"), "effort") == NULL); /* server default */
+    CHECK_STR(jget(b, "include.0"), "reasoning.encrypted_content");
+    CHECK_STR(jget(b, "input.0.role"), "user");
+    CHECK_STR(jget(b, "input.0.content.0.type"), "input_text");
+    CHECK_STR(jget(b, "input.1"), "{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ENC\"}");
+    CHECK_STR(jget(b, "input.2.type"), "message");
+    CHECK_STR(jget(b, "input.2.content.0.type"), "output_text");
+    CHECK_STR(jget(b, "input.2.content.0.text"), "Calling echo.");
+    CHECK_STR(jget(b, "input.3.type"), "function_call");
+    CHECK_STR(jget(b, "input.3.call_id"), "call_1");
+    CHECK_STR(jget(b, "input.3.arguments"), "{\"text\": \"hi\"}");
+    CHECK_STR(jget(b, "input.4.type"), "function_call_output");
+    CHECK_STR(jget(b, "input.4.output"), "hi");
+    CHECK_STR(jget(b, "input.5.role"), "developer");
+    CHECK_STR(jget(b, "input.6.content.0.text"), "thanks");
+    CHECK_STR(jget(b, "tools.0.type"), "function");
+    CHECK_STR(jget(b, "tools.0.name"), "echo");
+    CHECK_STR(jget(b, "tools.0.parameters.type"), "object");
+
+    o.reasoning = PT_REASON_HIGH;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "reasoning.effort"), "high");
+
+    /* history from Anthropic: its thinking becomes text, signatures stay home */
+    c = conversation();
+    o.reasoning = PT_REASON_DEFAULT;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "input.1.content.0.text"), "<thinking>\nUse echo.\n</thinking>");
+    CHECK(!pt_str_contains(r.body, PT_S("SIG")));
+
+    /* a model without reasoning gets no reasoning fields */
+    t = target("openai/gpt-4.1");
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    b = body_of(&r);
+    CHECK(pt_json_get(b, "reasoning") == NULL && pt_json_get(b, "include") == NULL);
 }
 
 static void test_tool_ids(void)
@@ -531,6 +596,7 @@ int main(void)
     RUN(test_anthropic_request);
     RUN(test_anthropic_folding_and_bad_args);
     RUN(test_openai_request);
+    RUN(test_responses_request);
     RUN(test_tool_ids);
     RUN(test_cross_provider_view);
     RUN(test_faux);

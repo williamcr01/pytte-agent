@@ -41,8 +41,10 @@ Text goes to stdout; thinking, tool calls and a usage summary go to stderr.
 include/pytte_base.h   arena, strings, buffers, JSON, SSE
 include/pytte_ai.h     the AI layer: messages, providers, models, streams
 src/base/              portable C99: no stdio, no malloc, no floating point
-src/ai/                APIs (anthropic-messages, openai-completions, faux),
-                       providers and models as data, cross-provider transforms
+src/ai/                APIs (anthropic-messages, openai-responses for OpenAI,
+                       openai-completions for OpenRouter and other compatible
+                       servers, faux), providers and models as data,
+                       cross-provider transforms
 src/drv/               host drivers: libc, curl HTTP, faux HTTP
 src/cli/pytte_ai.c     the pytte-ai CLI
 tests/fixtures/        response streams per provider, with golden results

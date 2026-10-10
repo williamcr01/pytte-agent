@@ -4,7 +4,7 @@
 
 /* ---- request ---- */
 
-static const char *effort(pt_reasoning r)
+const char *pt_openai_effort(pt_reasoning r)
 {
     switch (r) {
     case PT_REASON_OFF: return "none";
@@ -115,7 +115,7 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     if (o->reasoning != PT_REASON_DEFAULT) {
         if (t->compat.reasoning_param == PT_RPARAM_EFFORT) {
             pt_jw_key(&w, "reasoning_effort");
-            pt_jw_strz(&w, effort(o->reasoning));
+            pt_jw_strz(&w, pt_openai_effort(o->reasoning));
         } else if (t->compat.reasoning_param == PT_RPARAM_OPENROUTER) {
             pt_jw_key(&w, "reasoning");
             pt_jw_obj(&w);
@@ -126,7 +126,7 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
                 pt_jw_key(&w, "effort");
                 pt_jw_strz(&w, o->reasoning == PT_REASON_XHIGH || o->reasoning == PT_REASON_MAX
                                    ? "high"
-                                   : effort(o->reasoning));
+                                   : pt_openai_effort(o->reasoning));
             }
             pt_jw_obj_end(&w);
         }
@@ -296,8 +296,7 @@ static void read_usage(pt_msg *m, const pt_json *u)
 
 /* {"error":{"message","type","code"}}: OpenAI's errors; OpenRouter sends
  * the same shape with a numeric code, also inside the stream. */
-static void read_error(const pt_json *err, pt_str fallback, int status, pt_ai_error *out,
-                       pt_arena *a)
+void pt_openai_error(const pt_json *err, pt_str fallback, int status, pt_ai_error *out, pt_arena *a)
 {
     pt_str msg = pt_json_gets(err, "message", a);
     const pt_json *code = pt_json_get(err, "code");
@@ -374,7 +373,7 @@ static int feed(pt_ai_stream *s, void *vst, const pt_sse_event *ev)
         return 0;
     if (pt_json_get(d, "error")) {
         pt_ai_error e;
-        read_error(pt_json_get(d, "error"), ev->data, 0, &e, sa);
+        pt_openai_error(pt_json_get(d, "error"), ev->data, 0, &e, sa);
         pt_emit_fail(s, e.cls, e.message);
         return 1;
     }
@@ -452,7 +451,7 @@ static void finish(pt_ai_stream *s, void *vst)
 static void classify_error(int status, pt_str body, pt_ai_error *out, pt_arena *a)
 {
     pt_json *d = pt_json_parse(body, a, NULL);
-    read_error(pt_json_get(d, "error"), body, status, out, a);
+    pt_openai_error(pt_json_get(d, "error"), body, status, out, a);
 }
 
 const pt_api_vt pt_api_openai = {

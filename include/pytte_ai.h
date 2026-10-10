@@ -156,6 +156,9 @@ typedef struct pt_ai_target {
  * Returns false with *why set when the provider or its API is unknown. */
 bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_arena *a,
                    const char **why);
+/* Talk to the target through another API (for example OpenAI through Chat
+ * Completions). False when the API is unknown. */
+bool pt_ai_retarget(pt_ai_target *t, pt_str api_id);
 
 /* ---- auth ------------------------------------------------------------------ */
 
