@@ -86,6 +86,8 @@ void tui_set_ambiguous_wide(bool wide)
     amb_wide = wide;
 }
 
+bool tui_ambiguous_wide(void) { return amb_wide; }
+
 /* bits: best (0-1), max (2-3), class (4-5), pictographic (6), min (7-8),
  * East Asian ambiguous (9) */
 static unsigned props(uint32_t cp)
@@ -163,6 +165,11 @@ size_t tui_prev_cluster(pt_str s, size_t i)
     size_t start = i, prev;
     if (i == 0)
         return 0;
+    /* Two adjacent ASCII bytes cannot hide a Unicode joiner before the
+     * last character. Keep the full forward walk for mixed clusters. */
+    if ((unsigned char)s.p[i - 1] < 0x80 &&
+        ((unsigned char)s.p[i - 1] < 0x20 || i < 2 || (unsigned char)s.p[i - 2] < 0x80))
+        return i - 1;
     /* From the start of the line, which is always a boundary. */
     while (start > 0 && s.p[start - 1] != '\n')
         start--;

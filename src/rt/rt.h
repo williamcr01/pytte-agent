@@ -27,6 +27,11 @@ pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a);
  * stays the caller's to free (after this). */
 void pt_rt_free(pt_rt *rt);
 pt_http_driver *pt_rt_http(const pt_rt *rt);
+/* Borrow an idle worker to perform durable writes/live snapshots. I/O
+ * completion and every agent callback remain on the calling thread.
+ * Configure between steps, before scheduling effects. The worker must
+ * outlive rt; free/close finish any borrowed in-flight effect first. */
+void pt_rt_use_worker(pt_rt *rt, pt_worker *worker);
 
 /* Recovery (section 6.4): read the log into the agent, cut a torn tail,
  * hand over live files. False with err when the log is corrupt. */

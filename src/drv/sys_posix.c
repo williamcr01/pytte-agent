@@ -2,10 +2,12 @@
 #include "drv/drv.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -30,11 +32,11 @@ pt_allocator pt_sys_allocator(void)
 
 int pt_sys_wait(pt_waitfd *fds, unsigned n, int timeout_ms)
 {
-    struct pollfd p[8];
+    struct pollfd p[32];
     unsigned i;
     int r;
-    if (n > 8)
-        n = 8;
+    if (n > 32)
+        n = 32;
     for (i = 0; i < n; i++) {
         p[i].fd = fds[i].fd;
         p[i].events = POLLIN;
@@ -73,39 +75,70 @@ const char *pt_sys_env(void *ud, const char *name)
 
 char *pt_sys_read_file(const char *path, size_t *n)
 {
-    FILE *f = fopen(path, "rb");
+    int fd = open(path, O_RDONLY);
+    struct stat st;
     char *p = NULL;
     size_t len = 0, cap = 0;
-    if (!f)
+    int error;
+    if (fd < 0)
         return NULL;
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0) {
+        if ((uint64_t)st.st_size >= SIZE_MAX) {
+            errno = EOVERFLOW;
+            goto fail;
+        }
+        cap = (size_t)st.st_size;
+    }
+    p = (char *)malloc(cap + 1);
+    if (!p) {
+        errno = ENOMEM;
+        goto fail;
+    }
     for (;;) {
-        size_t got;
-        if (cap - len < 4096) {
+        ssize_t got;
+        if (len == cap) {
+            char c;
             char *np;
-            cap = cap ? cap * 2 : 8192;
-            np = (char *)realloc(p, cap + 1);
+            size_t next;
+            /* Probe EOF before growing an exactly-sized regular file. */
+            do got = read(fd, &c, 1); while (got < 0 && errno == EINTR);
+            if (got < 0)
+                goto fail;
+            if (!got)
+                break;
+            if (cap > (SIZE_MAX - 1) / 2) {
+                errno = EOVERFLOW;
+                goto fail;
+            }
+            next = cap < 4096 ? 4096 : cap * 2;
+            np = (char *)realloc(p, next + 1);
             if (!np) {
-                free(p);
-                fclose(f);
                 errno = ENOMEM;
-                return NULL;
+                goto fail;
             }
             p = np;
+            cap = next;
+            p[len++] = c;
         }
-        got = fread(p + len, 1, cap - len, f);
-        len += got;
+        /* Bound each syscall; regular and streaming files share this path. */
+        do got = read(fd, p + len, cap - len > 65536 ? 65536 : cap - len);
+        while (got < 0 && errno == EINTR);
+        if (got < 0)
+            goto fail;
+        len += (size_t)got;
         if (got == 0)
             break;
     }
-    if (ferror(f)) {
-        free(p);
-        fclose(f);
-        return NULL;
-    }
-    fclose(f);
+    close(fd);
     p[len] = 0;
     *n = len;
     return p;
+fail:
+    error = errno;
+    free(p);
+    close(fd);
+    errno = error;
+    return NULL;
 }
 
 bool pt_sys_write_file(const char *path, const void *p, size_t n)

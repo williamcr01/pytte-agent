@@ -231,31 +231,42 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
 
 bool cli_config_save(cli_config *c, int k, const char *v, char *err, size_t cap)
 {
+    /* an environment variable, a flag or the project file still wins */
+    if (strcmp(c->src[k], "default") == 0 || strcmp(c->src[k], "user") == 0)
+        cli_config_set(c, k, v, "user");
+    return cli_config_write(c->user_path, k, v, err, cap);
+}
+
+bool cli_config_write(const char *path, int k, const char *v, char *err, size_t cap)
+{
     size_t n = 0;
     char *text;
     pt_buf value, out;
     bool ok;
-    /* an environment variable, a flag or the project file still wins */
-    if (strcmp(c->src[k], "default") == 0 || strcmp(c->src[k], "user") == 0)
-        cli_config_set(c, k, v, "user");
     errno = 0;
-    text = pt_sys_read_file(c->user_path, &n);
+    text = pt_sys_read_file(path, &n);
     if (!text && errno != ENOENT) {
-        snprintf(err, cap, "cannot read %s: %s", c->user_path, strerror(errno));
+        snprintf(err, cap, "cannot read %s: %s", path, strerror(errno));
         return false;
     }
     pt_buf_init(&value, pt_sys_allocator());
     pt_buf_init(&out, pt_sys_allocator());
     pt_json_quote(&value, pt_strz(v));
+    if (value.oom) {
+        snprintf(err, cap, "out of memory saving setting");
+        ok = false;
+        goto done;
+    }
     ok = cli_json_set(text ? (pt_str){text, n} : PT_S("{}\n"), keys[k], pt_buf_str(&value), &out, err,
                       cap);
     if (!ok) { /* never overwrite a file that does not parse */
         char why[256];
         snprintf(why, sizeof why, "%s", err);
-        snprintf(err, cap, "not saved, %s: %s", c->user_path, why);
+        snprintf(err, cap, "not saved, %s: %s", path, why);
     } else {
-        ok = cli_write_atomic(c->user_path, pt_buf_str(&out), err, cap);
+        ok = cli_write_atomic(path, pt_buf_str(&out), err, cap);
     }
+done:
     pt_buf_free(&value);
     pt_buf_free(&out);
     free(text);

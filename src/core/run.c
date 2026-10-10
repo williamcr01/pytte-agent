@@ -167,7 +167,7 @@ static bool start_request(pt_agent *a, task *t)
     memset(rl, 0, sizeof *rl);
     rl->agent = a;
     rl->task = t->id;
-    pt_arena_init(&rl->a, a->al, 65536);
+    pt_arena_init(&rl->a, a->al, 4096);
     pt_buf_init(&rl->snap, a->al);
     t->live = rl;
     if (!resolve(a, t->model, &rl->target, &rl->a))

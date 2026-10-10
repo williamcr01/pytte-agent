@@ -86,6 +86,7 @@ struct pt_agent {
     pt_arena perm;    /* config strings, session header, claims */
     pt_arena epoch;   /* entries */
     pt_arena scratch; /* one step */
+    pt_arena objects; /* task/input structs, until the agent is freed */
 
     entry *entries;
     uint32_t nentries, ecap;

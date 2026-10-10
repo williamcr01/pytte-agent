@@ -1,8 +1,8 @@
 /* The TUI (section 16.2): the event loop, the display model built from the
  * agent's events, the band's contents, and the slash commands.
  *
- * Everything runs in one thread. The agent's event callback only updates
- * the display model; keys and commands call into the agent from the loop.
+ * Agent callbacks, keys and display updates run on the event-loop thread.
+ * Session setup/recovery and durable writes use a bounded I/O worker.
  * Text goes to the scrollback once and is never touched again (R5): a
  * streaming answer is committed one complete source line at a time, and
  * the unfinished line is shown in the band as the live tail. */
@@ -72,11 +72,41 @@ typedef struct item {
     size_t dat, dn;    /* description */
 } item;
 
+typedef struct queued_input {
+    pt_buf text;
+    bool command, submitted;
+} queued_input;
+
+typedef struct session_list {
+    pt_worker *worker;
+    char cwd[4096], ids[50][64];
+    uint32_t n;
+    bool pending, ready;
+} session_list;
+
+typedef struct config_job {
+    pt_worker *worker;
+    char path[4096], value[512], err[700];
+    int key;
+    bool active, ok;
+    /* Pending values belong to the UI; the worker only reads value/key. */
+    unsigned pending;
+    char next[CFG_N][512];
+} config_job;
+
 typedef struct app {
     cli_opts o;
     cli_config *cfg;
     cli_session s;
     bool open; /* s holds a session */
+    cli_open_job *opening;
+    char fallback[64]; /* /resume restores the old session on failure */
+    bool history_ready, drop_restored_draft;
+    pt_buf pending_history, command;
+    session_list *sessions;
+    bool sessions_menu;
+    config_job *saving;
+    bool pager_pending;
     char model[256];     /* shown */
     char model_ref[256]; /* o.model points here */
     bool created;        /* this process created the session */
@@ -89,6 +119,7 @@ typedef struct app {
     tui_input in;
     int rows, cols;
     bool ascii, color, kitty, cpr, answered;
+    int start_col; /* CPR if already available before the first paint */
     const syms *sy;
     int thinking;
     /* output: styled lines for the scrollback, committed at the next paint */
@@ -110,7 +141,7 @@ typedef struct app {
     pt_buf retry_err;
     uint64_t ctx_used;
     uint32_t ctx_window;
-    pt_buf *queue;
+    queued_input *queue;
     uint32_t nq, qcap;
     /* the menu */
     int menu;
@@ -398,9 +429,10 @@ static void live_line(app *a, pt_str line)
 
 static void live_add(app *a, pt_str delta)
 {
-    size_t at = 0, i;
+    size_t at = 0, i = a->live.n;
     tui_clean(&a->live, delta, &a->live_col);
-    for (i = 0; i < a->live.n; i++)
+    /* Earlier bytes are the unfinished line, already checked for newlines. */
+    for (; i < a->live.n; i++)
         if (a->live.p[i] == '\n') {
             live_line(a, (pt_str){a->live.p + at, i - at});
             at = i + 1;
@@ -486,10 +518,10 @@ static void on_entries(app *a)
         if (strcmp(v.kind, "user") == 0) /* answers a key: no frame wait */
             a->urgent = true;
         if (strcmp(v.kind, "user") == 0 && a->nq) { /* a queued input was placed */
-            pt_buf first = a->queue[0];
+            queued_input first = a->queue[0];
             memmove(a->queue, a->queue + 1, (a->nq - 1) * sizeof *a->queue);
             a->queue[--a->nq] = first;
-            pt_buf_reset(&a->queue[a->nq]);
+            pt_buf_reset(&a->queue[a->nq].text);
         }
         if (strcmp(v.kind, "assistant") == 0 && a->streamed) {
             /* already on screen; an interrupted partial gets its mark */
@@ -603,13 +635,43 @@ static void add_list(app *a, const char *const *v, size_t n, pt_str q)
 }
 
 /* The menu follows the draft: commands after "/", then their arguments. */
+static void list_sessions(void *ud)
+{
+    session_list *list = (session_list *)ud;
+    list->n = cli_sessions_list(list->cwd, list->ids, 50);
+}
+
+static session_list *get_sessions(app *a, bool refresh)
+{
+    session_list *list = a->sessions;
+    if (!list) {
+        list = (session_list *)calloc(1, sizeof *list);
+        if (!list)
+            return NULL;
+        list->worker = pt_worker_new();
+        if (!list->worker || !getcwd(list->cwd, sizeof list->cwd)) {
+            pt_worker_free(list->worker);
+            free(list);
+            return NULL;
+        }
+        a->sessions = list;
+    }
+    if (refresh && !list->pending)
+        list->ready = false;
+    if (!list->ready && !list->pending)
+        list->pending = pt_worker_start(list->worker, list_sessions, list);
+    return list->ready ? list : NULL;
+}
+
 static void menu_update(app *a)
 {
+    bool was_sessions = a->sessions_menu;
     pt_str d = pt_buf_str(&a->in.text), cmd, arg;
     long sp;
     int old = a->nitems;
     a->nitems = 0;
     pt_buf_reset(&a->items_buf);
+    a->sessions_menu = false;
     if (a->menu == MENU_SETTINGS)
         return;
     a->menu = MENU_NONE;
@@ -652,11 +714,13 @@ static void menu_update(app *a)
         } else if (pt_str_eqz(cmd, "thinking")) {
             add_list(a, th_names, 3, arg);
         } else if (pt_str_eqz(cmd, "resume")) {
-            char ids[50][64], cwd[4096];
-            uint32_t n = getcwd(cwd, sizeof cwd) ? cli_sessions_list(cwd, ids, 50) : 0, i;
-            for (i = 0; i < n; i++)
-                if (pt_str_starts(pt_strz(ids[i]), arg) && strcmp(ids[i], a->s.id) != 0)
-                    add_item(a, ids[i], strlen(ids[i]), NULL);
+            session_list *list = get_sessions(a, !was_sessions);
+            uint32_t i;
+            a->sessions_menu = true;
+            for (i = 0; list && i < list->n; i++)
+                if (pt_str_starts(pt_strz(list->ids[i]), arg) &&
+                    (!a->open || strcmp(list->ids[i], a->s.id) != 0))
+                    add_item(a, list->ids[i], strlen(list->ids[i]), NULL);
         }
         if (!a->nitems)
             a->menu = MENU_NONE;
@@ -894,7 +958,7 @@ static void build_frame(app *a, int64_t now)
             pt_buf_putz(&a->tmp, more);
         } else {
             int col = 0;
-            pt_str q = pt_buf_str(&a->queue[i]);
+            pt_str q = pt_buf_str(&a->queue[i].text);
             long nl = pt_str_find(q, '\n');
             pt_buf_putz(&a->tmp, "  queued: ");
             if (nl >= 0)
@@ -975,10 +1039,24 @@ static void paint(app *a)
 {
     int64_t now = pt_sys_now_ms();
     build_frame(a, now);
+    if (a->in.text.oom || a->in.kill.oom || a->in.saved.oom || a->frame.rows.oom || a->lines.oom ||
+        a->live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->items_buf.oom) {
+        if (!a->quit)
+            fprintf(stderr, "pytte: out of memory drawing the terminal\n");
+        a->code = 1;
+        a->quit = true;
+        return;
+    }
     if (a->lines.n)
         tui_band_commit(&a->band, pt_buf_str(&a->lines), &a->frame);
     else
         tui_band_paint(&a->band, &a->frame);
+    if (a->band.out.oom || a->band.drawn.oom) {
+        fprintf(stderr, "pytte: out of memory drawing the terminal\n");
+        a->code = 1;
+        a->quit = true;
+        return;
+    }
     pt_buf_reset(&a->lines);
     flush_out(a);
     a->dirty = a->urgent = false;
@@ -1016,7 +1094,51 @@ static void apply_thinking(app *a)
             a->thinking = i;
 }
 
-/* Save a user setting; false (with the reason shown) when it was not. */
+static void write_setting(void *ud)
+{
+    config_job *job = (config_job *)ud;
+    job->ok = cli_config_write(job->path, job->key, job->value, job->err, sizeof job->err);
+}
+
+static void start_setting(app *a)
+{
+    config_job *job = a->saving;
+    int k;
+    if (!job || job->active || !job->pending)
+        return;
+    for (k = 0; k < CFG_N; k++)
+        if (job->pending & (1u << k))
+            break;
+    job->key = k;
+    memcpy(job->value, job->next[k], sizeof job->value);
+    job->pending &= ~(1u << k);
+    job->active = pt_worker_start(job->worker, write_setting, job);
+    if (!job->active)
+        out_z(a, TUI_RED, "not saved: could not schedule the settings write");
+}
+
+static void finish_setting(app *a)
+{
+    config_job *job = a->saving;
+    if (job && job->active && pt_worker_finish(job->worker)) {
+        char msg[700];
+        unsigned i;
+        job->active = false;
+        if (!job->ok) {
+            out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(job->err), 2);
+        } else {
+            for (i = 0; i < NSETTINGS && settings[i].k != job->key; i++)
+                ;
+            snprintf(msg, sizeof msg, "saved %s: %s", i < NSETTINGS ? settings[i].name : "setting",
+                     job->value[0] ? job->value : "(none)");
+            out_z(a, TUI_DIM, msg);
+        }
+        a->urgent = true;
+    }
+    start_setting(a);
+}
+
+/* Apply now and queue a durable save; report success after it lands. */
 static bool save_setting(app *a, int k, const char *v)
 {
     char err[700];
@@ -1029,9 +1151,27 @@ static bool save_setting(app *a, int k, const char *v)
         out_z(a, TUI_RED, err);
         return false;
     }
-    if (!cli_config_save(a->cfg, k, v, err, sizeof err)) {
-        out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(err), 2);
+    if (strcmp(a->cfg->src[k], "default") == 0 || strcmp(a->cfg->src[k], "user") == 0)
+        cli_config_set(a->cfg, k, v, "user");
+    if (!a->saving) {
+        config_job *job = (config_job *)calloc(1, sizeof *job);
+        if (job) {
+            job->worker = pt_worker_new();
+            snprintf(job->path, sizeof job->path, "%s", a->cfg->user_path);
+            if (!job->worker) {
+                free(job);
+                job = NULL;
+            }
+        }
+        a->saving = job;
+    }
+    if (!a->saving) {
+        out_z(a, TUI_RED, "not saved: could not allocate the settings worker");
         ok = false;
+    } else {
+        snprintf(a->saving->next[k], sizeof a->saving->next[k], "%s", v);
+        a->saving->pending |= 1u << k;
+        start_setting(a);
     }
     if (k == CFG_THINKING)
         apply_thinking(a);
@@ -1076,7 +1216,8 @@ static void set_config(app *a)
     c.max_tokens = a->o.max_tokens;
     c.retry_base_ms = a->o.retry_base_ms;
     c.no_sync = a->o.no_sync;
-    pt_set_config(a->s.a, &c);
+    if (a->open)
+        pt_set_config(a->s.a, &c);
     update_model(a);
 }
 
@@ -1130,54 +1271,62 @@ static void reset_display(app *a)
     a->streamed = a->started = a->printed = a->running = false;
     a->ctx_used = 0;
     for (i = 0; i < a->nq; i++)
-        pt_buf_reset(&a->queue[i]);
+        pt_buf_reset(&a->queue[i].text);
     a->nq = 0;
+}
+
+static bool session_empty(app *a)
+{
+    uint32_t i, n;
+    pt_entry_view v;
+    if (!a->created || a->in.text.n)
+        return false;
+    for (i = 0; i < a->nq; i++)
+        if (!a->queue[i].command)
+            return false;
+    n = pt_entry_count(a->s.a);
+    for (i = 0; i < n && pt_entry_at(a->s.a, i, &v); i++)
+        if (strcmp(v.kind, "epoch") != 0)
+            return false;
+    return true;
 }
 
 static bool open_session(app *a, const char *id)
 {
-    char err[700], p[4300];
-    int rc = cli_session_open(&a->s, &a->o, id, on_event, a, err, sizeof err);
-    if (rc) {
-        snprintf(a->err, sizeof a->err, "%s", err);
-        out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(err), 2);
-        a->code = rc;
+    a->opening = cli_session_begin(&a->s, &a->o, id, !a->history_ready,
+                                    a->open ? pt_buf_str(&a->in.text) : PT_STR_NULL,
+                                    a->open && session_empty(a),
+                                    on_event, a, a->err, sizeof a->err);
+    if (!a->opening) {
+        out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(a->err), 2);
+        a->code = 1;
         return false;
     }
-    a->open = true;
-    a->created = id == NULL;
+    a->open = false;
+    a->created = id == NULL && !a->o.continue_current;
+    a->discarded = false;
+    a->drop_restored_draft = false;
     reset_display(a);
     update_model(a);
-    out_tail(a);
-    if (id) { /* the draft left there */
-        size_t n;
-        char *d;
-        draft_path(a, p, sizeof p);
-        if ((d = pt_sys_read_file(p, &n))) {
-            pt_buf clean;
-            int col = 0;
-            pt_buf_init(&clean, pt_sys_allocator());
-            tui_clean(&clean, (pt_str){d, n}, &col);
-            tui_input_set(&a->in, pt_buf_str(&clean));
-            pt_buf_free(&clean);
-            free(d);
-        }
-    }
     return true;
 }
 
 /* Close the session; an empty one this process made is discarded. */
+static void finish_session(app *a);
+
 static void close_session(app *a)
 {
-    uint32_t i, n;
-    pt_entry_view v;
-    bool empty = a->created;
+    bool empty;
+    while (a->opening) {
+        pt_waitfd fd;
+        fd.fd = cli_session_job_fd(a->opening);
+        pt_sys_wait(&fd, 1, -1);
+        finish_session(a);
+    }
     if (!a->open)
         return;
+    empty = session_empty(a);
     save_draft(a);
-    n = pt_entry_count(a->s.a);
-    for (i = 0; i < n && empty && pt_entry_at(a->s.a, i, &v); i++)
-        empty = strcmp(v.kind, "epoch") == 0;
     if (pt_fatal(a->s.a) == PT_FATAL_STORAGE)
         cli_session_free(&a->s);
     else
@@ -1194,10 +1343,14 @@ static void switch_session(app *a, const char *id)
 {
     char back[64];
     snprintf(back, sizeof back, "%s", a->s.id);
-    close_session(a);
+    a->o.continue_current = false;
+    snprintf(a->fallback, sizeof a->fallback, "%s", back);
+    if (!open_session(a, id)) {
+        a->fallback[0] = 0;
+        a->code = 0; /* allocation failed before the old session was handed off */
+        return;
+    }
     tui_input_set(&a->in, PT_STR_NULL);
-    if (!open_session(a, id) && !open_session(a, back))
-        a->quit = true;
     a->code = 0;
 }
 
@@ -1406,7 +1559,7 @@ static void run_command(app *a, pt_str line)
                 return;
         }
         if (sp2 >= 0) /* saved: the value, and where it was saved */
-            snprintf(msg, sizeof msg, "saved %s: %s", settings[s].name,
+            snprintf(msg, sizeof msg, "saving %s: %s", settings[s].name,
                      a->cfg->val[settings[s].k][0] ? a->cfg->val[settings[s].k] : "(none)");
         else
             snprintf(msg, sizeof msg, "%s: %s (%s)", settings[s].name,
@@ -1428,84 +1581,204 @@ static void run_command(app *a, pt_str line)
 static void history_append(app *a, pt_str text)
 {
     int fd;
-    pt_buf line;
     if (!a->hist_path[0])
         return;
-    pt_buf_init(&line, pt_sys_allocator());
-    tui_hist_line(&line, text);
+    pt_buf_reset(&a->pending_history);
+    tui_hist_line(&a->pending_history, text);
+    if (a->pending_history.oom)
+        return; /* best effort; never append a truncated JSON string */
     fd = open(a->hist_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd >= 0) {
-        if (write(fd, line.p, line.n) != (ssize_t)line.n) {
+        if (write(fd, a->pending_history.p, a->pending_history.n) != (ssize_t)a->pending_history.n) {
             /* best effort */
         }
         close(fd);
     }
-    pt_buf_free(&line);
+    pt_buf_reset(&a->pending_history);
 }
 
 static void history_load(app *a)
 {
-    char root[4096], *src, *slash;
-    size_t n, lines = 0, i;
+    char root[4096], *slash;
     cli_sessions_dir(root, sizeof root);
     if ((slash = strrchr(root, '/')))
         *slash = 0;
     snprintf(a->hist_path, sizeof a->hist_path, "%s/history", root);
-    if (!(src = pt_sys_read_file(a->hist_path, &n)))
-        return;
-    tui_hist_load(&a->in, (pt_str){src, n}, 1000);
-    for (i = 0; i < n; i++)
-        lines += src[i] == '\n';
-    if (lines > 2000) { /* keep the newest 1,000 */
-        size_t at = 0, skip = lines - 1000;
-        char err[600];
-        while (skip && at < n)
-            skip -= src[at++] == '\n';
-        cli_write_atomic(a->hist_path, (pt_str){src + at, n - at}, err, sizeof err);
+}
+
+static bool queue_text(app *a, pt_str text, bool command)
+{
+    queued_input *q;
+    if (a->nq == a->qcap) {
+        uint32_t cap = a->qcap ? a->qcap * 2 : 8, i;
+        queued_input *next;
+        if (cap < a->qcap || SIZE_MAX / (size_t)cap < sizeof *next)
+            return false;
+        next = (queued_input *)realloc(a->queue, (size_t)cap * sizeof *next);
+        if (!next)
+            return false;
+        for (i = a->qcap; i < cap; i++) {
+            pt_buf_init(&next[i].text, pt_sys_allocator());
+            next[i].command = next[i].submitted = false;
+        }
+        a->queue = next;
+        a->qcap = cap;
     }
-    free(src);
+    q = &a->queue[a->nq];
+    pt_buf_reset(&q->text);
+    pt_buf_puts(&q->text, text);
+    if (q->text.oom)
+        return false;
+    q->command = command;
+    q->submitted = false;
+    a->nq++;
+    return true;
+}
+
+static void queued_remove(app *a, uint32_t at)
+{
+    queued_input kept = a->queue[at];
+    memmove(a->queue + at, a->queue + at + 1, (a->nq - at - 1) * sizeof *a->queue);
+    a->queue[--a->nq] = kept;
+    pt_buf_reset(&a->queue[a->nq].text);
+}
+
+static void queued_submit(app *a)
+{
+    uint32_t i = 0;
+    while (a->open && i < a->nq) {
+        queued_input *q = &a->queue[i];
+        if (q->submitted || (a->quit && q->command)) {
+            i++;
+        } else if (q->command) {
+            pt_buf_reset(&a->command);
+            pt_buf_puts(&a->command, pt_buf_str(&q->text));
+            if (a->command.oom) {
+                out_z(a, TUI_RED, "out of memory queuing a command");
+                return;
+            }
+            queued_remove(a, i);
+            run_command(a, pt_buf_str(&a->command));
+            menu_update(a);
+        } else {
+            pt_input in;
+            memset(&in, 0, sizeof in);
+            in.text = pt_buf_str(&q->text);
+            if (!pt_submit(a->s.a, &in)) {
+                out_z(a, TUI_RED, pt_error(a->s.a));
+                return;
+            }
+            q->submitted = true;
+            i++;
+        }
+    }
+}
+
+static void finish_session(app *a)
+{
+    int rc;
+    char *text;
+    size_t n;
+    if (!a->opening || !cli_session_finish(a->opening, &rc, a->err, sizeof a->err))
+        return;
+    a->opening = NULL;
+    if (rc) {
+        out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(a->err), 2);
+        a->urgent = true;
+        if (a->fallback[0]) {
+            char back[64];
+            snprintf(back, sizeof back, "%s", a->fallback);
+            a->fallback[0] = 0;
+            if (open_session(a, back))
+                return;
+        }
+        a->code = rc;
+        a->quit = true;
+        return;
+    }
+    a->open = true;
+    a->fallback[0] = 0;
+    if (!a->history_ready) {
+        text = cli_session_take_history(&a->s, &n);
+        if (text && !tui_hist_load(&a->in, (pt_str){text, n}, 1000))
+            out_z(a, TUI_RED, "out of memory loading input history");
+        free(text);
+        if (!tui_hist_load(&a->in, pt_buf_str(&a->pending_history), UINT32_MAX))
+            out_z(a, TUI_RED, "out of memory loading input history");
+        if (a->pending_history.n) {
+            int fd = open(a->hist_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+            if (fd >= 0) {
+                (void)!write(fd, a->pending_history.p, a->pending_history.n);
+                close(fd);
+            }
+        }
+        pt_buf_reset(&a->pending_history);
+        a->history_ready = true;
+    }
+    text = cli_session_take_draft(&a->s, &n);
+    if (text && !a->drop_restored_draft) {
+        size_t cur = a->in.cur, prefix;
+        int col = 0;
+        pt_buf_reset(&a->wrap);
+        tui_clean(&a->wrap, (pt_str){text, n}, &col);
+        prefix = a->wrap.n;
+        pt_buf_puts(&a->wrap, pt_buf_str(&a->in.text));
+        if (!a->wrap.oom) {
+            tui_input_set(&a->in, pt_buf_str(&a->wrap));
+            if (!a->in.text.oom)
+                a->in.cur = prefix + cur;
+        }
+    }
+    free(text);
+    set_config(a);
+    out_tail(a);
+    queued_submit(a);
+    if (a->pager_pending && !a->quit && a->open) {
+        a->pager_pending = false;
+        pager(a);
+    }
+    a->urgent = true;
 }
 
 static void submit(app *a)
 {
     pt_str text = pt_str_trim(pt_buf_str(&a->in.text));
-    pt_input in;
+    bool command;
     if (!text.n)
         return;
-    tui_hist_add(&a->in, text);
-    history_append(a, text);
-    if (text.p[0] == '/' && pt_str_find(text, '\n') < 0) {
-        pt_buf copy;
-        pt_buf_init(&copy, pt_sys_allocator());
-        pt_buf_puts(&copy, text);
+    if (a->history_ready) {
+        if (!tui_hist_add(&a->in, text))
+            out_z(a, TUI_RED, "out of memory adding to input history");
+        history_append(a, text);
+    } else {
+        tui_hist_line(&a->pending_history, text);
+    }
+    command = text.p[0] == '/' && pt_str_find(text, '\n') < 0;
+    if (command && !a->opening) {
+        pt_buf_reset(&a->command);
+        pt_buf_puts(&a->command, text);
+        if (a->command.oom) {
+            out_z(a, TUI_RED, "out of memory queuing a command");
+            return;
+        }
         tui_input_set(&a->in, PT_STR_NULL);
         a->menu = MENU_NONE;
         a->menu_closed = false;
-        run_command(a, pt_buf_str(&copy));
-        pt_buf_free(&copy);
+        run_command(a, pt_buf_str(&a->command));
         menu_update(a);
         a->draft_dirty = true;
         return;
     }
-    memset(&in, 0, sizeof in);
-    in.text = text;
-    if (!a->open || !pt_submit(a->s.a, &in)) {
-        out_z(a, TUI_RED, a->open ? pt_error(a->s.a) : "no session");
+    if (!a->open && !a->opening) {
+        out_z(a, TUI_RED, "no session");
         return;
     }
-    if (a->nq == a->qcap) {
-        uint32_t cap = a->qcap ? a->qcap * 2 : 8, i;
-        pt_buf *nqb = (pt_buf *)realloc(a->queue, cap * sizeof *nqb);
-        if (!nqb)
-            return;
-        for (i = a->qcap; i < cap; i++)
-            pt_buf_init(&nqb[i], pt_sys_allocator());
-        a->queue = nqb;
-        a->qcap = cap;
+    if (!queue_text(a, text, command)) {
+        out_z(a, TUI_RED, "out of memory queuing input");
+        return;
     }
-    pt_buf_reset(&a->queue[a->nq]);
-    pt_buf_puts(&a->queue[a->nq++], text);
     tui_input_set(&a->in, PT_STR_NULL);
+    queued_submit(a);
     a->draft_dirty = true;
 }
 
@@ -1660,6 +1933,8 @@ static void on_key(app *a, const tui_ev *ev)
         return;
     }
     if (ctrl && k == 'c') {
+        if (a->opening)
+            a->drop_restored_draft = true;
         if (a->in.text.n) {
             tui_input_set(&a->in, PT_STR_NULL);
             a->draft_dirty = true;
@@ -1692,7 +1967,10 @@ static void on_key(app *a, const tui_ev *ev)
         return;
     }
     if (ctrl && k == 'o') {
-        pager(a);
+        if (a->opening)
+            a->pager_pending = true;
+        else
+            pager(a);
         return;
     }
     if ((k == TK_UP || k == TK_DOWN) && !ev->mods && a->menu != MENU_NONE && a->nitems) {
@@ -1728,43 +2006,20 @@ static bool reflows(void)
     return true;
 }
 
-/* Wait for the replies to the startup queries: DA1 is the sentinel. Keys
- * typed meanwhile go into the input. */
-static void await_replies(app *a, int64_t deadline)
+/* Replies are ordinary input events. A terminal that does not answer must
+ * never hold up painting or typing; late keyboard negotiation still works. */
+static void on_reply(app *a, const tui_ev *ev)
 {
-    char buf[4096];
-    tui_ev ev;
-    int col = 0;
-    a->keys.want_cpr = true;
-    while (!a->answered) {
-        pt_waitfd fd;
-        int64_t left = deadline - pt_sys_now_ms();
-        long n;
-        if (left <= 0)
-            break;
-        fd.fd = tui_term_in(a->t);
-        if (pt_sys_wait(&fd, 1, (int)left) <= 0 || !fd.ready)
-            continue;
-        if ((n = tui_term_read(a->t, buf, sizeof buf)) == 0)
-            break;
-        if (n > 0)
-            tui_keys_feed(&a->keys, buf, (size_t)n);
-        while (tui_keys_next(&a->keys, &ev, false)) {
-            if (ev.kind == TE_REPLY && ev.reply == TR_DA1)
-                a->answered = true;
-            else if (ev.kind == TE_REPLY && ev.reply == TR_KITTY)
-                a->kitty = true;
-            else if (ev.kind == TE_REPLY && ev.reply == TR_CPR)
-                col = ev.b;
-            else if (ev.kind == TE_TEXT || ev.kind == TE_PASTE)
-                tui_input_insert(&a->in, ev.text);
-        }
+    if (ev->reply == TR_DA1) {
+        a->answered = true;
+        a->keys.want_cpr = false;
+    } else if (ev->reply == TR_KITTY && !a->kitty) {
+        a->kitty = true;
+        tui_term_kitty(a->t, true);
+    } else if (ev->reply == TR_CPR) {
+        a->cpr = true;
+        a->start_col = ev->b;
     }
-    a->keys.want_cpr = false;
-    a->cpr = col != 0;
-    /* the cursor may be after output with no final newline */
-    if (col != 1)
-        tui_term_write(a->t, PT_S("\r\n"));
 }
 
 static int timeout_ms(app *a, int64_t now)
@@ -1804,7 +2059,9 @@ static void read_keys(app *a, bool flush)
 {
     tui_ev ev;
     while (tui_keys_next(&a->keys, &ev, flush) && !a->quit)
-        if (ev.kind != TE_REPLY)
+        if (ev.kind == TE_REPLY)
+            on_reply(a, &ev);
+        else
             on_key(a, &ev);
 }
 
@@ -1817,7 +2074,6 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
 {
     app a;
     const char *term = getenv("TERM"), *amb = getenv("PYTTE_AMBIGUOUS");
-    int64_t asked;
     int sig = 0;
     char picked[64] = "", kept[64];
     memset(&a, 0, sizeof a);
@@ -1838,6 +2094,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     apply_symbols(&a);
     apply_thinking(&a);
     tui_keys_init(&a.keys);
+    a.keys.want_cpr = true;
     tui_input_init(&a.in, pt_sys_allocator());
     tui_frame_init(&a.frame, pt_sys_allocator());
     pt_buf_init(&a.lines, pt_sys_allocator());
@@ -1848,13 +2105,14 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_init(&a.live, pt_sys_allocator());
     pt_buf_init(&a.retry_err, pt_sys_allocator());
     pt_buf_init(&a.items_buf, pt_sys_allocator());
+    pt_buf_init(&a.pending_history, pt_sys_allocator());
+    pt_buf_init(&a.command, pt_sys_allocator());
     pt_arena_init(&a.ar, pt_sys_allocator(), 0);
     if (!tui_term_start(a.t, !term || (strncmp(term, "linux", 5) != 0 && strncmp(term, "vt", 2) != 0))) {
         tui_term_free(a.t);
         fprintf(stderr, "pytte: cannot set up the terminal\n");
         return 1;
     }
-    asked = pt_sys_now_ms();
     tui_term_size(a.t, &a.rows, &a.cols);
     history_load(&a);
     if (id)
@@ -1865,11 +2123,24 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         return a.code ? a.code : 1;
     }
     set_config(&a);
-    await_replies(&a, asked + 250);
-    tui_term_kitty(a.t, a.kitty);
     tui_band_init(&a.band, a.rows, a.cols, pt_sys_allocator());
     a.band.reflow = reflows();
     a.band.color = a.color;
+    {
+        pt_waitfd fd;
+        char buf[4096];
+        long n;
+        fd.fd = tui_term_in(a.t);
+        if (pt_sys_wait(&fd, 1, 0) > 0 && fd.ready &&
+            (n = tui_term_read(a.t, buf, sizeof buf)) > 0) {
+            tui_keys_feed(&a.keys, buf, (size_t)n);
+            read_keys(&a, false);
+        }
+        /* Without an immediate CPR, conservatively preserve a preceding
+         * partial line. Its eventual reply cannot move the painted band. */
+        if (a.start_col != 1)
+            tui_term_write(a.t, PT_S("\r\n"));
+    }
     {
         char head[100];
         pt_buf first;
@@ -1882,22 +2153,36 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         pt_buf_free(&first);
     }
     if (prompt && *prompt) {
+        a.drop_restored_draft = true;
         tui_input_set(&a.in, pt_strz(prompt));
         submit(&a);
     }
     menu_update(&a);
     paint(&a);
     while (!a.quit) {
-        pt_waitfd fds[2];
+        pt_waitfd fds[5];
         int64_t now = pt_sys_now_ms();
         int bits;
         bool was = a.running;
         fds[0].fd = tui_term_in(a.t);
         fds[1].fd = tui_term_sigfd(a.t);
-        if (a.open)
-            pt_rt_step(a.s.rt, timeout_ms(&a, now), fds, 2);
+        fds[2].fd = a.opening ? cli_session_job_fd(a.opening) : -1;
+        fds[3].fd = a.sessions && a.sessions->pending ? pt_worker_fd(a.sessions->worker) : -1;
+        fds[4].fd = a.saving && a.saving->active ? pt_worker_fd(a.saving->worker) : -1;
+        if (a.opening) {
+            pt_sys_wait(fds, 5, timeout_ms(&a, now));
+            finish_session(&a);
+        } else if (a.open)
+            pt_rt_step(a.s.rt, timeout_ms(&a, now), fds, 5);
         else
-            pt_sys_wait(fds, 2, timeout_ms(&a, now));
+            pt_sys_wait(fds, 5, timeout_ms(&a, now));
+        finish_setting(&a);
+        if (a.sessions && a.sessions->pending && pt_worker_finish(a.sessions->worker)) {
+            a.sessions->pending = false;
+            a.sessions->ready = true;
+            menu_update(&a);
+            a.urgent = true;
+        }
         now = pt_sys_now_ms();
         a.running = a.open && !pt_idle(a.s.a) && !pt_fatal(a.s.a);
         if (a.running != was) {
@@ -1927,7 +2212,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
                 tui_band_redraw(&a.band);
             }
             if (bits & TS_WINCH)
-                a.winch_at = now + 60;
+                a.winch_at = now ? now : 1;
         }
         if (fds[0].ready) {
             char buf[4096];
@@ -1966,9 +2251,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
             save_draft(&a);
         if (a.quit)
             break;
-        /* Not while a resize waits out its debounce: the terminal has
-         * already rewrapped, and rows placed by the old size land wrong. */
-        if (!a.winch_at && (a.urgent || (a.dirty && now - a.last_paint >= a.interval)))
+        if (a.urgent || (a.dirty && now - a.last_paint >= a.interval))
             paint(&a);
     }
     /* quit: the close claim, then the terminal. What was shown of an
@@ -1979,8 +2262,31 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         a.menu = MENU_NONE;
         paint(&a);
     }
+    a.quit = true;
+    while (a.opening) {
+        pt_waitfd fd;
+        fd.fd = cli_session_job_fd(a.opening);
+        pt_sys_wait(&fd, 1, -1);
+        finish_session(&a);
+    }
     snprintf(kept, sizeof kept, "%s", a.open ? a.s.id : "");
     close_session(&a);
+    while (a.saving && (a.saving->active || a.saving->pending)) {
+        pt_waitfd fd;
+        finish_setting(&a);
+        if (!a.saving->active)
+            continue;
+        fd.fd = pt_worker_fd(a.saving->worker);
+        pt_sys_wait(&fd, 1, -1);
+    }
+    if (a.saving) {
+        pt_worker_free(a.saving->worker);
+        free(a.saving);
+    }
+    if (a.sessions) {
+        pt_worker_free(a.sessions->worker);
+        free(a.sessions);
+    }
     tui_band_erase(&a.band);
     flush_out(&a);
     if (a.code != 129 && kept[0] && !a.discarded) { /* how to come back to it */
@@ -2006,10 +2312,12 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_free(&a.live);
     pt_buf_free(&a.retry_err);
     pt_buf_free(&a.items_buf);
+    pt_buf_free(&a.pending_history);
+    pt_buf_free(&a.command);
     {
         uint32_t i;
         for (i = 0; i < a.qcap; i++)
-            pt_buf_free(&a.queue[i]);
+            pt_buf_free(&a.queue[i].text);
         free(a.queue);
     }
     pt_arena_free(&a.ar);

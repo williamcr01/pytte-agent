@@ -14,6 +14,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
@@ -574,6 +575,87 @@ static void test_sigterm(void)
     pty_free(&p);
 }
 
+/* Missing/late query replies never gate input. A blocked setup preserves
+ * both a submitted prompt and the draft when the user quits immediately. */
+static void test_early_input(void)
+{
+    pty p;
+    char fifo[400];
+    const char *args[] = {"-m", "faux/faux", "--script", fifo, NULL};
+    const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
+    static const char script[] = "{\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}]}";
+    char *log;
+    size_t n;
+    int fd;
+    snprintf(fifo, sizeof fifo, "%s/open-script", state_dir);
+    CHECK(mkfifo(fifo, 0600) == 0);
+    pty_start(&p, 24, 80, args);
+    p.v->answer = false;
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    CHECK(p.v->kitty == 0);
+    keys(&p, "early prompt\rremaining draft");
+    CHECK(wait_for(&p, "┃ remaining draft", 1000));
+    /* A late CPR is dropped; late kitty negotiation still enables keys. */
+    keys(&p, "\x1b[1;1R\x1b[?0u\x1b[?1;2c");
+    CHECK(p.v->kitty == 1 && has(&p, "┃ remaining draft"));
+    kill(p.pid, SIGTERM);
+    fd = open(fifo, O_WRONLY);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        put(fd, script, sizeof script - 1);
+        close(fd);
+    }
+    CHECK(finish(&p, 3000) == 128 + SIGTERM);
+    modes_restored(&p);
+    pty_free(&p);
+    unlink(fifo);
+    log = last_log(&n);
+    CHECK(log && pt_str_contains((pt_str){log, n}, PT_S("early prompt")));
+    CHECK(log && pt_str_contains((pt_str){log, n}, PT_S("\"event\":\"close\"")));
+    free(log);
+    pty_start(&p, 24, 80, again);
+    CHECK(wait_for(&p, "┃ remaining draft", 3000));
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "\x03\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+}
+
+static void test_blocked_settings(void)
+{
+    pty p;
+    char path[400];
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
+    static const char original[] = "{\"untouched\":42,\"tui\":{\"thinking\":\"full\"}}\n";
+    char *text;
+    size_t n;
+    int fd;
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    /* Hold a settings read after startup, so it cannot hide behind setup. */
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    unlink(path);
+    CHECK(mkfifo(path, 0600) == 0);
+    keys(&p, "/settings thinking hidden\rstill typing");
+    CHECK(wait_for(&p, "┃ still typing", 1000));
+    fd = open(path, O_WRONLY);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        put(fd, original, sizeof original - 1);
+        close(fd);
+    }
+    CHECK(wait_for(&p, "saved thinking: hidden", 3000));
+    keys(&p, "\x03\x14\x14\x04"); /* Rapid changes are flushed on quit. */
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    text = pt_sys_read_file(path, &n);
+    CHECK(text && pt_str_contains((pt_str){text, n}, PT_S("\"untouched\":42")));
+    CHECK(text && pt_str_contains((pt_str){text, n}, PT_S("\"thinking\":\"full\"")));
+    free(text);
+}
+
 int main(void)
 {
     char tmpl[] = "/tmp/pytte-pty-XXXXXX";
@@ -605,6 +687,8 @@ int main(void)
     RUN(test_commands);
     RUN(test_history_pager_draft);
     RUN(test_sigterm);
+    RUN(test_early_input);
+    RUN(test_blocked_settings);
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (!t_failed && system(cmd) != 0)
         fprintf(stderr, "cannot remove %s\n", dir);

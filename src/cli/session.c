@@ -14,6 +14,25 @@
 #include <time.h>
 #include <unistd.h>
 
+struct cli_open_job {
+    cli_session *s;
+    cli_opts o;
+    pt_worker *worker;
+    pt_buf args;
+    const char *id;
+    cli_session *previous; /* in args; owned exclusively after begin */
+    pt_str previous_draft;
+    pt_event_fn on_event;
+    void *ud;
+    int code;
+    bool active, history, discard_previous;
+    char err[700];
+    char *history_text, *draft;
+    size_t history_n, draft_n;
+};
+
+static void job_free(cli_open_job *job);
+
 const char cli_default_system[] =
     "You are pytte, a small coding agent running in a terminal. Be concise.";
 
@@ -271,6 +290,7 @@ static bool credentials(void *ud, const pt_provider *p, pt_credentials *out)
 
 void cli_session_free(cli_session *s)
 {
+    cli_open_job *background = s->background;
     pt_rt_free(s->rt);
     pt_free(s->a);
     if (s->http)
@@ -278,6 +298,8 @@ void cli_session_free(cli_session *s)
     s->rt = NULL;
     s->a = NULL;
     s->http = NULL;
+    s->background = NULL;
+    job_free(background);
 }
 
 void cli_session_close(cli_session *s)
@@ -388,4 +410,220 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
         return fail(s, 1, err, cap, NULL);
     }
     return 0;
+}
+
+static void job_event(void *ud, const pt_event *ev)
+{
+    cli_open_job *job = (cli_open_job *)ud;
+    /* Setup/recovery cannot call into the UI from the worker. Once setup
+     * is published, every core call is back on the host thread. */
+    if (job->active && job->on_event)
+        job->on_event(job->ud, ev);
+}
+
+static void job_open(void *ud)
+{
+    cli_open_job *job = (cli_open_job *)ud;
+    char path[4300], picked[64], cwd[4096];
+    const char *id = job->id;
+    if (job->previous) {
+        cli_session *s = job->previous;
+        snprintf(path, sizeof path, "%s/draft", s->dir);
+        if (job->previous_draft.n)
+            pt_sys_write_file(path, job->previous_draft.p, job->previous_draft.n);
+        else
+            unlink(path);
+        if (pt_fatal(s->a) == PT_FATAL_STORAGE)
+            cli_session_free(s);
+        else
+            cli_session_close(s);
+        if (job->discard_previous)
+            cli_session_discard(s->dir);
+        job->previous = NULL;
+    }
+    if (!id && job->o.continue_current) {
+        if (!getcwd(cwd, sizeof cwd) || !cli_sessions_list(cwd, &picked, 1)) {
+            snprintf(job->err, sizeof job->err, "no session to continue in this directory");
+            job->code = 1;
+            return;
+        }
+        id = picked;
+    }
+    job->code = cli_session_open(job->s, &job->o, id, job_event, job,
+                                 job->err, sizeof job->err);
+    if (job->code)
+        return;
+    if (id) {
+        snprintf(path, sizeof path, "%s/draft", job->s->dir);
+        job->draft = pt_sys_read_file(path, &job->draft_n);
+    }
+    if (job->history) {
+        char root[4096], *slash;
+        size_t i, lines = 0;
+        cli_sessions_dir(root, sizeof root);
+        if ((slash = strrchr(root, '/')))
+            *slash = 0;
+        snprintf(path, sizeof path, "%s/history", root);
+        job->history_text = pt_sys_read_file(path, &job->history_n);
+        for (i = 0; i < job->history_n; i++)
+            lines += job->history_text[i] == '\n';
+        if (lines > 2000) {
+            size_t at = 0, skip = lines - 1000;
+            char why[600];
+            while (skip && at < job->history_n)
+                skip -= job->history_text[at++] == '\n';
+            cli_write_atomic(path, (pt_str){job->history_text + at, job->history_n - at}, why, sizeof why);
+        }
+    }
+}
+
+static void job_free(cli_open_job *job)
+{
+    if (!job)
+        return;
+    pt_worker_free(job->worker);
+    pt_buf_free(&job->args);
+    free(job->history_text);
+    free(job->draft);
+    free(job);
+}
+
+cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *id,
+                                bool history, pt_str draft, bool discard,
+                                pt_event_fn on_event, void *ud,
+                                char *err, size_t cap)
+{
+    cli_open_job *job;
+    const char *values[5];
+    size_t total = s->a ? sizeof(cli_session) : 0, i;
+    if (draft.n > SIZE_MAX - total) {
+        snprintf(err, cap, "session draft is too large");
+        return NULL;
+    }
+    total += draft.n;
+    values[0] = o->model;
+    values[1] = o->system;
+    values[2] = o->append_system;
+    values[3] = o->script;
+    values[4] = id;
+    for (i = 0; i < 5; i++)
+        if (values[i]) {
+            size_t n = strlen(values[i]) + 1;
+            if (n > SIZE_MAX - total) {
+                snprintf(err, cap, "session options are too large");
+                return NULL;
+            }
+            total += n;
+        }
+    job = (cli_open_job *)calloc(1, sizeof *job);
+    if (!job) {
+        snprintf(err, cap, "out of memory");
+        return NULL;
+    }
+    pt_buf_init(&job->args, pt_sys_allocator());
+    if (!pt_buf_reserve(&job->args, total))
+        goto fail;
+    if (s->a) {
+        job->previous = (cli_session *)job->args.p;
+        pt_buf_put(&job->args, s, sizeof *s);
+    }
+    job->previous_draft = (pt_str){draft.n ? job->args.p + job->args.n : NULL, draft.n};
+    pt_buf_puts(&job->args, draft);
+    for (i = 0; i < 5; i++)
+        if (values[i]) {
+            const char *v = job->args.p + job->args.n;
+            pt_buf_put(&job->args, values[i], strlen(values[i]) + 1);
+            values[i] = v;
+        }
+    job->o = *o;
+    job->o.model = values[0];
+    job->o.system = values[1];
+    job->o.append_system = values[2];
+    job->o.script = values[3];
+    job->id = values[4];
+    job->s = s;
+    job->history = history;
+    job->discard_previous = discard;
+    job->on_event = on_event;
+    job->ud = ud;
+    job->worker = pt_worker_new();
+    if (!job->worker)
+        goto fail;
+    if (job->previous) {
+        if (s->background) {
+            s->background->active = false;
+            s->background->s = job->previous;
+        }
+        memset(s, 0, sizeof *s);
+    }
+    if (!pt_worker_start(job->worker, job_open, job)) {
+        if (job->previous) {
+            *s = *job->previous;
+            if (s->background) {
+                s->background->s = s;
+                s->background->active = true;
+            }
+        }
+        goto fail;
+    }
+    return job;
+fail:
+    snprintf(err, cap, "could not allocate the session I/O worker");
+    job_free(job);
+    return NULL;
+}
+
+int cli_session_job_fd(const cli_open_job *job) { return pt_worker_fd(job->worker); }
+
+bool cli_session_finish(cli_open_job *job, int *code, char *err, size_t cap)
+{
+    if (!pt_worker_finish(job->worker))
+        return false;
+    *code = job->code;
+    if (job->code) {
+        snprintf(err, cap, "%s", job->err);
+        job_free(job);
+    } else {
+        job->active = true;
+        job->s->background = job;
+        pt_rt_use_worker(job->s->rt, job->worker);
+        pt_buf_free(&job->args); /* options are owned by core/driver now */
+    }
+    return true;
+}
+
+void cli_session_cancel(cli_open_job *job)
+{
+    while (!pt_worker_finish(job->worker)) {
+        pt_waitfd fd;
+        fd.fd = pt_worker_fd(job->worker);
+        pt_sys_wait(&fd, 1, -1);
+    }
+    if (!job->code)
+        cli_session_close(job->s);
+    job_free(job);
+}
+
+char *cli_session_take_history(cli_session *s, size_t *n)
+{
+    cli_open_job *job = s->background;
+    char *text = job ? job->history_text : NULL;
+    *n = job ? job->history_n : 0;
+    if (job) {
+        job->history_text = NULL;
+        job->history_n = 0;
+    }
+    return text;
+}
+
+char *cli_session_take_draft(cli_session *s, size_t *n)
+{
+    cli_open_job *job = s->background;
+    char *text = job ? job->draft : NULL;
+    *n = job ? job->draft_n : 0;
+    if (job) {
+        job->draft = NULL;
+        job->draft_n = 0;
+    }
+    return text;
 }

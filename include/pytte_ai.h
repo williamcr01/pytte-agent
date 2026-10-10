@@ -212,7 +212,9 @@ typedef struct pt_http_req {
 bool pt_ai_build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_opts *o,
                  const pt_credentials *cred, pt_http_req *out, pt_arena *a);
 
-/* The context as the target will see it: cross-provider transforms. */
+/* The context as the target will see it: cross-provider transforms. Message
+ * and block arrays belong to a. Unchanged strings and tools are borrowed
+ * from in; their backing storage must outlive use of the view. */
 bool pt_ai_target_view(const pt_ai_target *t, const pt_ai_context *in, pt_ai_context *out,
                        pt_arena *a);
 

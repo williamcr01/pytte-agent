@@ -30,6 +30,7 @@ int tui_cp_max(uint32_t cp);
  * every terminal draws them, unless the terminal is set to draw them wide
  * (PYTTE_AMBIGUOUS=wide). */
 void tui_set_ambiguous_wide(bool wide);
+bool tui_ambiguous_wide(void);
 
 /* Grapheme clusters, simplified: a base plus combining marks, variation
  * selectors, emoji modifiers and ZWJ-joined parts; regional indicators in
@@ -208,8 +209,10 @@ int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *o
 
 typedef struct tui_irow {
     size_t start, end; /* the bytes shown */
-    size_t next;       /* where the next row starts */
+    size_t examined;   /* furthest byte examined to choose this wrap */
 } tui_irow;
+
+typedef struct tui_hentry { size_t at, n; } tui_hentry;
 
 typedef struct tui_input {
     pt_buf text; /* the draft: clean UTF-8, newlines allowed */
@@ -217,7 +220,8 @@ typedef struct tui_input {
     pt_buf kill;
     int goal;    /* the column ↑/↓ aim for; -1: the cursor's */
     /* history, oldest first */
-    pt_buf *hist;
+    tui_hentry *hist; /* offsets; stable when history_data grows */
+    pt_buf history_data;
     uint32_t nhist, hcap;
     uint32_t hpos; /* nhist: the draft itself */
     pt_buf saved;  /* the draft while browsing history */
@@ -225,6 +229,9 @@ typedef struct tui_input {
     tui_irow *rows;
     int nrows, rcap, cur_row, cur_col;
     int scroll; /* the first row shown */
+    int layout_width;
+    size_t dirty_from;
+    bool layout_valid, layout_ambiguous;
 } tui_input;
 
 typedef enum {
@@ -245,13 +252,15 @@ tui_input_result tui_input_key(tui_input *in, const tui_ev *ev, int width);
 /* Wrap the draft into rows of at most width columns (w_max): words where
  * possible, hard newlines kept. Sets rows, cur_row and cur_col, and
  * scrolls so the cursor is within `show` rows. */
-void tui_input_layout(tui_input *in, int width, int show);
+bool tui_input_layout(tui_input *in, int width, int show);
 
 /* History: an entry (not a repeat of the newest), and browsing. The file
  * holds one JSON string per line, newest last. */
-void tui_hist_add(tui_input *in, pt_str entry);
+bool tui_hist_add(tui_input *in, pt_str entry);
+/* Borrowed until the next history append/load/free, which may grow data. */
+pt_str tui_hist_at(const tui_input *in, uint32_t index);
 bool tui_hist_move(tui_input *in, int dir); /* -1 older, +1 newer */
-void tui_hist_load(tui_input *in, pt_str file, uint32_t max);
+bool tui_hist_load(tui_input *in, pt_str file, uint32_t max);
 /* The line to append to the file for an entry. */
 void tui_hist_line(pt_buf *out, pt_str entry);
 
@@ -275,7 +284,7 @@ tui_term *tui_term_new(void);
 /* Raw mode, bracketed paste, and the startup queries: cursor position,
  * kitty keyboard (when kitty is true) and DA1. */
 bool tui_term_start(tui_term *t, bool kitty);
-/* After the replies (or the timeout): push the kitty flags. */
+/* A kitty reply arrived: push flags without delaying input or first paint. */
 void tui_term_kitty(tui_term *t, bool push);
 /* The terminal fds to wait on: stdin and the signal pipe. */
 int tui_term_in(const tui_term *t);

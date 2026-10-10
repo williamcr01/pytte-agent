@@ -17,15 +17,22 @@ Needs a C99 compiler, make, and libcurl with headers.
 
 ```sh
 make            # build/pytte, build/pytte-ai and the libraries
+make release    # optimized, stripped binaries in build/release/
 make test       # unit, fixture, crash-simulation, screen, pty and CLI tests (ASan, UBSan)
 make screen     # the screen property test with many more random sessions
 make pty-asan   # the pty test against pytte built with ASan and UBSan
 make crash      # kill -9 pytte at random moments, 100 rounds
 make portable   # the core builds as strict C99 with gcc and clang, no stdio
 make fuzz       # libFuzzer targets in build/fuzz/ (clang)
+make bench      # offline latency/allocation workloads, optimized without sanitizers
 make models     # refresh the model catalog (network, needs python3)
 make width      # regenerate the display-width table from Unicode (network)
 ```
+
+The default build loads the system libcurl when the first real HTTP request
+starts. Offline sessions and terminal startup do not load its TLS dependency
+tree. Use `make CURL_LINK=direct BUILD=build/direct` for a custom or static
+libcurl. See [PERFORMANCE.md](PERFORMANCE.md) for reproducible measurements.
 
 ## pytte
 

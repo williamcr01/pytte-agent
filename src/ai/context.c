@@ -55,17 +55,22 @@ pt_str pt_fix_tool_id(pt_str id, uint32_t max, pt_arena *a)
 
 static pt_str wrap(pt_arena *a, const char *open, pt_str text, const char *close)
 {
-    pt_buf b;
-    pt_str r;
-    pt_buf_init(&b, a->al);
-    pt_buf_putz(&b, open);
-    pt_buf_puts(&b, text);
-    pt_buf_putz(&b, close);
-    r = pt_arena_dup(a, pt_buf_str(&b));
-    if (b.oom)
+    size_t x = strlen(open), y = strlen(close), n;
+    char *p;
+    if (x > SIZE_MAX - y || text.n >= SIZE_MAX - x - y) {
         a->oom = true;
-    pt_buf_free(&b);
-    return r;
+        return PT_STR_NULL;
+    }
+    n = x + text.n + y;
+    p = (char *)pt_arena_alloc(a, n + 1);
+    if (!p)
+        return PT_STR_NULL;
+    memcpy(p, open, x);
+    if (text.n)
+        memcpy(p + x, text.p, text.n);
+    memcpy(p + x + text.n, close, y);
+    p[n] = 0;
+    return (pt_str){p, n};
 }
 
 static bool same_source(const pt_ai_target *t, const pt_msg *m)
@@ -73,11 +78,48 @@ static bool same_source(const pt_ai_target *t, const pt_msg *m)
     return pt_str_eqz(m->provider, t->provider->id) && pt_str_eqz(m->api, t->api->id);
 }
 
-static void view_assistant(const pt_ai_target *t, const pt_msg *in, pt_msg *out, pt_arena *a)
+static bool unchanged_id(pt_str id, uint32_t max)
+{
+    size_t i;
+    if (!max)
+        return true;
+    if (!id.n || id.n > max)
+        return false;
+    for (i = 0; i < id.n; i++)
+        if (!id_char(id.p[i]))
+            return false;
+    return true;
+}
+
+static bool unchanged_assistant(const pt_ai_target *t, const pt_msg *m)
+{
+    uint32_t i;
+    bool same = same_source(t, m);
+    for (i = 0; i < m->nblocks; i++) {
+        const pt_block *b = &m->blocks[i];
+        if ((b->kind == PT_BLOCK_THINKING && !same) ||
+            (b->kind == PT_BLOCK_OPAQUE && (!same || !pt_str_eqz(b->api, t->api->id))) ||
+            (b->kind == PT_BLOCK_TOOL_CALL && !unchanged_id(b->id, t->api->tool_id_max)))
+            return false;
+    }
+    return true;
+}
+
+static void view_assistant(const pt_ai_target *t, const pt_msg *in, pt_msg *out, pt_arena *a,
+                           bool borrow)
 {
     bool same = same_source(t, in);
     uint32_t i, n = 0;
-    pt_block *blocks = (pt_block *)pt_arena_alloc(a, sizeof(pt_block) * (in->nblocks ? in->nblocks : 1));
+    pt_block *blocks;
+    if (borrow && unchanged_assistant(t, in)) {
+        *out = *in;
+        return;
+    }
+    if (sizeof(pt_block) > SIZE_MAX / (in->nblocks ? in->nblocks : 1)) {
+        a->oom = true;
+        return;
+    }
+    blocks = (pt_block *)pt_arena_alloc(a, sizeof(pt_block) * (in->nblocks ? in->nblocks : 1));
     *out = *in;
     out->blocks = blocks;
     out->nblocks = 0;
@@ -116,14 +158,33 @@ static bool user_side(const pt_msg *m)
     return m->role == PT_ROLE_USER || m->role == PT_ROLE_TOOL_RESULT;
 }
 
-bool pt_ai_target_view(const pt_ai_target *t, const pt_ai_context *in, pt_ai_context *out,
-                       pt_arena *a)
+static bool target_view(const pt_ai_target *t, const pt_ai_context *in, pt_ai_context *out,
+                         pt_arena *a, bool borrow)
 {
     uint32_t i, n = 0;
-    pt_msg *msgs = (pt_msg *)pt_arena_alloc(a, sizeof(pt_msg) * (in->nmsgs ? in->nmsgs : 1));
+    pt_msg *msgs;
     bool mid_system = t->compat.mid_conversation_system == PT_YES;
     pt_buf pending; /* later system messages waiting to be folded */
     bool have_pending = false, seen_user = false;
+
+    /* Most requests keep their provider and need no transforms. Borrow the
+     * immutable context instead of copying every message and block. */
+    for (i = 0; i < in->nmsgs; i++) {
+        const pt_msg *m = &in->msgs[i];
+        if ((m->role == PT_ROLE_SYSTEM && i && !mid_system) ||
+            (m->role == PT_ROLE_ASSISTANT && !unchanged_assistant(t, m)) ||
+            (m->role == PT_ROLE_TOOL_RESULT && !unchanged_id(m->call_id, t->api->tool_id_max)))
+            break;
+    }
+    if (borrow && i == in->nmsgs) {
+        *out = *in;
+        return !a->oom;
+    }
+    if (sizeof(pt_msg) > SIZE_MAX / (in->nmsgs ? in->nmsgs : 1)) {
+        a->oom = true;
+        return false;
+    }
+    msgs = (pt_msg *)pt_arena_alloc(a, sizeof(pt_msg) * (in->nmsgs ? in->nmsgs : 1));
 
     out->tools = in->tools;
     out->ntools = in->ntools;
@@ -145,7 +206,7 @@ bool pt_ai_target_view(const pt_ai_target *t, const pt_ai_context *in, pt_ai_con
             continue;
         }
         if (m->role == PT_ROLE_ASSISTANT)
-            view_assistant(t, m, o, a);
+            view_assistant(t, m, o, a, borrow);
         else
             *o = *m;
         if (m->role == PT_ROLE_TOOL_RESULT)
@@ -176,6 +237,12 @@ bool pt_ai_target_view(const pt_ai_target *t, const pt_ai_context *in, pt_ai_con
     pt_buf_free(&pending);
     out->nmsgs = n;
     return !a->oom;
+}
+
+bool pt_ai_target_view(const pt_ai_target *t, const pt_ai_context *in, pt_ai_context *out,
+                       pt_arena *a)
+{
+    return target_view(t, in, out, a, false);
 }
 
 /* ---- max_tokens ---- */
@@ -220,7 +287,7 @@ bool pt_ai_build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_op
     if (!o)
         o = &none;
     memset(out, 0, sizeof *out);
-    if (!pt_ai_target_view(t, ctx, &view, a))
+    if (!target_view(t, ctx, &view, a, true))
         return false;
     return t->api->build(t, &view, o, cred, out, a) && !a->oom;
 }
@@ -228,21 +295,25 @@ bool pt_ai_build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_op
 bool pt_req_init(pt_http_req *r, const pt_ai_target *t, const pt_ai_opts *o, const char *path,
                  uint32_t extra, pt_arena *a)
 {
-    pt_buf url;
     pt_str base = pt_strz(t->provider->base_url);
-    uint32_t cap = extra + 4 + o->nheaders;
+    uint32_t cap;
     memset(r, 0, sizeof *r);
+    if (extra > UINT32_MAX - 4 || o->nheaders > UINT32_MAX - extra - 4) {
+        a->oom = true;
+        return false;
+    }
+    cap = extra + 4 + o->nheaders;
+    if (sizeof(pt_header) > SIZE_MAX / cap) {
+        a->oom = true;
+        return false;
+    }
     while (base.n && base.p[base.n - 1] == '/')
         base.n--;
-    pt_buf_init(&url, a->al);
-    pt_buf_puts(&url, base);
-    pt_buf_putz(&url, path);
-    r->url = pt_arena_cstr(a, pt_buf_str(&url));
-    pt_buf_free(&url);
+    r->url = wrap(a, "", base, path).p;
     r->method = "POST";
     r->headers = (pt_header *)pt_arena_alloc(a, sizeof(pt_header) * cap);
     r->hcap = r->headers ? cap : 0;
-    return r->headers && r->url && !url.oom;
+    return r->headers && r->url && !a->oom;
 }
 
 void pt_req_header(pt_http_req *r, const char *name, const char *value)

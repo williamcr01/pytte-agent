@@ -29,11 +29,26 @@ void pt_sys_random(void *ud, void *out, size_t n);
 /* Hostname, boot ID (empty when unknown) and pid, for claim records. */
 void pt_sys_identity(char *host, size_t hcap, char *boot, size_t bcap, int64_t *pid);
 
+/* One reusable blocking-I/O worker. start borrows fn/ud and their reachable
+ * storage until finish returns true (or free joins the job). At most one
+ * job is outstanding. finish is nonblocking and publishes its results to
+ * the caller; fd wakes the host poll loop. Agent/UI code stays on the host
+ * thread. free waits for an executing job and releases the worker. */
+typedef struct pt_worker pt_worker;
+pt_worker *pt_worker_new(void);
+bool pt_worker_start(pt_worker *w, void (*fn)(void *), void *ud);
+bool pt_worker_finish(pt_worker *w);
+int pt_worker_fd(const pt_worker *w);
+void pt_worker_free(pt_worker *w);
+
 /* ---- HTTP ----
  * A driver runs requests in the background of pump(). Callbacks happen
  * inside pump(): head once (before any body), body any number of times,
  * then done exactly once (error NULL on success). A cancelled request gets
- * no more callbacks. Callbacks must not cancel or start requests. */
+ * no more callbacks. Callbacks must not cancel or start requests. Request
+ * body bytes are borrowed until done or cancel returns; other request
+ * fields need only live through start. A sink may release body storage in
+ * done. All calls for one driver belong to its owning host thread. */
 typedef struct pt_http_sink {
     void *ud;
     void (*head)(void *ud, int status, pt_str retry_after);

@@ -90,8 +90,16 @@ static int p_append(pt_store *vs, const void *p, size_t n, bool sync)
 static int p_read_log(pt_store *vs, pt_buf *out)
 {
     posix_store *s = (posix_store *)vs;
-    char tmp[65536];
+    char tmp[8192];
+    struct stat st;
     off_t off = 0;
+    if (fstat(s->log_fd, &st) != 0)
+        return fail(vs, "cannot stat", "log.jsonl");
+    if (st.st_size < 0 || (uint64_t)st.st_size > SIZE_MAX ||
+        !pt_buf_reserve(out, (size_t)st.st_size)) {
+        snprintf(vs->err, sizeof vs->err, "out of memory reading log.jsonl");
+        return -1;
+    }
     for (;;) {
         ssize_t r = pread(s->log_fd, tmp, sizeof tmp, off);
         if (r < 0 && errno == EINTR)

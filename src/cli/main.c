@@ -536,7 +536,7 @@ int main(int argc, char **argv)
     if (warn[0])
         fprintf(stderr, "pytte: %s\n", warn);
     tty = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
-    if (o.cont) {
+    if (o.cont && (o.print || !tty)) {
         if (!getcwd(cwd, sizeof cwd) || !cli_sessions_list(cwd, &picked, 1))
             die("no session to continue in this directory", NULL);
         o.id = picked;
@@ -551,6 +551,7 @@ int main(int argc, char **argv)
         return print_mode(&o, o.id, &cfg);
     if (term && strcmp(term, "dumb") == 0)
         die("TERM=dumb is not supported yet; use -p", NULL);
-    apply_config(&o, &cfg, o.id == NULL);
+    o.c.continue_current = o.cont;
+    apply_config(&o, &cfg, o.id == NULL && !o.cont);
     return tui_run(&o.c, &cfg, o.id, o.prompt);
 }

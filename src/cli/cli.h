@@ -29,6 +29,8 @@ void cli_config_set(cli_config *c, int k, const char *v, const char *src);
  * (a file that does not parse, I/O) it applies to this process only, and
  * err says why. */
 bool cli_config_save(cli_config *c, int k, const char *v, char *err, size_t cap);
+/* Persist one setting without mutating the caller's configuration. */
+bool cli_config_write(const char *path, int k, const char *v, char *err, size_t cap);
 /* Set key (dotted: "tui.thinking") to a JSON value in the file's text,
  * changing nothing else. False with err when the text is not a JSON
  * object, or the path is not made of objects. */
@@ -43,9 +45,11 @@ typedef struct cli_opts {
     const char *model, *system, *append_system, *script;
     pt_reasoning reasoning;
     uint32_t max_tokens, retry_base_ms;
-    bool no_sync, force;
+    bool no_sync, force, continue_current;
     bool (*stop)(void *ud); /* polled by pt_rt_run (print mode) */
 } cli_opts;
+
+typedef struct cli_open_job cli_open_job;
 
 typedef struct cli_session {
     char id[64], dir[4200];
@@ -53,6 +57,7 @@ typedef struct cli_session {
     pt_agent *a;
     pt_rt *rt;
     pt_http_driver *http;
+    cli_open_job *background; /* owns the interactive I/O worker, when used */
 } cli_session;
 
 /* $XDG_STATE_HOME/pytte/sessions (by default ~/.local/state/...). */
@@ -68,6 +73,24 @@ bool cli_session_cwd(const char *id, char *out, size_t cap);
  * an exit code (1 setup, 20 storage or corruption) with err set. */
 int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event_fn on_event,
                      void *ud, char *err, size_t cap);
+/* Interactive setup/recovery on a reusable worker. s is exclusively owned
+ * by the job until finish returns true. Options/ID strings are copied;
+ * on_event/ud remain borrowed for the session lifetime. finish never waits:
+ * fd wakes the UI, code is the ordinary open result, and success transfers
+ * ownership of the job to s. When replacing an open s, its close and draft
+ * save run on the new worker before opening the replacement; its callback
+ * is suppressed after handoff. discard removes an empty prior session.
+ * cancel joins setup and releases it. */
+cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *id,
+                                bool history, pt_str draft, bool discard,
+                                pt_event_fn on_event, void *ud,
+                                char *err, size_t cap);
+int cli_session_job_fd(const cli_open_job *job);
+bool cli_session_finish(cli_open_job *job, int *code, char *err, size_t cap);
+void cli_session_cancel(cli_open_job *job);
+/* Take malloc'd setup data (NULL when absent); caller frees it. */
+char *cli_session_take_history(cli_session *s, size_t *n);
+char *cli_session_take_draft(cli_session *s, size_t *n);
 /* Clean exit: the close claim, then free everything. */
 void cli_session_close(cli_session *s);
 /* Free without closing (the agent is fatal). */

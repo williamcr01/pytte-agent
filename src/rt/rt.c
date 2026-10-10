@@ -26,7 +26,13 @@ struct pt_rt {
     uint32_t nreqs, rcap;
     sleeper *sleeps;
     uint32_t nsleeps, scap;
+    pt_worker *worker; /* borrowed; NULL keeps the blocking host behavior */
+    pt_fx io;          /* borrowed effect bytes until the worker finishes */
+    bool io_pending, io_ok;
+    char io_error[512];
 };
+
+static bool finish_io(pt_rt *rt, bool wait);
 
 static int64_t sys_now(void *ud)
 {
@@ -67,6 +73,7 @@ void pt_rt_free(pt_rt *rt)
 {
     if (!rt)
         return;
+    finish_io(rt, true);
     while (rt->nreqs)
         drop_req(rt, 0);
     free(rt->reqs);
@@ -79,6 +86,11 @@ void pt_rt_free(pt_rt *rt)
 pt_http_driver *pt_rt_http(const pt_rt *rt)
 {
     return rt->c.http;
+}
+
+void pt_rt_use_worker(pt_rt *rt, pt_worker *worker)
+{
+    rt->worker = worker;
 }
 
 /* ---- recovery ---- */
@@ -156,24 +168,75 @@ static void sink_done(void *ud, const char *error)
     pt_fx_done(r->rt->a, r->fx, error);
 }
 
-static void commit(pt_rt *rt, const pt_fx *fx)
+/* Called on the worker for the interactive host. It touches only the
+ * store and this job's result; core completion happens on the host thread. */
+static void store_io(void *ud)
 {
+    pt_rt *rt = (pt_rt *)ud;
     pt_store *st = rt->c.store;
+    const pt_fx *fx = &rt->io;
     uint64_t size;
+    rt->io_ok = false;
+    rt->io_error[0] = 0;
+    if (fx->kind == PT_FX_LIVE) {
+        if (fx->bytes.n)
+            st->live_put(st, fx->task, fx->bytes.p, fx->bytes.n);
+        else
+            st->live_del(st, fx->task);
+        rt->io_ok = true; /* snapshots remain best effort */
+        return;
+    }
     if (st->size(st, &size) != 0) {
-        pt_fx_done(rt->a, fx->id, st->err);
+        snprintf(rt->io_error, sizeof rt->io_error, "%s", st->err);
         return;
     }
     if (size != rt->log_end) {
-        pt_fx_done(rt->a, fx->id, "the log was modified by another writer");
+        snprintf(rt->io_error, sizeof rt->io_error, "the log was modified by another writer");
         return;
     }
     if (st->append(st, fx->bytes.p, fx->bytes.n, fx->sync) != 0) {
-        pt_fx_done(rt->a, fx->id, st->err);
+        snprintf(rt->io_error, sizeof rt->io_error, "%s", st->err);
         return;
     }
-    rt->log_end += fx->bytes.n;
-    pt_fx_done(rt->a, fx->id, NULL);
+    rt->io_ok = true;
+}
+
+static void io_done(pt_rt *rt)
+{
+    rt->io_pending = false;
+    if (rt->io.kind == PT_FX_COMMIT) {
+        if (rt->io_ok)
+            rt->log_end += rt->io.bytes.n;
+        pt_fx_done(rt->a, rt->io.id, rt->io_ok ? NULL : rt->io_error);
+    }
+}
+
+static bool finish_io(pt_rt *rt, bool wait)
+{
+    if (!rt->io_pending)
+        return false;
+    while (!pt_worker_finish(rt->worker)) {
+        pt_waitfd fd;
+        if (!wait)
+            return false;
+        fd.fd = pt_worker_fd(rt->worker);
+        pt_sys_wait(&fd, 1, -1);
+    }
+    io_done(rt);
+    return true;
+}
+
+static void start_io(pt_rt *rt, const pt_fx *fx)
+{
+    rt->io = *fx;
+    if (!rt->worker) {
+        store_io(rt);
+        io_done(rt);
+    } else if (pt_worker_start(rt->worker, store_io, rt)) {
+        rt->io_pending = true;
+    } else if (fx->kind == PT_FX_COMMIT) {
+        pt_fx_done(rt->a, fx->id, "could not schedule the durable write");
+    }
 }
 
 static void start_http(pt_rt *rt, const pt_fx *fx)
@@ -215,7 +278,7 @@ static void handle(pt_rt *rt, const pt_fx *fx)
     uint32_t i;
     switch (fx->kind) {
     case PT_FX_COMMIT:
-        commit(rt, fx);
+        start_io(rt, fx);
         break;
     case PT_FX_HTTP:
         start_http(rt, fx);
@@ -234,10 +297,7 @@ static void handle(pt_rt *rt, const pt_fx *fx)
         rt->sleeps[rt->nsleeps++].until = fx->until;
         break;
     case PT_FX_LIVE:
-        if (fx->bytes.n)
-            rt->c.store->live_put(rt->c.store, fx->task, fx->bytes.p, fx->bytes.n);
-        else
-            rt->c.store->live_del(rt->c.store, fx->task);
+        start_io(rt, fx);
         break;
     case PT_FX_CANCEL:
         for (i = 0; i < rt->nreqs; i++)
@@ -294,7 +354,10 @@ static unsigned drain(pt_rt *rt)
 {
     pt_fx fx;
     unsigned n = 0;
-    while (pt_poll(rt->a, &fx)) {
+    /* LIVE bytes last until the next poll; COMMIT bytes until completion.
+     * Holding the poll while I/O is pending safely borrows both, so there
+     * is no snapshot/commit allocation or copy on the worker path. */
+    while (!rt->io_pending && pt_poll(rt->a, &fx)) {
         handle(rt, &fx);
         n++;
     }
@@ -316,6 +379,18 @@ static void http_failed(pt_rt *rt)
 static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     int64_t now = rt->c.now(rt->c.clock_ud), until, wait = timeout_ms;
+    pt_waitfd all[32];
+    unsigned i, total = nfds;
+    if (total > 31)
+        total = 31;
+    for (i = 0; i < nfds; i++)
+        fds[i].ready = false;
+    for (i = 0; i < total; i++)
+        all[i] = fds[i];
+    if (rt->io_pending) {
+        all[total].fd = pt_worker_fd(rt->worker);
+        all[total++].ready = false;
+    }
     if (wake(rt, now))
         return;
     until = next_wake(rt);
@@ -323,18 +398,21 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
         wait = until - now;
     if (wait > INT32_MAX)
         wait = INT32_MAX;
-    if (rt->nreqs || nfds) {
-        if (rt->c.http->pump(rt->c.http, (int)wait, fds, nfds) < 0) {
+    if (rt->nreqs || total) {
+        if (rt->c.http->pump(rt->c.http, (int)wait, all, total) < 0) {
             http_failed(rt);
             /* still wait on the host's fds (a terminal, a signal pipe),
              * without spinning on a driver that keeps failing */
-            if (nfds)
-                pt_sys_wait(fds, nfds, wait < 0 || wait > 1000 ? 1000 : (int)wait);
+            if (total)
+                pt_sys_wait(all, total, wait < 0 || wait > 1000 ? 1000 : (int)wait);
         }
+        for (i = 0; i < nfds && i < 31; i++)
+            fds[i].ready = all[i].ready;
         sweep(rt);
     } else if (rt->nsleeps && wait > 0) {
         rt->c.sleep(rt->c.clock_ud, (uint32_t)wait);
     }
+    finish_io(rt, false);
     wake(rt, rt->c.now(rt->c.clock_ud));
 }
 
@@ -344,7 +422,7 @@ static pt_rt_result status(pt_rt *rt)
         return PT_RT_FATAL;
     if (pt_idle(rt->a))
         return PT_RT_IDLE;
-    if (!rt->nreqs && !rt->nsleeps)
+    if (!rt->nreqs && !rt->nsleeps && !rt->io_pending)
         return PT_RT_STUCK;
     return PT_RT_BUSY;
 }
@@ -354,7 +432,8 @@ pt_rt_result pt_rt_step(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds
     /* Work handed out (a commit, a request) changed what the host shows:
      * look once without waiting, so the host paints it now, not after
      * the timeout. */
-    unsigned n = drain(rt);
+    unsigned n = finish_io(rt, false) ? 1 : 0;
+    n += drain(rt);
     wait_once(rt, n ? 0 : timeout_ms, fds, nfds);
     drain(rt);
     return status(rt);
@@ -377,14 +456,23 @@ pt_rt_result pt_rt_run(pt_rt *rt)
 bool pt_rt_close(pt_rt *rt)
 {
     pt_fx fx;
-    int guard = 0;
     while (rt->nreqs)
         drop_req(rt, 0);
     rt->nsleeps = 0;
+    /* Land an in-flight claim before deciding whether it needs a close. */
+    finish_io(rt, true);
     pt_close(rt->a);
-    while (!pt_closed(rt->a) && !pt_fatal(rt->a) && guard++ < 1000)
-        while (pt_poll(rt->a, &fx))
+    while (!pt_closed(rt->a) && !pt_fatal(rt->a)) {
+        bool progress = false;
+        finish_io(rt, true);
+        while (!rt->io_pending && pt_poll(rt->a, &fx)) {
+            progress = true;
             if (fx.kind == PT_FX_COMMIT || fx.kind == PT_FX_LIVE)
                 handle(rt, &fx);
+        }
+        if (!progress && !rt->io_pending)
+            break; /* a stuck core; never silently drop a large input queue */
+    }
+    finish_io(rt, true);
     return pt_closed(rt->a);
 }

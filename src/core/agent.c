@@ -66,9 +66,16 @@ bool pt_core_grow(pt_agent *a, void **arr, uint32_t *cap, uint32_t need, size_t 
     void *p;
     if (need <= *cap)
         return true;
-    ncap = *cap ? *cap * 2 : 16;
-    while (ncap < need)
+    ncap = *cap ? *cap : 16;
+    while (ncap < need) {
+        if (ncap > UINT32_MAX / 2) {
+            ncap = need;
+            break;
+        }
         ncap *= 2;
+    }
+    if (elem && ncap > SIZE_MAX / elem)
+        return false;
     p = a->al.fn(a->al.ud, *arr, elem * *cap, elem * ncap);
     if (!p)
         return false;
@@ -455,8 +462,16 @@ static bool step(pt_agent *a)
         }
     }
     if (a->closing) {
-        if (!a->want_close)
+        /* Input accepted while the opening commit was pending must still
+         * reach the log. Leave its run pending for the next host. */
+        if (a->nsubs) {
+            build_submit(a);
+            return true;
+        }
+        if (!a->want_close) {
+            a->closed = true;
             return false;
+        }
         build_close(a);
         return true;
     }
@@ -584,8 +599,9 @@ pt_agent *pt_new(const pt_opts *o)
     if (!a->o.catalog)
         a->o.catalog = pt_ai_builtin_catalog();
     pt_arena_init(&a->perm, a->al, 4096);
-    pt_arena_init(&a->epoch, a->al, 65536);
-    pt_arena_init(&a->scratch, a->al, 65536);
+    pt_arena_init(&a->epoch, a->al, 4096);
+    pt_arena_init(&a->scratch, a->al, 8192);
+    pt_arena_init(&a->objects, a->al, 1024);
     pt_arena_init(&a->reqs, a->al, 1024);
     pt_arena_init(&a->subs_a, a->al, 1024);
     pt_arena_init(&a->after_a, a->al, 1024);
@@ -594,7 +610,11 @@ pt_agent *pt_new(const pt_opts *o)
     for (i = 0; i < PT_FXQ; i++)
         pt_buf_init(&a->q[i].bytes, a->al);
     a->next_id = 1;
-    pt_set_config(a, &o->config);
+    a->o.config.model = pt_arena_dup(&a->perm, o->config.model);
+    if (a->perm.oom) {
+        pt_free(a);
+        return NULL;
+    }
     return a;
 }
 
@@ -608,11 +628,9 @@ void pt_free(pt_agent *a)
         pt_run_free_live(a, t);
         pt_arena_free(&t->a);
         pt_buf_free(&t->rescued);
-        a->al.fn(a->al.ud, t, sizeof *t, 0);
     }
     for (i = 0; i < a->ninputs; i++) {
         pt_arena_free(&a->inputs[i]->a);
-        a->al.fn(a->al.ud, a->inputs[i], sizeof(input), 0);
     }
     a->al.fn(a->al.ud, a->tasks, sizeof(task *) * a->tcap, 0);
     a->al.fn(a->al.ud, a->inputs, sizeof(input *) * a->icap, 0);
@@ -625,6 +643,7 @@ void pt_free(pt_agent *a)
     pt_arena_free(&a->perm);
     pt_arena_free(&a->epoch);
     pt_arena_free(&a->scratch);
+    pt_arena_free(&a->objects);
     pt_arena_free(&a->reqs);
     pt_arena_free(&a->subs_a);
     pt_arena_free(&a->after_a);
@@ -633,8 +652,15 @@ void pt_free(pt_agent *a)
 
 void pt_set_config(pt_agent *a, const pt_config *c)
 {
+    pt_str model = a->o.config.model;
+    if (!pt_str_eq(model, c->model))
+        model = pt_arena_dup(&a->perm, c->model);
+    if (a->perm.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory setting configuration", PT_STR_NULL);
+        return;
+    }
     a->o.config = *c;
-    a->o.config.model = pt_arena_dup(&a->perm, c->model);
+    a->o.config.model = model;
 }
 
 bool pt_create(pt_agent *a, const pt_session_cfg *c)
@@ -741,9 +767,9 @@ void pt_close(pt_agent *a)
     if (a->closing)
         return;
     a->closing = true;
-    if (a->mine && !a->want_open)
+    if (a->mine || a->want_open)
         a->want_close = true;
-    else
+    else if (!a->want_create && !a->commit_out && !a->nsubs)
         a->closed = true;
 }
 

@@ -5,11 +5,27 @@ AR       ?= ar
 CSTD     := -std=c99
 WARN     := -Wall -Wextra -Wpedantic -Wshadow -Wstrict-prototypes -Wmissing-prototypes
 CFLAGS   ?= -O2 -g
+LDFLAGS  ?=
+STRIP    ?= strip
+ifeq ($(shell uname -s),Darwin)
+GC_LDFLAGS := -Wl,-dead_strip
+else
+GC_LDFLAGS := -Wl,--gc-sections
+endif
 CPPFLAGS += -Iinclude -Isrc
 BUILD    := build
 
 CURL_CFLAGS := $(shell pkg-config --cflags libcurl 2>/dev/null)
 CURL_LIBS   := $(shell pkg-config --libs libcurl 2>/dev/null || echo -lcurl)
+# Keep libcurl's shared-library tree out of startup; direct linkage remains
+# available for static/custom curl builds: make CURL_LINK=direct.
+CURL_LINK ?= dynamic
+ifeq ($(CURL_LINK),direct)
+CPPFLAGS += -DPT_CURL_LINKED
+CURL_LDLIBS := $(CURL_LIBS)
+else
+CURL_LDLIBS := $(if $(filter Darwin,$(shell uname -s)),,-ldl)
+endif
 
 # Portable parts: no stdio, no malloc, no floating point.
 BASE_SRC := $(wildcard src/base/*.c)
@@ -17,7 +33,7 @@ AI_SRC   := $(wildcard src/ai/*.c)
 CORE_SRC := $(wildcard src/core/*.c)
 LIB_SRC  := $(BASE_SRC) $(AI_SRC) $(CORE_SRC)
 # Host parts.
-DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/drv/store_memory.c
+DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/drv/store_memory.c src/drv/worker_posix.c
 RT_SRC   := src/rt/rt.c
 SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
@@ -32,12 +48,26 @@ obj       = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
 PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) src/cli/pytte_ai.c)
 PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) $(CLI_SRC) $(APP_SRC))
 
-.PHONY: all test crash screen pty-asan portable fuzz clean fixtures-update models width
+.PHONY: all release test crash screen pty-asan portable fuzz clean fixtures-update models width bench
 all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a $(BUILD)/replay
+
+# Keep normal builds debuggable. The distributable binaries use the same
+# features, with cross-file optimization and unused code/symbols removed.
+release:
+	$(MAKE) BUILD=$(BUILD)/release CFLAGS='-Os -flto -ffunction-sections -fdata-sections' LDFLAGS='$(LDFLAGS) $(GC_LDFLAGS)' all
+	$(STRIP) $(BUILD)/release/pytte $(BUILD)/release/pytte-ai
+
+# Offline optimized workloads; counters are in the harness, not the core.
+$(BUILD)/bench/perf: tests/bench_perf.c $(LIB_SRC) src/tui/input.c src/tui/text.c $(wildcard include/*.h src/*/*.h)
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(WARN) -O2 -g $(CPPFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) src/tui/input.c src/tui/text.c -o $@
+
+bench: $(BUILD)/bench/perf $(BUILD)/pytte
+	@for w in core conversation stream history layout editing; do ./$(BUILD)/bench/perf $$w 10 || exit 1; done
 
 $(BUILD)/obj/%.o: %.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(WARN) $(CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(CSTD) $(WARN) $(CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) -pthread -MMD -MP -c $< -o $@
 
 $(BUILD)/libpytte-ai.a: $(AI_OBJ)
 	$(AR) rcs $@ $^
@@ -46,19 +76,23 @@ $(BUILD)/libpytte.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
 
 $(BUILD)/pytte-ai: $(PYTTE_AI_OBJ) $(BUILD)/libpytte-ai.a
-	$(CC) $(CFLAGS) $^ $(CURL_LIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
 
 $(BUILD)/pytte: $(PYTTE_OBJ) $(BUILD)/libpytte.a
-	$(CC) $(CFLAGS) $^ $(CURL_LIBS) -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
 
 # ---- tests: built from source with ASan and UBSan ----
 TEST_CC     ?= $(CC)
 TEST_CFLAGS := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TESTS       := $(patsubst tests/%.c,$(BUILD)/test/%,$(wildcard tests/test_*.c))
 
+$(BUILD)/test/test_http: tests/test_http.c tests/t.h $(BASE_SRC) src/drv/sys_posix.c $(CURL_SRC) $(wildcard include/*.h src/drv/*.h)
+	@mkdir -p $(dir $@)
+	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(BASE_SRC) src/drv/sys_posix.c $(CURL_SRC) $(CURL_LDLIBS) -pthread -o $@
+
 $(BUILD)/test/%: tests/%.c tests/t.h tests/vt.c $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(CLI_SRC) $(wildcard include/*.h src/*/*.h src/*/*.inc)
 	@mkdir -p $(dir $@)
-	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(CLI_SRC) -o $@
+	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(CLI_SRC) -pthread -o $@
 
 test: $(TESTS) $(BUILD)/pytte-ai $(BUILD)/pytte
 	@for t in $(TESTS); do ./$$t || exit 1; done
@@ -68,7 +102,7 @@ test: $(TESTS) $(BUILD)/pytte-ai $(BUILD)/pytte
 # Replay a PYTTE_TUI_TRACE file into the test emulator: build/replay TRACE
 $(BUILD)/replay: tests/replay.c tests/t.h tests/vt.c $(BASE_SRC) src/drv/sys_posix.c src/tui/text.c
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) $< $(BASE_SRC) src/drv/sys_posix.c src/tui/text.c -o $@
+	$(CC) $(CSTD) $(CFLAGS) $(LDFLAGS) $(CPPFLAGS) $< $(BASE_SRC) src/drv/sys_posix.c src/tui/text.c -o $@
 
 # The screen property test with many more random sessions (section 22.5).
 screen: $(BUILD)/test/test_screen
@@ -110,7 +144,7 @@ portable:
 
 # ---- fuzzing (clang + libFuzzer) ----
 FUZZERS := $(patsubst tests/fuzz/%.c,$(BUILD)/fuzz/%,$(wildcard tests/fuzz/fuzz_*.c))
-FUZZ_TUI := src/tui/text.c src/tui/keys.c
+FUZZ_TUI := src/tui/text.c src/tui/keys.c src/tui/input.c
 $(BUILD)/fuzz/%: tests/fuzz/%.c $(LIB_SRC) $(FUZZ_TUI)
 	@mkdir -p $(dir $@)
 	clang -g -O1 -fsanitize=fuzzer,address,undefined $(CPPFLAGS) $< $(LIB_SRC) $(FUZZ_TUI) -o $@

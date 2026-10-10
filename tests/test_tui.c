@@ -92,6 +92,10 @@ static void test_clusters(void)
         CHECK(tui_prev_cluster(s, i) == b[n]);
         i = b[n];
     }
+    s = PT_S("a\xe2\x80\x8d" "bc\n");
+    CHECK(tui_prev_cluster(s, 5) == 0); /* ZWJ can join an ASCII base. */
+    CHECK(tui_prev_cluster(s, 6) == 5);
+    CHECK(tui_prev_cluster(s, 7) == 6);
 }
 
 static void test_clean(void)
@@ -473,8 +477,8 @@ static void test_input(void)
     tui_input_init(&in, T_AL);
     tui_hist_load(&in, pt_buf_str(&f), 1000);
     CHECK(in.nhist == 2);
-    CHECK_STR(pt_buf_str(&in.hist[0]), "a \"quoted\"\nentry");
-    CHECK_STR(pt_buf_str(&in.hist[1]), "[2J"); /* cleaned */
+    CHECK_STR(tui_hist_at(&in, 0), "a \"quoted\"\nentry");
+    CHECK_STR(tui_hist_at(&in, 1), "[2J"); /* cleaned */
     tui_input_free(&in);
     pt_buf_free(&f);
 }

@@ -37,8 +37,18 @@ void *pt_arena_alloc(pt_arena *a, size_t n)
     }
     if (!c || c->cap - c->used < need) {
         size_t cap = need > a->chunk ? need : a->chunk;
-        size_t total = round_up(sizeof(pt_arena_chunk)) + cap;
+        size_t total;
         pt_arena_chunk *nc;
+        /* Small repeated objects grow regular chunks geometrically, up
+         * to 64 KiB. Reset still retains only the initial-sized chunk. */
+        if (c && need <= a->chunk && c->cap >= a->chunk && c->cap < 65536) {
+            size_t grown = c->cap * 2;
+            if (grown > 65536)
+                grown = 65536;
+            if (grown > cap)
+                cap = grown;
+        }
+        total = round_up(sizeof(pt_arena_chunk)) + cap;
         if (total < cap) {
             a->oom = true;
             return NULL;
@@ -79,7 +89,12 @@ void *pt_arena_zalloc(pt_arena *a, size_t n)
 pt_str pt_arena_dup(pt_arena *a, pt_str s)
 {
     pt_str r = {"", 0};
-    char *p = (char *)pt_arena_alloc(a, s.n + 1);
+    char *p;
+    if (s.n == SIZE_MAX) {
+        a->oom = true;
+        return r;
+    }
+    p = (char *)pt_arena_alloc(a, s.n + 1);
     if (!p)
         return r;
     if (s.n)

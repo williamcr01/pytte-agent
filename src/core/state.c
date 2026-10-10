@@ -127,8 +127,8 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
     t->status = (task_status)v;
     t->input = getid(r, "input");
     if (t->status == ST_DONE) {
-        t->outcome = pt_arena_dup(ar, pt_json_gets(out, "status", ar));
-        t->reason = pt_arena_dup(ar, pt_json_gets(out, "reason", ar));
+        t->outcome = pt_json_gets(out, "status", ar);
+        t->reason = pt_json_gets(out, "reason", ar);
         t->result = getid(out, "entry");
         return t->outcome.n > 0;
     }
@@ -140,7 +140,7 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
         const pt_json *p = pt_json_get(st, "params");
         int64_t mt = pt_json_geti(p, "max_tokens", 0);
         t->cutoff = getid(st, "cutoff");
-        t->model = pt_arena_dup(ar, pt_json_gets(p, "model", ar));
+        t->model = pt_json_gets(p, "model", ar);
         if (!pt_reasoning_parse(pt_json_gets(p, "reasoning", ar), &t->reasoning))
             t->reasoning = PT_REASON_DEFAULT;
         t->max_tokens = mt > 0 && mt <= (int64_t)UINT32_MAX ? (uint32_t)mt : 0;
@@ -156,25 +156,23 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
 {
     task *t = pt_core_task(a, id), nt;
     memset(&nt, 0, sizeof nt);
-    pt_arena_init(&nt.a, a->al, 512);
-    if (!read_task(r, &nt, &nt.a) || nt.a.oom) {
-        pt_arena_free(&nt.a);
+    /* Validate in temporary storage before replacing persistent strings. */
+    if (!read_task(r, &nt, &a->scratch) || a->scratch.oom)
         return false;
-    }
     nt.id = id;
     if (nt.status != ST_DONE && nt.phase == PH_REQUEST && !pt_str_eq(nt.model, a->last_model))
         a->last_model = pt_arena_dup(&a->perm, nt.model);
     if (!t) {
         if (!pt_core_grow(a, (void **)&a->tasks, &a->tcap, a->ntasks + 1, sizeof(task *)))
             goto oom;
-        t = (task *)a->al.fn(a->al.ud, NULL, 0, sizeof *t);
+        t = (task *)pt_arena_zalloc(&a->objects, sizeof *t);
         if (!t)
             goto oom;
-        memset(t, 0, sizeof *t);
+        pt_arena_init(&t->a, a->al, 128);
         pt_buf_init(&t->rescued, a->al);
         a->tasks[a->ntasks++] = t; /* IDs only grow, so this stays sorted */
     } else {
-        pt_arena_free(&t->a);
+        pt_arena_reset(&t->a);
     }
     /* Replace the durable part; keep what belongs to this process. */
     {
@@ -182,15 +180,23 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
         run_live *live = t->live;
         pt_buf rescued = t->rescued;
         bool woke = t->woke;
+        nt.a = t->a;
+        if (nt.model.n)
+            nt.model = pt_arena_dup(&nt.a, nt.model);
+        if (nt.outcome.n)
+            nt.outcome = pt_arena_dup(&nt.a, nt.outcome);
+        if (nt.reason.n)
+            nt.reason = pt_arena_dup(&nt.a, nt.reason);
         *t = nt;
         t->fx = fx;
         t->live = live;
         t->rescued = rescued;
         t->woke = woke;
     }
+    if (t->a.oom || a->perm.oom)
+        goto oom;
     return true;
 oom:
-    pt_arena_free(&nt.a);
     pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
     return false;
 }
@@ -198,33 +204,35 @@ oom:
 static bool apply_input(pt_agent *a, const pt_json *r, uint32_t id)
 {
     input *in = pt_core_input(a, id);
-    pt_arena na;
+    pt_str req, text;
     unsigned v;
-    pt_arena_init(&na, a->al, 256);
-    if (!lookup(pt_json_gets(r, "status", &na), input_status_names, 5, &v)) {
-        pt_arena_free(&na);
+    if (!lookup(pt_json_gets(r, "status", &a->scratch), input_status_names, 5, &v))
         return false;
-    }
+    req = pt_json_gets(r, "req", &a->scratch);
+    text = pt_json_gets(r, "text", &a->scratch);
+    if (a->scratch.oom)
+        goto oom;
     if (!in) {
         if (!pt_core_grow(a, (void **)&a->inputs, &a->icap, a->ninputs + 1, sizeof(input *)))
             goto oom;
-        in = (input *)a->al.fn(a->al.ud, NULL, 0, sizeof *in);
+        in = (input *)pt_arena_zalloc(&a->objects, sizeof *in);
         if (!in)
             goto oom;
-        memset(in, 0, sizeof *in);
+        pt_arena_init(&in->a, a->al, 64);
         a->inputs[a->ninputs++] = in;
-    } else {
-        pt_arena_free(&in->a);
     }
-    in->a = na;
+    if (!pt_str_eq(in->req, req) || !pt_str_eq(in->text, text)) {
+        pt_arena_reset(&in->a);
+        in->req = req.n ? pt_arena_dup(&in->a, req) : PT_STR_NULL;
+        in->text = text.n ? pt_arena_dup(&in->a, text) : PT_STR_NULL;
+        if (in->a.oom)
+            goto oom;
+    }
     in->id = id;
     in->status = (input_status)v;
     in->run = getid(r, "run");
-    in->req = pt_arena_dup(&in->a, pt_json_gets(r, "req", &in->a));
-    in->text = pt_arena_dup(&in->a, pt_json_gets(r, "text", &in->a));
-    return !in->a.oom;
+    return true;
 oom:
-    pt_arena_free(&na);
     pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
     return false;
 }
