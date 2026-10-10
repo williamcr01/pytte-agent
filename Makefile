@@ -14,23 +14,28 @@ CURL_LIBS   := $(shell pkg-config --libs libcurl 2>/dev/null || echo -lcurl)
 # Portable parts: no stdio, no malloc, no floating point.
 BASE_SRC := $(wildcard src/base/*.c)
 AI_SRC   := $(wildcard src/ai/*.c)
-LIB_SRC  := $(BASE_SRC) $(AI_SRC)
+CORE_SRC := $(wildcard src/core/*.c)
+LIB_SRC  := $(BASE_SRC) $(AI_SRC) $(CORE_SRC)
 # Host parts.
 SYS_SRC  := src/drv/sys_posix.c src/drv/http_faux.c
 CURL_SRC := src/drv/http_curl.c
 CLI_SRC  := src/cli/pytte_ai.c
 
+AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
 LIB_OBJ  := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
 HOST_OBJ := $(SYS_SRC:%.c=$(BUILD)/obj/%.o) $(CURL_SRC:%.c=$(BUILD)/obj/%.o) $(CLI_SRC:%.c=$(BUILD)/obj/%.o)
 
 .PHONY: all test portable fuzz clean fixtures-update models
-all: $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a
+all: $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a
 
 $(BUILD)/obj/%.o: %.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(WARN) $(CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD)/libpytte-ai.a: $(LIB_OBJ)
+$(BUILD)/libpytte-ai.a: $(AI_OBJ)
+	$(AR) rcs $@ $^
+
+$(BUILD)/libpytte.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
 
 $(BUILD)/pytte-ai: $(HOST_OBJ) $(BUILD)/libpytte-ai.a

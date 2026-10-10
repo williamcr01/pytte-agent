@@ -13,8 +13,11 @@
  *       "stop": "tool_use", "usage": {"input": 10, "output": 5}},
  *      {"status": 529, "body": {"class": "retryable", "message": "overloaded"}},
  *      {"content": [...], "error": "boom", "class": "retryable"},
- *      {"content": [...], "cut": 120}]}
- * Turn n answers the request that has n assistant messages in its context. */
+ *      {"content": [...], "cut": 120},
+ *      [{"status": 529}, {"content": [...]}]]}
+ * Turn n answers the request that has n assistant messages in its context.
+ * A turn that is a list answers its first request with the first response,
+ * the next (a retry) with the second, and so on; the last one repeats. */
 #include "ai.h"
 
 /* ---- API ---- */
@@ -173,7 +176,8 @@ static void deltas(pt_buf *b, pt_buf *tmp, pt_str text)
     }
 }
 
-bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_response *out, pt_arena *a)
+bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_state *st, pt_faux_response *out,
+                     pt_arena *a)
 {
     pt_json_err err;
     pt_json *root = pt_json_parse(script, a, &err);
@@ -194,6 +198,12 @@ bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_response *out, 
         return false;
     turns = pt_json_get(root, "turns");
     turn = n >= 0 ? pt_json_at(turns, (uint32_t)n) : NULL;
+    if (pt_json_is(turn, PT_J_ARR)) {
+        uint32_t seen = st && n < PT_FAUX_TURNS ? st->seen[n] : 0;
+        turn = pt_json_at(turn, seen < turn->len ? seen : turn->len - 1);
+    }
+    if (st && n >= 0 && n < PT_FAUX_TURNS)
+        st->seen[n]++;
     out->chunk = (uint32_t)pt_json_geti(turn, "chunk", pt_json_geti(root, "chunk", 0));
     out->delay_ms = (uint32_t)pt_json_geti(turn, "delay_ms", pt_json_geti(root, "delay_ms", 0));
     out->cut = pt_json_geti(turn, "cut", -1);

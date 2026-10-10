@@ -296,8 +296,17 @@ typedef struct pt_faux_response {
     int64_t cut;    /* close the connection after this many bytes; -1 = never */
 } pt_faux_response;
 
+/* What the faux server remembers between requests: how often each turn
+ * was asked for, so a turn can fail first and succeed when retried. */
+#define PT_FAUX_TURNS 64
+typedef struct pt_faux_state {
+    uint32_t seen[PT_FAUX_TURNS];
+} pt_faux_state;
+
 /* The faux "server": answers a request built for the faux API from a script
- * (see tests/faux/). Pure; allocates in a. */
-bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_response *out, pt_arena *a);
+ * (see tests/faux/). st may be NULL (every request is a first one).
+ * Allocates in a. */
+bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_state *st, pt_faux_response *out,
+                     pt_arena *a);
 
 #endif

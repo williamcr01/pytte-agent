@@ -437,7 +437,7 @@ static const pt_msg *faux_turn(uint32_t n, sink *k, const pt_ai_error **err)
     c.tools = NULL;
     c.ntools = 0;
     CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
-    CHECK(pt_faux_respond(pt_strz(script), r.body, &resp, &A));
+    CHECK(pt_faux_respond(pt_strz(script), r.body, NULL, &resp, &A));
     pt_buf_init(&k->text, T_AL);
     pt_buf_init(&k->log, T_AL);
     s = pt_ai_stream_new(&t, &A, T_AL, on_event, k, 1000);

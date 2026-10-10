@@ -40,6 +40,10 @@ long pt_str_find(pt_str s, char c);
 /* Decimal digits only; false on empty, junk or overflow. */
 bool pt_str_to_u64(pt_str s, uint64_t *out);
 
+/* ---- checksums ---------------------------------------------------------------
+ * CRC-32 (IEEE). Start with crc = 0; pass the previous result to continue. */
+uint32_t pt_crc32(uint32_t crc, const void *p, size_t n);
+
 /* ---- arena ---------------------------------------------------------------
  * Grows in chunks from the allocator, frees everything at once. After a
  * failed allocation `oom` stays set, so callers may check once at the end. */

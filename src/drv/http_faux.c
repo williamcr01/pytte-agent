@@ -22,6 +22,7 @@ typedef struct faux_drv {
     char *script;
     size_t script_n;
     fx *list;
+    pt_faux_state st;
 } faux_drv;
 
 static void *start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sink *sink)
@@ -33,7 +34,7 @@ static void *start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sin
     if (!x)
         return NULL;
     pt_arena_init(&a, pt_sys_allocator(), 0);
-    if (!pt_faux_respond((pt_str){d->script, d->script_n}, req->body, &r, &a)) {
+    if (!pt_faux_respond((pt_str){d->script, d->script_n}, req->body, &d->st, &r, &a)) {
         /* a broken script answers like a broken server */
         r.status = 500;
         r.body = PT_S("{\"class\":\"fatal\",\"message\":\"the faux script is not valid JSON\"}");
