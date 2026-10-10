@@ -269,14 +269,14 @@ static void test_chat(void)
     CHECK(p.v->kitty == 1); /* the query was answered: flags pushed */
     CHECK(p.v->paste);
     keys(&p, "hi there");
-    CHECK(wait_for(&p, "› hi there", 2000));
+    CHECK(wait_for(&p, "❯ hi there", 2000));
     keys(&p, "\r");
     CHECK(wait_for(&p, "Hello from the faux provider! Nothing here touched the network.", 5000));
     CHECK(wait_for(&p, "✻ thought", 2000));
     CHECK(wait_idle(&p, 3000));
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
     CHECK(finish(&p, 3000) == 0);
-    CHECK(has(&p, "› hi there"));
+    CHECK(has(&p, "┃ hi there"));
     CHECK(has(&p, "pytte -c to continue"));
     modes_restored(&p);
     CHECK(!p.v->paste);
@@ -302,7 +302,7 @@ static void test_kill9(void)
     pty_free(&p);
     /* the transcript is the same after pytte -c, with the partial marked */
     pty_start(&p, 24, 80, again);
-    CHECK(wait_for(&p, "› list the files", 3000));
+    CHECK(wait_for(&p, "┃ list the files", 3000));
     CHECK(wait_for(&p, "(interrupted)", 3000));
     CHECK(wait_for(&p, "and resume.\n", 8000));
     CHECK(wait_idle(&p, 3000));
@@ -325,11 +325,11 @@ static void test_suspend_and_signals(void)
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "session ", 3000));
     keys(&p, "draft text");
-    CHECK(wait_for(&p, "› draft text", 2000));
+    CHECK(wait_for(&p, "❯ draft text", 2000));
     keys(&p, "\x1b[122;5u"); /* Ctrl-Z */
     CHECK(wait_for(&p, "[stopped]", 2000));
     CHECK(p.v->kitty == 0 && !p.v->paste); /* restored while stopped */
-    CHECK(wait_for(&p, "› draft text", 3000)); /* continued: drawn again */
+    CHECK(wait_for(&p, "❯ draft text", 3000)); /* continued: drawn again */
     pump(&p, 100);
     CHECK(p.v->kitty == 1 && p.v->paste);
     /* a resize storm */
@@ -372,12 +372,14 @@ static void test_interrupt_and_queue(void)
     keys(&p, "and then?\r");
     CHECK(wait_for(&p, "queued: and then?", 2000));
     CHECK(wait_for(&p, "No tools are", 5000));
+    /* the call shows the gist of its arguments; its result is on a rail */
+    CHECK(has(&p, "● bash ls\n│ This tool is not available"));
     keys(&p, "\x1b[27u");
     CHECK(wait_for(&p, "esc again to interrupt", 1000));
     keys(&p, "\x1b[27u");
     CHECK(wait_for(&p, "(interrupted)", 2000));
     /* the queued input goes next; the script's last turn answers it */
-    CHECK(wait_for(&p, "› and then?", 3000));
+    CHECK(wait_for(&p, "┃ and then?", 3000));
     CHECK(wait_for(&p, "and resume.\n", 8000));
     CHECK(wait_idle(&p, 3000));
     CHECK(!has(&p, "queued:"));
@@ -398,9 +400,9 @@ static void test_commands(void)
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "session ", 3000));
     keys(&p, "/");
-    CHECK(wait_for(&p, "/model  set the model", 1000));
+    CHECK(wait_for(&p, "▸ /model     set the model", 1000)); /* descriptions in a column */
     keys(&p, "th\t");
-    CHECK(wait_for(&p, "› /thinking ", 1000));
+    CHECK(wait_for(&p, "❯ /thinking ", 1000));
     CHECK(wait_for(&p, "collapsed", 1000));
     keys(&p, "full\r");
     CHECK(wait_for(&p, "thinking full", 1000));
@@ -415,7 +417,7 @@ static void test_commands(void)
     CHECK(wait_for(&p, "nosuch/provider: ", 1000));
     /* a model is always named: the menu lists no bare providers */
     keys(&p, "/model anthropic");
-    CHECK(wait_for(&p, "anthropic/claude-fable-5  Claude Fable 5", 1000));
+    CHECK(wait_for(&p, "▸ anthropic/claude-fable-5 ", 1000));
     CHECK(!has(&p, "anthropic  Anthropic"));
     keys(&p, "\x1b"); /* Esc closes the menu, so Enter sends what was typed */
     pump(&p, 100);
@@ -424,7 +426,7 @@ static void test_commands(void)
     keys(&p, "/settings model anthropic\x1b");
     pump(&p, 100);
     keys(&p, "\r");
-    CHECK(wait_for(&p, "› /settings model anthropic\nanthropic: no model given", 1000));
+    CHECK(wait_for(&p, "┃ /settings model anthropic\nanthropic: no model given", 1000));
     keys(&p, "/status\r");
     CHECK(wait_for(&p, "kitty keys on", 1000));
     keys(&p, "/help\r");
@@ -454,13 +456,13 @@ static void test_history_pager_draft(void)
     keys(&p, "first question\r");
     CHECK(wait_idle(&p, 5000));
     keys(&p, "\x1b[A");
-    CHECK(wait_for(&p, "› first question", 1000));
+    CHECK(wait_for(&p, "❯ first question", 1000));
     keys(&p, "\x03"); /* Ctrl-C clears it */
     keys(&p, "/settings pager cat\r");
     CHECK(wait_for(&p, "pager cat (user)", 1000));
     keys(&p, "\x0f"); /* Ctrl-O: the thinking in full, through cat */
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 2000));
-    CHECK(wait_for(&p, "› ", 1000));
+    CHECK(wait_for(&p, "❯ ", 1000));
     keys(&p, "unsent words");
     pump(&p, 1300); /* saved at most once a second */
     kill(p.pid, SIGTERM);
@@ -468,7 +470,7 @@ static void test_history_pager_draft(void)
     modes_restored(&p);
     pty_free(&p);
     pty_start(&p, 24, 80, again);
-    CHECK(wait_for(&p, "› unsent words", 3000));
+    CHECK(wait_for(&p, "❯ unsent words", 3000));
     keys(&p, "\x03\x03");
     pump(&p, 100);
     keys(&p, "\x03");

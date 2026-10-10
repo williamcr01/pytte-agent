@@ -27,12 +27,16 @@ enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
 #define DOUBLE_MS 1000
 
 typedef struct syms {
-    const char *prompt, *bullet, *think, *fail, *sel, *spin[10];
+    const char *prompt, *bullet, *think, *fail, *sel, *rail, *bar, *rule, *more, *spin[10];
     int nspin;
 } syms;
 
-static const syms uni = {"›", "●", "✻", "✗", "▸", {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}, 10};
-static const syms asc = {">", "*", "*", "x", ">", {"-", "\\", "|", "/"}, 4};
+static const syms uni = {"❯", "●", "✻", "✗", "▸", "┃", "│", "─", "…",
+                         {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}, 10};
+static const syms asc = {">", "*", "*", "x", ">", "|", "|", "-", "...", {"-", "\\", "|", "/"}, 4};
+
+#define SPIN_MS 120  /* the activity row's frame: spinner and shimmer */
+#define TOOL_ROWS 4  /* rows of a tool's output shown before "N more" */
 
 static const struct {
     const char *name, *args, *desc;
@@ -88,7 +92,7 @@ typedef struct app {
     int thinking;
     /* output: styled lines for the scrollback, committed at the next paint */
     pt_buf lines;
-    pt_buf tmp, tmp2, live_rows; /* scratch, reused */
+    pt_buf tmp, tmp2, wrap, live_rows; /* scratch, reused */
     pt_arena ar;
     /* the display model */
     uint32_t seen;   /* entries already shown */
@@ -111,7 +115,7 @@ typedef struct app {
     int menu;
     bool menu_closed;
     item items[MAX_ITEMS];
-    int nitems, sel;
+    int nitems, sel, label_w; /* label_w: the widest label shown, for the column */
     pt_buf items_buf;
     int set_sel;
     /* double presses and hints */
@@ -174,6 +178,53 @@ static void out_text(app *a, pt_buf *out, int style, const char *prefix, int pst
     } while (at <= s.n);
 }
 
+/* Outside text on a rail: every row, wrapped ones too, starts with the
+ * rail and a space. At most `max` rows (0: all), then one that says how
+ * many more there are. */
+static void out_rail(app *a, pt_buf *out, const char *rail, int rstyle, int style, pt_str raw, int max)
+{
+    pt_str s, rows;
+    size_t at = 0;
+    int col = 0, total = 0, n = 0, w = width(a) - tui_width(pt_strz(rail), true) - 1;
+    pt_buf_reset(&a->tmp);
+    tui_clean(&a->tmp, raw, &col);
+    s = pt_buf_str(&a->tmp);
+    while (s.n && s.p[s.n - 1] == '\n')
+        s.n--;
+    pt_buf_reset(&a->wrap);
+    do {
+        size_t e = at;
+        while (e < s.n && s.p[e] != '\n')
+            e++;
+        pt_buf_reset(&a->tmp2);
+        tui_style(&a->tmp2, style);
+        pt_buf_put(&a->tmp2, s.p + at, e - at);
+        total += tui_wrap(&a->wrap, pt_buf_str(&a->tmp2), w > 1 ? w : 1, 0, true, false);
+        at = e + 1;
+    } while (at <= s.n);
+    rows = pt_buf_str(&a->wrap);
+    at = 0;
+    while (at < rows.n) {
+        size_t e = at;
+        char more[64];
+        while (e < rows.n && rows.p[e] != '\n')
+            e++;
+        tui_style(out, rstyle);
+        pt_buf_putz(out, rail);
+        pt_buf_putc(out, ' ');
+        if (max && n == max && total > max + 1) {
+            tui_style(out, TUI_DIM);
+            snprintf(more, sizeof more, "%s %d more lines (ctrl+o)", a->sy->more, total - n);
+            pt_buf_putz(out, more);
+            pt_buf_putc(out, '\n');
+            break;
+        }
+        pt_buf_put(out, rows.p + at, e + 1 - at);
+        n++;
+        at = e + 1;
+    }
+}
+
 static void out_z(app *a, int style, const char *z)
 {
     out_text(a, &a->lines, style, NULL, 0, pt_strz(z), 0);
@@ -203,31 +254,40 @@ static void out_md(app *a, pt_buf *out, tui_md *m, pt_str raw, int base)
     }
 }
 
+/* The gist of a call's arguments: its first string member ("ls -la",
+ * "src/a.c"), else the JSON as it came. */
+static pt_str call_gist(app *a, pt_str args)
+{
+    const pt_json *j, *c;
+    pt_arena_reset(&a->ar);
+    j = pt_json_parse(args, &a->ar, NULL);
+    if (j && j->type == PT_J_OBJ)
+        for (c = j->child; c; c = c->next)
+            if (c->type == PT_J_STR)
+                return pt_json_str(c, &a->ar);
+    return args;
+}
+
 static void out_call(app *a, pt_buf *out, const pt_block *b, bool full)
 {
     char head[160];
-    snprintf(head, sizeof head, "%s %.*s  ", a->sy->bullet, (int)(b->name.n > 60 ? 60 : b->name.n),
+    snprintf(head, sizeof head, "%s %.*s ", a->sy->bullet, (int)(b->name.n > 60 ? 60 : b->name.n),
              b->name.p);
     if (full) {
         out_text(a, out, 0, head, TUI_BOLD, b->args, 2);
     } else { /* one row */
-        pt_str args = b->args;
+        int col = 0;
         size_t k;
         pt_buf_reset(&a->tmp2);
         tui_style(&a->tmp2, TUI_BOLD);
         pt_buf_putz(&a->tmp2, head);
-        tui_style(&a->tmp2, TUI_DIM);
-        k = pt_buf_str(&a->tmp2).n;
-        {
-            int col = 0;
-            pt_buf_reset(&a->tmp);
-            tui_clean(&a->tmp, args, &col);
-            for (col = 0; (size_t)col < a->tmp.n; col++)
-                if (a->tmp.p[col] == '\n')
-                    a->tmp.p[col] = ' ';
-            pt_buf_puts(&a->tmp2, pt_buf_str(&a->tmp));
-        }
-        (void)k;
+        tui_style(&a->tmp2, 0);
+        pt_buf_reset(&a->tmp);
+        tui_clean(&a->tmp, call_gist(a, b->args), &col);
+        for (k = 0; k < a->tmp.n; k++)
+            if (a->tmp.p[k] == '\n')
+                a->tmp.p[k] = ' ';
+        pt_buf_puts(&a->tmp2, pt_buf_str(&a->tmp));
         k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
         pt_buf_put(out, a->tmp2.p, k);
         pt_buf_putc(out, '\n');
@@ -266,10 +326,8 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
     const pt_msg *m = v->msg;
     uint32_t i;
     if (strcmp(v->kind, "user") == 0) {
-        char p[16];
-        snprintf(p, sizeof p, "%s ", a->sy->prompt);
         out_blank(out);
-        out_text(a, out, 0, p, TUI_BOLD, m->text, 2);
+        out_rail(a, out, a->sy->rail, TUI_DIM, TUI_BOLD, m->text, 0);
     } else if (strcmp(v->kind, "assistant") == 0) {
         bool any = false;
         out_blank(out);
@@ -291,11 +349,8 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
         if (m->stop == PT_STOP_ABORTED || m->stop == PT_STOP_ERROR)
             out_text(a, out, TUI_DIM, NULL, 0, any ? PT_S("(interrupted)") : PT_S("(interrupted, nothing arrived)"), 0);
     } else if (strcmp(v->kind, "tool_result") == 0) {
-        pt_str t = m->text;
-        long nl = pt_str_find(t, '\n');
-        if (!full && nl >= 0)
-            t.n = (size_t)nl;
-        out_text(a, out, m->is_error ? TUI_RED : TUI_DIM, "  ", 0, t, 4);
+        out_rail(a, out, a->sy->bar, TUI_DIM, m->is_error ? TUI_RED | TUI_DIM : TUI_DIM, m->text,
+                 full ? 0 : TOOL_ROWS);
     } else if (strcmp(v->kind, "error") == 0) {
         char p[16];
         snprintf(p, sizeof p, "%s ", a->sy->fail);
@@ -587,25 +642,49 @@ static void row(app *a, pt_str styled)
     tui_frame_row(&a->frame, styled, a->cols);
 }
 
+/* The activity row: a spinner, then what the run is doing with a bright
+ * band sweeping across the word, then the time and the hint. */
 static void spinner_row(app *a, int64_t now)
 {
     char line[400];
-    const char *what = a->phase == PH_THINK ? "thinking" : a->phase == PH_WRITE ? "writing" : "waiting";
-    int64_t el = (now - a->run_at) / 1000;
-    const char *spin = a->sy->spin[(now / 250) % a->sy->nspin];
+    const char *what = a->phase == PH_THINK ? "Thinking" : a->phase == PH_WRITE ? "Writing" : "Waiting";
+    int64_t el = (now - a->run_at) / 1000, frame = now / SPIN_MS;
+    const char *spin = a->sy->spin[frame % a->sy->nspin];
     const char *hint = now - a->esc_at < DOUBLE_MS ? "esc again to interrupt" : "esc esc to interrupt";
+    int n, i, at;
+    pt_buf_reset(&a->tmp);
+    tui_style(&a->tmp, TUI_BOLD);
+    pt_buf_putz(&a->tmp, spin);
+    pt_buf_putc(&a->tmp, ' ');
     if (a->phase == PH_RETRY) {
         int64_t left = (a->retry_until - now + 999) / 1000;
-        snprintf(line, sizeof line, "%s retrying in %llds · %s · %.*s", spin, (long long)(left > 0 ? left : 0), hint,
+        tui_style(&a->tmp, TUI_DIM);
+        snprintf(line, sizeof line, "Retrying in %llds · %s · %.*s", (long long)(left > 0 ? left : 0), hint,
                  (int)(a->retry_err.n > 200 ? 200 : a->retry_err.n), a->retry_err.p);
+        pt_buf_putz(&a->tmp, line);
     } else {
-        snprintf(line, sizeof line, "%s %s · %llds · %s", spin, what, (long long)el, hint);
+        n = (int)strlen(what);
+        at = (int)(frame % (n + 8)) - 3; /* the band: three letters, then a pause */
+        for (i = 0; i < n; i++) {
+            if (i == 0 || i == at || i == at + 3)
+                tui_style(&a->tmp, i >= at && i < at + 3 ? 0 : TUI_DIM);
+            pt_buf_putc(&a->tmp, what[i]);
+        }
+        tui_style(&a->tmp, TUI_DIM);
+        snprintf(line, sizeof line, " · %llds · %s", (long long)el, hint);
+        pt_buf_putz(&a->tmp, line);
     }
+    row(a, pt_buf_str(&a->tmp));
+}
+
+/* A dim line across the band, above and below the input. */
+static void rule_row(app *a)
+{
+    int i, w = width(a);
     pt_buf_reset(&a->tmp);
-    tui_style(&a->tmp, TUI_MAGENTA);
-    pt_buf_put(&a->tmp, line, strlen(spin));
     tui_style(&a->tmp, TUI_DIM);
-    pt_buf_putz(&a->tmp, line + strlen(spin));
+    for (i = 0; i < w; i++)
+        pt_buf_putz(&a->tmp, a->sy->rule);
     row(a, pt_buf_str(&a->tmp));
 }
 
@@ -656,8 +735,10 @@ static void menu_row(app *a, int i)
             pt_buf_putc(&a->tmp, '/');
         tui_clean(&a->tmp, item_label(a, i), &col);
         if (a->items[i].dn) {
+            int pad = a->label_w - tui_width(item_label(a, i), true);
             tui_style(&a->tmp, TUI_DIM);
-            pt_buf_putz(&a->tmp, "  ");
+            for (pad = pad > 0 ? pad + 2 : 2; pad > 0; pad--)
+                pt_buf_putc(&a->tmp, ' ');
             tui_clean(&a->tmp, (pt_str){a->items_buf.p + a->items[i].dat, a->items[i].dn}, &col);
         }
     }
@@ -667,7 +748,7 @@ static void menu_row(app *a, int i)
 /* Build the band (16.2.2) within its height budget. */
 static void build_frame(app *a, int64_t now)
 {
-    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, act, st, i, first, top;
+    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, act, st, rules, i, first, top;
     bool tiny = a->cols < 20 || a->rows < 4;
     pt_buf *live_rows = &a->live_rows;
     tui_frame_reset(&a->frame);
@@ -686,24 +767,27 @@ static void build_frame(app *a, int64_t now)
     if (nmenu > 8)
         nmenu = 8;
     st = 1;
+    rules = 2;
     show = a->rows / 3 < 8 ? a->rows / 3 : 8;
     if (show < 1)
         show = 1;
     tui_input_layout(&a->in, w > 3 ? w - 2 : 1, show);
     show = a->in.nrows < show ? a->in.nrows : show;
     if (tiny) {
-        live_n = act = nq = nmenu = st = 0;
+        live_n = act = nq = nmenu = st = rules = 0;
         show = 1;
     }
     /* drop parts until it fits */
-    while (live_n + act + nq + show + nmenu + st > avail) {
-        int over = live_n + act + nq + show + nmenu + st - avail;
+    while (live_n + act + nq + show + nmenu + st + rules > avail) {
+        int over = live_n + act + nq + show + nmenu + st + rules - avail;
         if (nmenu) {
             nmenu = nmenu > over ? nmenu - over : 0;
         } else if (nq > 1) {
             nq = 1;
         } else if (live_n) {
             live_n = live_n > over ? live_n - over : 0;
+        } else if (rules) {
+            rules = 0;
         } else if (act) {
             act = 0;
         } else if (st) {
@@ -754,7 +838,9 @@ static void build_frame(app *a, int64_t now)
         }
         row(a, pt_buf_str(&a->tmp));
     }
-    /* the input box */
+    /* the input box, between rules */
+    if (rules)
+        rule_row(a);
     first = a->frame.n;
     top = a->in.scroll;
     for (i = top; i < a->in.nrows && i < top + show; i++) {
@@ -792,10 +878,17 @@ static void build_frame(app *a, int64_t now)
         int start = sel - nmenu + 1 > 0 ? sel - nmenu + 1 : 0;
         int save = a->sel;
         a->sel = sel;
+        a->label_w = 0;
+        for (i = start; a->menu != MENU_SETTINGS && i < start + nmenu && i < total; i++) {
+            int lw = tui_width(item_label(a, i), true);
+            a->label_w = lw > a->label_w ? (lw > 40 ? 40 : lw) : a->label_w;
+        }
         for (i = start; i < start + nmenu && i < total; i++)
             menu_row(a, i);
         a->sel = save;
     }
+    if (rules)
+        rule_row(a);
     if (st)
         status_row(a, now);
 }
@@ -948,7 +1041,7 @@ static void out_tail(app *a, bool created)
     for (i = 0; i < from; i++)
         if (pt_entry_at(a->s.a, i, &v) && strcmp(v.kind, "epoch") != 0)
             earlier++;
-    snprintf(line, sizeof line, "session %s%s", a->s.id, created ? " (new)" : "");
+    snprintf(line, sizeof line, "session %s%s · /help for commands", a->s.id, created ? " (new)" : "");
     out_z(a, TUI_DIM, line);
     if (earlier) {
         snprintf(line, sizeof line, "%u earlier entries · pytte log %s shows them", earlier, a->s.id);
@@ -1087,10 +1180,8 @@ static void pager(app *a)
 
 static void out_cmd(app *a, pt_str line)
 {
-    char p[16];
-    snprintf(p, sizeof p, "%s ", a->sy->prompt);
     out_blank(&a->lines);
-    out_text(a, &a->lines, TUI_DIM, p, TUI_DIM, line, 2);
+    out_rail(a, &a->lines, a->sy->rail, TUI_DIM, TUI_DIM, line, 0);
 }
 
 static void cmd_status(app *a)
@@ -1620,7 +1711,7 @@ static int timeout_ms(app *a, int64_t now)
     if (tui_keys_pending(&a->keys))
         AT(a->keys_at + 30);
     if (a->running) {
-        due = a->spin_at + 250;
+        due = a->spin_at + SPIN_MS;
         AT(due);
     }
     if (now - a->esc_at < DOUBLE_MS)
@@ -1678,6 +1769,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_init(&a.lines, pt_sys_allocator());
     pt_buf_init(&a.tmp, pt_sys_allocator());
     pt_buf_init(&a.tmp2, pt_sys_allocator());
+    pt_buf_init(&a.wrap, pt_sys_allocator());
     pt_buf_init(&a.live_rows, pt_sys_allocator());
     pt_buf_init(&a.live, pt_sys_allocator());
     pt_buf_init(&a.retry_err, pt_sys_allocator());
@@ -1711,9 +1803,9 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         const char *home = getenv("HOME"), *dir = getcwd(cwd, sizeof cwd) ? cwd : "";
         size_t hn = home ? strlen(home) : 0;
         bool tilde = hn > 1 && strncmp(dir, home, hn) == 0 && (dir[hn] == '/' || !dir[hn]);
-        snprintf(head, sizeof head, "pytte %s · %.200s · %s%.300s", PT_VERSION, a.model[0] ? a.model : "(no model)",
+        snprintf(head, sizeof head, " %s · %.200s · %s%.300s", PT_VERSION, a.model[0] ? a.model : "(no model)",
                  tilde ? "~" : "", tilde ? dir + hn : dir);
-        out_text(&a, &first, TUI_DIM, NULL, 0, pt_strz(head), 0);
+        out_text(&a, &first, TUI_DIM, "pytte", TUI_BOLD, pt_strz(head), 0);
         pt_buf_puts(&first, pt_buf_str(&a.lines));
         pt_buf_reset(&a.lines);
         pt_buf_puts(&a.lines, pt_buf_str(&first));
@@ -1794,7 +1886,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
                 a.urgent = true;
             }
         }
-        if (a.running && now - a.spin_at >= 250) {
+        if (a.running && now - a.spin_at >= SPIN_MS) {
             a.spin_at = now;
             set_dirty(&a);
         }
@@ -1836,6 +1928,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_free(&a.tmp);
     pt_buf_free(&a.tmp2);
     pt_buf_free(&a.live_rows);
+    pt_buf_free(&a.wrap);
     pt_buf_free(&a.live);
     pt_buf_free(&a.retry_err);
     pt_buf_free(&a.items_buf);
