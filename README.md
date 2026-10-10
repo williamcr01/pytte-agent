@@ -57,6 +57,13 @@ command menu: `/model`, `/effort`, `/new`, `/resume`, `/status`,
 `/thinking`, `/settings`, `/help`, `/quit`. Settings are saved to
 `~/.config/pytte/config.json`.
 
+The footer shows the selected model and effort. Effort starts at `medium`;
+`/effort <level>` changes it for this session, and `/settings reasoning <level>`
+changes it now and saves it for future sessions. The levels are `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `off` requests disabled
+reasoning where the model supports it. `/quit` prints a dimmed `pytte -r <id>`
+command and keeps the session available to resume, even if it has no messages.
+
 Sessions live in `$XDG_STATE_HOME/pytte/sessions/<id>/` (by default
 `~/.local/state/pytte`). `log.jsonl` is the whole truth: one commit per line,
 readable with `jq`. Kill the process at any point and `pytte -c` continues

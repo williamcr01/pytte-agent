@@ -2,6 +2,8 @@
 
 ## Code quality
 
+- Never add backward compatibility unless the user explicitly asks for it.
+
 - Keep portable code (`src/base`, `src/ai`, `src/core`) strict C99.
   Route dynamic memory through `pt_allocator`; do not call libc
   allocation functions directly in these layers.

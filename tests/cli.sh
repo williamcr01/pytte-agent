@@ -44,10 +44,23 @@ check "--list shows the catalog" [ $? -eq 0 ]
 
 # ---- pytte ----
 XDG_STATE_HOME=$(mktemp -d)
-export XDG_STATE_HOME
+XDG_CONFIG_HOME="$XDG_STATE_HOME/config"
+export XDG_STATE_HOME XDG_CONFIG_HOME
+unset PYTTE_MODEL PYTTE_EFFORT
 
 out=$("$pytte" -p -m faux/faux --script tests/faux/hello.json hi 2>/dev/null)
 check "pytte -p prints the answer" [ "$out" = "Hello from the faux provider! Nothing here touched the network." ]
+id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
+check "effort starts at medium" grep -q '"reasoning":"medium"' "$XDG_STATE_HOME/pytte/sessions/$id/log.jsonl"
+"$pytte" -p -m faux/faux --effort default --script tests/faux/hello.json hi >/dev/null 2>&1
+check "default is not an effort choice" [ $? -eq 1 ]
+mkdir -p "$XDG_CONFIG_HOME/pytte"
+for invalid_effort in default ""; do
+    printf '{"reasoning":"%s"}\n' "$invalid_effort" >"$XDG_CONFIG_HOME/pytte/config.json"
+    "$pytte" -p -m faux/faux --script tests/faux/hello.json hi >/dev/null 2>&1
+    check "rejects invalid saved effort [$invalid_effort]" [ $? -eq 1 ]
+done
+rm "$XDG_CONFIG_HOME/pytte/config.json"
 
 out=$("$pytte" log 2>/dev/null)
 case $out in *"> hi"*"Hello from the faux provider"*) ok=0 ;; *) ok=1 ;; esac

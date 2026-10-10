@@ -161,6 +161,7 @@ typedef struct app {
     int64_t draft_at;
     char hist_path[4200];
     bool quit;
+    bool keep_on_quit; /* /quit keeps even an empty session for resuming */
     int code;
 } app;
 
@@ -820,10 +821,7 @@ static void status_row(app *a, int64_t now, int total, int sel)
         tui_style(&a->tmp, TUI_BOLD);
         pt_buf_putz(&a->tmp, model ? model + 1 : a->model[0] ? a->model : "no model");
         tui_style(&a->tmp, TUI_DIM);
-        n = 0;
-        line[0] = 0;
-        if (a->o.reasoning != PT_REASON_DEFAULT)
-            n += snprintf(line + n, sizeof line - (size_t)n, " · %s", pt_reasoning_name(a->o.reasoning));
+        n = snprintf(line, sizeof line, " · %s", pt_reasoning_name(a->o.reasoning));
         if (a->ctx_window) { /* the context used, of the model's window */
             char used[16], all[16];
             tokens_short(used, sizeof used, a->ctx_used);
@@ -1065,6 +1063,8 @@ static void paint(app *a)
 
 /* ---- settings, model, sessions ---- */
 
+static void set_config(app *a);
+
 static void apply_symbols(app *a)
 {
     const char *v = a->cfg->val[CFG_SYMBOLS], *term = getenv("TERM");
@@ -1177,6 +1177,13 @@ static bool save_setting(app *a, int k, const char *v)
         apply_thinking(a);
     if (k == CFG_SYMBOLS)
         apply_symbols(a);
+    if (k == CFG_REASONING) {
+        pt_reasoning r;
+        if (cli_effort_parse(pt_strz(a->cfg->val[k]), &r)) {
+            a->o.reasoning = r;
+            set_config(a);
+        }
+    }
     return ok;
 }
 
@@ -1311,7 +1318,8 @@ static bool open_session(app *a, const char *id)
     return true;
 }
 
-/* Close the session; an empty one this process made is discarded. */
+/* Close the session; an empty one this process made is discarded unless
+ * /quit asked to keep it for resuming. */
 static void finish_session(app *a);
 
 static void close_session(app *a)
@@ -1325,7 +1333,7 @@ static void close_session(app *a)
     }
     if (!a->open)
         return;
-    empty = session_empty(a);
+    empty = !a->keep_on_quit && session_empty(a);
     save_draft(a);
     if (pt_fatal(a->s.a) == PT_FATAL_STORAGE)
         cli_session_free(&a->s);
@@ -1465,7 +1473,7 @@ static bool valid_setting(int k, const char *v)
         return false;
     }
     if (k == CFG_REASONING)
-        return !*v || pt_reasoning_parse(pt_strz(v), &r);
+        return cli_effort_parse(pt_strz(v), &r);
     return true;
 }
 
@@ -1502,7 +1510,7 @@ static void run_command(app *a, pt_str line)
     } else if (pt_str_eqz(cmd, "effort")) {
         if (arg.n) {
             pt_reasoning r;
-            if (!pt_reasoning_parse(arg, &r)) {
+            if (!cli_effort_parse(arg, &r)) {
                 out_z(a, TUI_RED, "levels: off, minimal, low, medium, high, xhigh, max");
                 return;
             }
@@ -1569,6 +1577,7 @@ static void run_command(app *a, pt_str line)
     } else if (pt_str_eqz(cmd, "help")) {
         cmd_help(a);
     } else if (pt_str_eqz(cmd, "quit") || pt_str_eqz(cmd, "exit")) {
+        a->keep_on_quit = true;
         a->quit = true;
     } else {
         snprintf(msg, sizeof msg, "unknown command /%.*s; /help lists them", (int)(cmd.n > 100 ? 100 : cmd.n), cmd.p);
@@ -1862,18 +1871,14 @@ static void settings_key(app *a, const tui_ev *ev)
     } else if (k == CFG_SYMBOLS) {
         vals = sym_names;
         nv = 3;
+    } else if (k == CFG_REASONING) {
+        vals = levels;
+        nv = (int)(sizeof levels / sizeof levels[0]);
     }
     if (vals) {
         for (i = 0; i < nv && strcmp(a->cfg->val[k], vals[i]) != 0; i++)
             ;
         save_setting(a, k, vals[((i < nv ? i : 0) + dir + nv) % nv]);
-    } else if (k == CFG_REASONING) {
-        int n = (int)(sizeof levels / sizeof levels[0]) + 1; /* "" is the model's default */
-        for (i = 0; i < n - 1 && strcmp(a->cfg->val[k], levels[i]) != 0; i++)
-            ;
-        i = a->cfg->val[k][0] ? i + 1 : 0;
-        i = (i + dir + n) % n;
-        save_setting(a, k, i ? levels[i - 1] : "");
     } else { /* model, pager: edit as a command */
         snprintf(d, sizeof d, "/settings %s %s", settings[a->set_sel].name, k == CFG_PAGER ? a->cfg->val[k] : "");
         a->menu = MENU_NONE;

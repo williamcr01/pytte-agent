@@ -7,6 +7,8 @@
 
 /* The model for a new session when nothing else names one. */
 #define DEFAULT_MODEL "anthropic/claude-opus-5-5"
+/* The initial effort when no user, project, environment or flag sets one. */
+#define DEFAULT_EFFORT PT_REASON_MEDIUM
 
 /* ---- config.c: settings (section 19) ---- */
 
@@ -20,6 +22,9 @@ typedef struct cli_config {
 
 /* The dotted key of a setting ("tui.thinking"). */
 const char *cli_config_key(int k);
+/* Only concrete user-facing levels (off through max). On failure, out
+ * is unchanged; the AI library's default sentinel is not a CLI choice. */
+bool cli_effort_parse(pt_str s, pt_reasoning *out);
 /* Defaults, then the user file, the project file (.pytte/config.json in
  * the working directory) and PYTTE_* variables. Problems with a file are
  * reported in warn (empty when none); the file is then skipped. */

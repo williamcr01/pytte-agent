@@ -30,6 +30,7 @@ static const char usage[] =
     "  -m, --model REF         provider/model-id (default: $PYTTE_MODEL, the config\n"
     "                          file; else the session's last, or " DEFAULT_MODEL ")\n"
     "  --effort LEVEL          off, minimal, low, medium, high, xhigh, max ($PYTTE_EFFORT)\n"
+    "                          starts at medium unless configured otherwise\n"
     "  --max-tokens N          default: the model's maximum that fits the context\n"
     "  --system-prompt TEXT    system prompt of a new session\n"
     "  --append-system-prompt TEXT\n"
@@ -67,6 +68,7 @@ static void parse_args(int argc, char **argv, opts *o)
 {
     int i;
     memset(o, 0, sizeof o[0]);
+    o->c.reasoning = DEFAULT_EFFORT;
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
         const char *v = i + 1 < argc ? argv[i + 1] : NULL;
@@ -101,7 +103,7 @@ static void parse_args(int argc, char **argv, opts *o)
         } else if (TAKES("--script")) {
             o->c.script = v;
         } else if (TAKES("--effort")) {
-            if (!pt_reasoning_parse(pt_strz(v), &o->c.reasoning))
+            if (!cli_effort_parse(pt_strz(v), &o->c.reasoning))
                 die("unknown effort level", v);
             o->effort_flag = true;
         } else if (TAKES("--output-format")) {
@@ -140,8 +142,9 @@ static void parse_args(int argc, char **argv, opts *o)
         o->c.script = getenv("PYTTE_FAUX_SCRIPT");
 }
 
-/* Model and effort: a flag, else the environment; the config files only
- * set the defaults of new sessions (an existing one keeps its last). */
+/* Model: a flag, else the environment; config files set new sessions'
+ * defaults (an existing one keeps its last model). Effort: a flag, else
+ * the layered settings, starting at an explicit medium. */
 static void apply_config(opts *o, cli_config *cfg, bool create)
 {
     bool env_or_new;
@@ -152,13 +155,12 @@ static void apply_config(opts *o, cli_config *cfg, bool create)
         o->c.model = cfg->val[CFG_MODEL];
     else if (create)
         o->c.model = DEFAULT_MODEL;
-    env_or_new = create || strcmp(cfg->src[CFG_REASONING], "env") == 0;
     if (o->effort_flag) {
         cli_config_set(cfg, CFG_REASONING, pt_reasoning_name(o->c.reasoning), "flag");
-    } else if (cfg->val[CFG_REASONING][0] && env_or_new) {
-        if (!pt_reasoning_parse(pt_strz(cfg->val[CFG_REASONING]), &o->c.reasoning))
-            fprintf(stderr, "pytte: unknown effort level %s (from %s); ignored\n",
-                    cfg->val[CFG_REASONING], cfg->src[CFG_REASONING]);
+    } else if (!cli_effort_parse(pt_strz(cfg->val[CFG_REASONING]), &o->c.reasoning)) {
+        fprintf(stderr, "pytte: unknown effort level %s (from %s)\n", cfg->val[CFG_REASONING],
+                cfg->src[CFG_REASONING]);
+        exit(1);
     }
     if (o->c.model && *o->c.model) { /* before a session exists to leave behind */
         pt_arena a;

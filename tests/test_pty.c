@@ -466,6 +466,7 @@ static void test_commands(void)
     char *cfg;
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
+    CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
     CHECK(wait_for(&p, "▸ /model     set the model", 1000)); /* descriptions in a column */
     CHECK(wait_for(&p, "enter run · esc close · 1/9", 1000)); /* the keys, and where you are */
@@ -486,6 +487,25 @@ static void test_commands(void)
     free(cfg);
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "switched effort: high", 1000));
+    keys(&p, "/effort default\r");
+    CHECK(wait_for(&p, "levels: off, minimal, low, medium, high, xhigh, max", 1000));
+    CHECK(has(&p, "faux · high"));
+    keys(&p, "/settings reasoning default\r");
+    CHECK(wait_for(&p, "not a value for reasoning: default", 1000));
+    keys(&p, "/settings reasoning max\r");
+    CHECK(wait_for(&p, "saved reasoning: max", 1000));
+    CHECK(wait_for(&p, "faux · max", 1000));
+    keys(&p, "/settings\r\x1b[B\x1b[B\x1b[B\x1b[C");
+    CHECK(wait_for(&p, "saved reasoning: off", 1000)); /* max wraps straight to off */
+    keys(&p, "\x1b[D");
+    keys(&p, "\x1b");
+    pump(&p, 100);
+    CHECK(wait_for(&p, "faux · max", 1000)); /* off wraps straight to max */
+    keys(&p, "/settings reasoning low\r");
+    CHECK(wait_for(&p, "saved reasoning: low", 1000));
+    CHECK(wait_for(&p, "faux · low", 1000));
+    keys(&p, "/effort high\r");
+    CHECK(wait_for(&p, "faux · high", 1000));
     keys(&p, "/model faux/faux\x1b");
     pump(&p, 100);
     keys(&p, "\r");
@@ -519,6 +539,12 @@ static void test_commands(void)
     keys(&p, "/quit\r");
     CHECK(finish(&p, 3000) == 0);
     CHECK(has(&p, "A greeting. Answer briefly.\nHello from the faux provider!")); /* in the scrollback */
+    modes_restored(&p);
+    pty_free(&p);
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "faux · low", 3000)); /* saved settings survive the session override */
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
     pty_free(&p);
 }

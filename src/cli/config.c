@@ -21,6 +21,15 @@ const char *cli_config_key(int k)
     return keys[k];
 }
 
+bool cli_effort_parse(pt_str s, pt_reasoning *out)
+{
+    pt_reasoning r;
+    if (!pt_reasoning_parse(s, &r) || r == PT_REASON_DEFAULT)
+        return false;
+    *out = r;
+    return true;
+}
+
 void cli_config_set(cli_config *c, int k, const char *v, const char *src)
 {
     snprintf(c->val[k], sizeof c->val[k], "%s", v);
@@ -83,6 +92,7 @@ void cli_config_load(cli_config *c, char *warn, size_t cap)
     warn[0] = 0;
     for (k = 0; k < CFG_N; k++)
         c->src[k] = "default";
+    cli_config_set(c, CFG_REASONING, pt_reasoning_name(DEFAULT_EFFORT), "default");
     cli_config_set(c, CFG_THINKING, "collapsed", "default");
     cli_config_set(c, CFG_SYMBOLS, "auto", "default");
     e = getenv("PAGER");
