@@ -414,6 +414,70 @@ static void test_md(void)
     MD("- ascii", "- ascii\n");
 }
 
+/* ---- the input box ---- */
+
+static tui_input_result press(tui_input *in, uint32_t key, int mods)
+{
+    tui_ev ev;
+    memset(&ev, 0, sizeof ev);
+    ev.kind = TE_KEY;
+    ev.key = key;
+    ev.mods = mods;
+    return tui_input_key(in, &ev, 20);
+}
+
+static void test_input(void)
+{
+    tui_input in;
+    pt_buf f;
+    tui_input_init(&in, T_AL);
+    tui_input_insert(&in, PT_S("hello world"));
+    CHECK(press(&in, 'w', TM_CTRL) == TI_EDITED);
+    CHECK_STR(pt_buf_str(&in.text), "hello ");
+    CHECK_STR(pt_buf_str(&in.kill), "world");
+    press(&in, 'a', TM_CTRL);
+    press(&in, 'y', TM_CTRL);
+    CHECK_STR(pt_buf_str(&in.text), "worldhello ");
+    press(&in, TK_END, 0);
+    tui_input_insert(&in, PT_S("e\xcc\x81"));
+    press(&in, TK_BACKSPACE, 0); /* a whole cluster */
+    CHECK_STR(pt_buf_str(&in.text), "worldhello ");
+    press(&in, TK_ENTER, TM_SHIFT);
+    tui_input_insert(&in, PT_S("second"));
+    CHECK_STR(pt_buf_str(&in.text), "worldhello \nsecond");
+    tui_input_layout(&in, 20, 8);
+    CHECK(in.nrows == 2 && in.cur_row == 1 && in.cur_col == 6);
+    CHECK(press(&in, TK_UP, 0) == TI_MOVED && in.cur == 6);
+    CHECK(press(&in, TK_UP, 0) == TI_TOP);
+    press(&in, 'u', TM_CTRL); /* the cursor was after "worldh" */
+    CHECK_STR(pt_buf_str(&in.text), "ello \nsecond");
+    /* word wrap at the width, the cursor's row and scrolling */
+    tui_input_set(&in, PT_S("aaaa bbbb cccc dddd eeee ffff"));
+    tui_input_layout(&in, 10, 2);
+    CHECK(in.nrows == 3 && in.rows[1].start == 10 && in.cur_row == 2 && in.scroll == 1);
+    /* history: browsing keeps the draft */
+    tui_hist_add(&in, PT_S("one"));
+    tui_hist_add(&in, PT_S("two\nlines"));
+    tui_input_set(&in, PT_S("draft"));
+    CHECK(tui_hist_move(&in, -1));
+    CHECK_STR(pt_buf_str(&in.text), "two\nlines");
+    CHECK(tui_hist_move(&in, -1) && !tui_hist_move(&in, -1));
+    CHECK(tui_hist_move(&in, 1) && tui_hist_move(&in, 1));
+    CHECK_STR(pt_buf_str(&in.text), "draft");
+    tui_input_free(&in);
+    /* the history file */
+    pt_buf_init(&f, T_AL);
+    tui_hist_line(&f, PT_S("a \"quoted\"\nentry"));
+    pt_buf_putz(&f, "not json\n\"\\u001b[2J\"\n");
+    tui_input_init(&in, T_AL);
+    tui_hist_load(&in, pt_buf_str(&f), 1000);
+    CHECK(in.nhist == 2);
+    CHECK_STR(pt_buf_str(&in.hist[0]), "a \"quoted\"\nentry");
+    CHECK_STR(pt_buf_str(&in.hist[1]), "[2J"); /* cleaned */
+    tui_input_free(&in);
+    pt_buf_free(&f);
+}
+
 int main(void)
 {
     pt_buf_init(&tb, T_AL);
@@ -426,6 +490,7 @@ int main(void)
     RUN(test_keys);
     RUN(test_keys_esc_wait);
     RUN(test_md);
+    RUN(test_input);
     pt_buf_free(&tb);
     return t_done("test_tui");
 }

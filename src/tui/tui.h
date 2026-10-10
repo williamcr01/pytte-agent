@@ -204,4 +204,55 @@ typedef struct tui_md {
  * render a copy to show an unfinished line. */
 int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *out);
 
+/* ---- input.c: the input box (16.2.8) ---- */
+
+typedef struct tui_irow {
+    size_t start, end; /* the bytes shown */
+    size_t next;       /* where the next row starts */
+} tui_irow;
+
+typedef struct tui_input {
+    pt_buf text; /* the draft: clean UTF-8, newlines allowed */
+    size_t cur;  /* the cursor: a byte offset on a cluster boundary */
+    pt_buf kill;
+    int goal;    /* the column ↑/↓ aim for; -1: the cursor's */
+    /* history, oldest first */
+    pt_buf *hist;
+    uint32_t nhist, hcap;
+    uint32_t hpos; /* nhist: the draft itself */
+    pt_buf saved;  /* the draft while browsing history */
+    /* layout (tui_input_layout) */
+    tui_irow *rows;
+    int nrows, rcap, cur_row, cur_col;
+    int scroll; /* the first row shown */
+} tui_input;
+
+typedef enum {
+    TI_IGNORED, /* not an editing key */
+    TI_EDITED,
+    TI_MOVED,
+    TI_TOP,     /* ↑ on the first row: for history or a menu */
+    TI_BOTTOM   /* ↓ on the last row */
+} tui_input_result;
+
+void tui_input_init(tui_input *in, pt_allocator al);
+void tui_input_free(tui_input *in);
+/* Replace the draft; the cursor goes to the end. */
+void tui_input_set(tui_input *in, pt_str text);
+void tui_input_insert(tui_input *in, pt_str clean);
+/* An editing key; width is the columns for text, as in the last layout. */
+tui_input_result tui_input_key(tui_input *in, const tui_ev *ev, int width);
+/* Wrap the draft into rows of at most width columns (w_max): words where
+ * possible, hard newlines kept. Sets rows, cur_row and cur_col, and
+ * scrolls so the cursor is within `show` rows. */
+void tui_input_layout(tui_input *in, int width, int show);
+
+/* History: an entry (not a repeat of the newest), and browsing. The file
+ * holds one JSON string per line, newest last. */
+void tui_hist_add(tui_input *in, pt_str entry);
+bool tui_hist_move(tui_input *in, int dir); /* -1 older, +1 newer */
+void tui_hist_load(tui_input *in, pt_str file, uint32_t max);
+/* The line to append to the file for an entry. */
+void tui_hist_line(pt_buf *out, pt_str entry);
+
 #endif
