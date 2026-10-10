@@ -53,7 +53,7 @@ TEST_CC     ?= $(CC)
 TEST_CFLAGS := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TESTS       := $(patsubst tests/%.c,$(BUILD)/test/%,$(wildcard tests/test_*.c))
 
-$(BUILD)/test/%: tests/%.c tests/t.h $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(wildcard include/*.h src/*/*.h src/*/*.inc)
+$(BUILD)/test/%: tests/%.c tests/t.h tests/vt.c $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(wildcard include/*.h src/*/*.h src/*/*.inc)
 	@mkdir -p $(dir $@)
 	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) -o $@
 
