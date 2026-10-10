@@ -61,6 +61,8 @@ static void rh_free(pt_http_driver *d)
 
 typedef struct world {
     pt_store *store;
+    pt_store *via; /* when set, clients use this store (wrapping store) */
+    char err[512]; /* the last client's fatal error */
     rec_http *http;
     int64_t now;
     uint64_t rng;
@@ -137,7 +139,7 @@ static pt_rt_result client(world *w, const scenario *sc)
     o.config.live_interval_ms = 1;
     a = pt_new(&o);
     memset(&rc, 0, sizeof rc);
-    rc.store = w->store;
+    rc.store = w->via ? w->via : w->store;
     rc.http = &w->http->vt;
     rc.now = w_now;
     rc.sleep = w_sleep;
@@ -173,6 +175,7 @@ static pt_rt_result client(world *w, const scenario *sc)
     res = pt_rt_run(rt);
     if (res == PT_RT_IDLE && !pt_rt_close(rt))
         res = PT_RT_FATAL; /* the close commit failed: also a crash */
+    snprintf(w->err, sizeof w->err, "%s", pt_error(a));
 out:
     pt_rt_free(rt);
     pt_free(a);
@@ -405,6 +408,83 @@ static const scenario scenarios[] = {
      {"first question", "second question", NULL}},
 };
 
+/* Another writer appends to the log behind the owner's back (shared
+ * storage, a bug): the size check before each commit stops the owner, and
+ * the next open cuts the foreign line off as a torn tail. */
+typedef struct intruder {
+    pt_store vt;
+    pt_store *inner;
+    uint32_t at, calls;
+} intruder;
+
+static int in_size(pt_store *s, uint64_t *out)
+{
+    intruder *x = (intruder *)s;
+    if (++x->calls == x->at) {
+        static const char junk[] = "{\"seq\":99,\"from\":\"another writer\"}\n";
+        x->inner->append(x->inner, junk, sizeof junk - 1, false);
+    }
+    return x->inner->size(x->inner, out);
+}
+
+#define FWD(name, args, call)                                                   \
+    static int in_##name args                                                   \
+    {                                                                           \
+        intruder *x = (intruder *)s;                                            \
+        int r = x->inner->name call;                                            \
+        memcpy(s->err, x->inner->err, sizeof s->err);                           \
+        return r;                                                               \
+    }
+FWD(append, (pt_store * s, const void *p, size_t n, bool sync), (x->inner, p, n, sync))
+FWD(read_log, (pt_store * s, pt_buf *out), (x->inner, out))
+FWD(truncate, (pt_store * s, uint64_t off), (x->inner, off))
+FWD(live_put, (pt_store * s, uint32_t t, const void *p, size_t n), (x->inner, t, p, n))
+FWD(live_del, (pt_store * s, uint32_t t), (x->inner, t))
+FWD(live_list, (pt_store * s, void (*fn)(void *, uint32_t, pt_str), void *ud), (x->inner, fn, ud))
+
+static void in_close(pt_store *s)
+{
+    (void)s;
+}
+
+static void test_another_writer(void)
+{
+    const scenario *sc = &scenarios[2];
+    world ref, w;
+    pt_buf want;
+    intruder x;
+    uint32_t clients = 0, at, k;
+    pt_buf_init(&want, T_AL);
+    world_init(&ref, sc->script, 1);
+    CHECK(converge(&ref, sc, &clients));
+    outcome(&ref, &want);
+    k = pt_store_memory_appends(ref.store);
+    for (at = 1; at <= k; at++) {
+        world_init(&w, sc->script, at);
+        memset(&x, 0, sizeof x);
+        x.inner = w.store;
+        x.at = at;
+        x.vt.size = in_size;
+        x.vt.append = in_append;
+        x.vt.read_log = in_read_log;
+        x.vt.truncate = in_truncate;
+        x.vt.live_put = in_live_put;
+        x.vt.live_del = in_live_del;
+        x.vt.live_list = in_live_list;
+        x.vt.close = in_close;
+        w.via = &x.vt;
+        CHECK(client(&w, sc) == PT_RT_FATAL);
+        CHECK(strstr(w.err, "modified by another writer") != NULL);
+        w.via = NULL;
+        clients = 0;
+        CHECK(converge(&w, sc, &clients));
+        check_against(sc, &w, &want, ref.http, "another writer", at);
+        world_free(&w);
+    }
+    world_free(&ref);
+    pt_buf_free(&want);
+}
+
 static void test_scenarios(void)
 {
     size_t i;
@@ -415,5 +495,6 @@ static void test_scenarios(void)
 int main(void)
 {
     RUN(test_scenarios);
+    RUN(test_another_writer);
     return t_done("test_sim");
 }

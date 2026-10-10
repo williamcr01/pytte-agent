@@ -70,9 +70,23 @@ check "a missing key exits with 1" [ $? -eq 1 ]
 env -u ANTHROPIC_API_KEY "$pytte" resume --model faux --script tests/faux/hello.json >/dev/null 2>&1
 check "...and the session resumes with another model" [ $? -eq 0 ]
 
+"$pytte" ask --model faux --script tests/faux/slow.json "list" >/dev/null 2>&1 &
+owner=$!
+sleep 0.5
+err=$("$pytte" resume --script tests/faux/slow.json 2>&1 >/dev/null)
+case $err in *"in use by"*"pid $owner"*) ok=0 ;; *) ok=1 ;; esac
+check "a second process is refused, naming the owner" [ $ok -eq 0 ]
+kill -INT $owner
+wait $owner
+check "Ctrl-C detaches with 130" [ $? -eq 130 ]
+out=$("$pytte" resume --script tests/faux/slow.json 2>/dev/null)
+case $out in *"plenty of time to kill the process"*) ok=0 ;; *) ok=1 ;; esac
+check "...and the detached session resumes to the end" [ $ok -eq 0 ]
+
 if command -v jq >/dev/null; then
     "$pytte" ask --model faux --script tests/faux/hello.json --json hi >"$XDG_STATE_HOME/out" 2>/dev/null
-    check "--json prints commits" jq -se 'length == 6 and .[0].seq == 1' "$XDG_STATE_HOME/out"
+    check "--json prints commits" sh -c 'jq -se "length == 6 and .[0].seq == 1" "$1" >/dev/null' _ \
+        "$XDG_STATE_HOME/out"
 fi
 rm -rf "$XDG_STATE_HOME"
 
