@@ -1,2 +1,2 @@
-{"model":"anthropic/claude-haiku-5-5","status":401,"retry_after":"","recorded_ms":1791631961055}
-{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req_011CftUz19jYYK871PZ95P7n"}
+{"model":"anthropic/claude-haiku-5-5","status":401,"retry_after":"","recorded_ms":1791632228392}
+{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req_011CftVKi967aQrMDwAkCREG"}

@@ -2,4 +2,4 @@
       "type": "object",
       "properties": {"text": {"type": "string", "description": "The text to echo."}},
       "required": ["text"]
-    },"eager_input_streaming":true}],"messages":[{"role":"user","content":[{"type":"text","text":"Use the echo tool to echo 'hi', then tell me what it said."}]},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_018qkWwZrDEhwqP5zgDAeAJe","name":"echo","input":{"text": "hi"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_018qkWwZrDEhwqP5zgDAeAJe","content":"hi"}]}]}
+    },"eager_input_streaming":true}],"messages":[{"role":"user","content":[{"type":"text","text":"Use the echo tool to echo 'hi', then tell me what it said."}]},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01DWDTFMmMn7bTstnU14LWzw","name":"echo","input":{"text": "hi"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01DWDTFMmMn7bTstnU14LWzw","content":"hi"}]}]}
