@@ -41,6 +41,26 @@ bool pt_worker_finish(pt_worker *w);
 int pt_worker_fd(const pt_worker *w);
 void pt_worker_free(pt_worker *w);
 
+/* ---- processes ----
+ * A command in its own session and process group, with no terminal:
+ * stdin is /dev/null, stdout and stderr go to one pipe. */
+typedef struct pt_proc pt_proc;
+/* argv[0] is run with argv; env: the environment, minus the variables
+ * named in unset, plus the NAME=value strings in add (both NULL-ended). */
+pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *const unset[],
+                       const char *const add[], char *err, size_t cap);
+int pt_proc_out_fd(const pt_proc *p);  /* readable when output (or EOF) waits */
+int pt_proc_exit_fd(const pt_proc *p); /* readable once the process ended; -1 where unsupported */
+/* Read output: > 0 bytes, 0 at the end, -1 nothing right now. */
+long pt_proc_read(pt_proc *p, void *buf, size_t cap);
+/* Collect the exit status, waiting when wait. status: the exit code, or
+ * 128 + the signal. False when still running (wait false). */
+bool pt_proc_reap(pt_proc *p, bool wait, int *status);
+/* Signal the whole group: SIGTERM, or SIGKILL when hard. */
+void pt_proc_stop(pt_proc *p, bool hard);
+/* Kills the group if it still runs, reaps it, closes the pipe. */
+void pt_proc_free(pt_proc *p);
+
 /* ---- HTTP ----
  * A driver runs requests in the background of pump(). Callbacks happen
  * inside pump(): head once (before any body), body any number of times,

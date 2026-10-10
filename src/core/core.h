@@ -28,38 +28,72 @@ typedef struct entry {
     pt_str raw;
 } entry;
 
-typedef enum { TASK_RUN } task_kind;
+typedef enum { TASK_RUN, TASK_TOOL } task_kind;
 typedef enum { ST_PENDING, ST_RUNNING, ST_WAITING, ST_DONE } task_status;
-typedef enum { PH_PREPARE, PH_REQUEST, PH_RETRY } run_phase;
+/* run: prepare, request, retry, tools; tool: call, approve, execute */
+typedef enum { PH_PREPARE, PH_REQUEST, PH_RETRY, PH_TOOLS, PH_CALL, PH_APPROVE, PH_EXECUTE } task_phase;
 
 typedef struct run_live run_live;
+typedef struct tool_live tool_live;
 
 typedef struct task {
     /* durable: the newest task record */
-    uint32_t id, input;
+    uint32_t id, input, owner; /* owner: the run a tool task belongs to */
     task_kind kind;
     task_status status;
-    run_phase phase;
+    task_phase phase;
     uint32_t attempt, cutoff;
     int64_t until;                                     /* retry */
     pt_str model; pt_reasoning reasoning; uint32_t max_tokens; /* request params */
+    uint32_t entry;     /* run tools, tool: the assistant entry with the calls */
+    uint32_t *calls, ncalls; /* run tools: its tool tasks, in call order */
+    bool parallel;      /* run tools: they may run at the same time */
+    pt_str call_id;     /* tool */
+    pt_str args;        /* tool: arguments a gate rewrote; empty: as called */
+    pt_str prompt;      /* tool approve */
+    pt_replay replay;   /* tool execute */
+    bool abort;         /* an abort was requested (section 8.4) */
     pt_str outcome, reason; uint32_t result;           /* done */
     pt_arena a; /* owns the strings above */
     /* this process only */
-    uint32_t fx;    /* outstanding commit or sleep; the HTTP request is in live */
+    uint32_t fx;    /* outstanding commit, sleep, gate or tool effect */
     run_live *live; /* request in flight */
-    pt_buf rescued; /* partial message from a live file written before a crash */
+    tool_live *tl;  /* tool started in this process */
+    pt_buf rescued; /* live file written before a crash */
     bool woke;      /* the retry sleep is over */
+    bool recovered; /* the record was loaded, not committed by this process */
+    bool asked;     /* approve: the question went out */
+    bool gated;     /* call: the gate answered (gate, gate_text) */
+    pt_gate_kind gate;
+    pt_buf gate_text;
+    struct task *next_free;
 } task;
 
 typedef enum { IN_QUEUED, IN_PLACED, IN_DONE, IN_FAILED, IN_ABORTED } input_status;
+typedef enum { INK_USER, INK_APPROVE } input_kind;
 
 typedef struct input {
     uint32_t id, run;
+    input_kind kind;
     input_status status;
-    pt_str req, text;
+    uint32_t task; /* approve: the tool task */
+    bool yes;      /* approve: the answer */
+    pt_str req, text; /* approve: text is the reason */
     pt_arena a;
 } input;
+
+typedef struct doc {
+    uint32_t id;
+    pt_str key;  /* in perm */
+    pt_buf value; /* raw JSON, replaced whole */
+} doc;
+
+/* The epoch's frozen tools: what the model is offered, and how they run. */
+typedef struct tool_meta {
+    pt_replay replay;
+    bool parallel;
+    const pt_json *schema; /* parsed, in the epoch arena */
+} tool_meta;
 
 typedef struct claim {
     uint32_t id;
@@ -68,7 +102,10 @@ typedef struct claim {
 } claim;
 
 typedef struct sub { /* a submission waiting for its commit */
+    input_kind kind;
     pt_str text, req;
+    uint32_t task; /* approve */
+    bool yes;
 } sub;
 
 #define PT_FXQ 32
@@ -94,6 +131,13 @@ struct pt_agent {
     uint32_t ntasks, tcap;
     input **inputs;
     uint32_t ninputs, icap;
+    pt_tool *tools;  /* the current epoch's, in the epoch arena */
+    tool_meta *tool_meta;
+    uint32_t ntools;
+    doc *docs;
+    uint32_t ndocs, dcap;
+    pt_str cwd;      /* from the session header (perm) */
+    task *free_tasks; /* finished tool tasks, kept for reuse */
     claim newest;    /* the newest claim record */
     uint32_t mine;   /* our claim's ID, once open */
     uint32_t next_id;
@@ -159,11 +203,23 @@ entry *pt_core_last_entry(pt_agent *a);
 void pt_core_entry_begin(pt_agent *a, uint32_t id, const char *kind);
 void pt_core_entry_end(pt_agent *a);
 
+/* Entry by ID in the current epoch, or NULL. */
+entry *pt_core_entry(pt_agent *a, uint32_t id);
+/* A doc record in the commit being written; value is valid JSON. */
+void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value);
+/* Remember what to tell the host after the commit lands. */
+void pt_core_after(pt_agent *a, after_kind k, const char *outcome, pt_str error, int64_t until);
+/* Queue a cancel of effect fx_id, on behalf of a task. */
+void pt_core_cancel(pt_agent *a, uint32_t task_id, uint32_t fx_id);
+/* Queue a delete of a task's live file. */
+void pt_core_live_del(pt_agent *a, uint32_t task_id);
+
 /* ---- state.c: records ---- */
 bool pt_state_apply(pt_agent *a, const pt_json *line);
 void pt_write_task(pt_jw *w, const task *t);
 void pt_write_input(pt_jw *w, const input *in);
 const char *pt_input_status_name(input_status s);
+void pt_task_release(pt_agent *a, task *t); /* free its process-only state */
 
 /* ---- context.c ---- */
 /* The current epoch through entry `cutoff`, as a unified context. */
@@ -181,5 +237,19 @@ bool pt_run_abort(pt_agent *a, task *t);
 bool pt_run_http_head(pt_agent *a, uint32_t fx, int status, pt_str retry_after);
 bool pt_run_http_data(pt_agent *a, uint32_t fx, const void *p, size_t n);
 bool pt_run_http_done(pt_agent *a, uint32_t fx, const char *error);
+/* A tool round is done: begin the next request (or end an aborted run). */
+void pt_run_write_tool_error(pt_agent *a, uint32_t id, pt_str call_id, pt_str name, pt_str text);
+void pt_run_write_assistant(pt_agent *a, uint32_t id, const pt_msg *m);
+
+/* ---- task_tool.c ---- */
+bool pt_tool_step(pt_agent *a, task *t);
+void pt_tool_free_live(pt_agent *a, task *t);
+/* Commit an "aborted" result now, or mark the task so its own commit
+ * says so: written into the run's abort commit. Returns the effect to
+ * cancel once the commit is queued, or 0. */
+uint32_t pt_tool_abort(pt_agent *a, task *t);
+bool pt_tool_data(pt_agent *a, uint32_t fx, const void *p, size_t n);
+bool pt_tool_finished(const task *t); /* its effect ended (t->tl set) */
+uint32_t pt_tool_fx(const task *t);
 
 #endif

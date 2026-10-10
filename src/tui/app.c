@@ -19,7 +19,7 @@
 #include "cli/cli.h"
 
 enum { TH_COLLAPSED, TH_FULL, TH_HIDDEN };
-enum { PH_WAIT, PH_THINK, PH_WRITE, PH_RETRY };
+enum { PH_WAIT, PH_THINK, PH_WRITE, PH_RETRY, PH_TOOL };
 enum { LIVE_NONE, LIVE_TEXT, LIVE_THINK };
 enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
 
@@ -37,6 +37,8 @@ static const syms asc = {">", "*", "*", "x", ">", "|", "|", "-", "...", {"-", "\
 
 #define SPIN_MS 120  /* the activity row's frame: spinner and shimmer */
 #define TOOL_ROWS 4  /* rows of a tool's output shown before "N more" */
+#define TOOL_LIVE 5  /* rows of a running tool's output in the band */
+#define TOOL_KEEP 4096 /* bytes of it kept for that */
 
 static const struct {
     const char *name, *args, *desc;
@@ -56,6 +58,7 @@ static const struct {
 static const char *const levels[] = {"off", "minimal", "low", "medium", "high", "xhigh", "max"};
 static const char *const th_names[] = {"collapsed", "full", "hidden"};
 static const char *const sym_names[] = {"auto", "unicode", "ascii"};
+static const char *const perm_names[] = {"ask", "auto", "read-only"};
 /* the settings menu: config index and short name */
 static const struct {
     int k;
@@ -64,7 +67,8 @@ static const struct {
                 {CFG_SYMBOLS, "symbols"},
                 {CFG_MODEL, "model"},
                 {CFG_REASONING, "reasoning"},
-                {CFG_PAGER, "pager"}};
+                {CFG_PAGER, "pager"},
+                {CFG_PERMS, "permissions"}};
 #define NSETTINGS (sizeof settings / sizeof settings[0])
 
 typedef struct item {
@@ -139,6 +143,16 @@ typedef struct app {
     int phase;
     int64_t run_at, retry_until;
     pt_buf retry_err;
+    /* the running tool: its name and the end of its output */
+    uint32_t tool_task;
+    char tool_name[64];
+    pt_buf tool_out;
+    /* a tool call waiting for approval (refreshed from pt_asks) */
+    pt_ask_view ask;
+    uint32_t ask_task;
+    int ask_sel;
+    bool asked; /* the band shows the question */
+    char ask_prefix[128]; /* what "allow this session" allows: "git", or "" for the whole tool */
     uint64_t ctx_used;
     uint32_t ctx_window;
     queued_input *queue;
@@ -524,6 +538,11 @@ static void on_entries(app *a)
             a->queue[--a->nq] = first;
             pt_buf_reset(&a->queue[a->nq].text);
         }
+        if (strcmp(v.kind, "tool_result") == 0) {
+            pt_buf_reset(&a->tool_out);
+            if (a->phase == PH_TOOL)
+                a->phase = PH_WAIT;
+        }
         if (strcmp(v.kind, "assistant") == 0 && a->streamed) {
             /* already on screen; an interrupted partial gets its mark */
             live_end(a);
@@ -550,6 +569,27 @@ static void on_event(void *ud, const pt_event *ev)
         break;
     case PT_E_COMMITTED:
         on_entries(a);
+        break;
+    case PT_E_TOOL_START:
+        a->phase = PH_TOOL;
+        a->tool_task = ev->task;
+        snprintf(a->tool_name, sizeof a->tool_name, "%.*s", (int)(ev->name.n > 60 ? 60 : ev->name.n), ev->name.p);
+        pt_buf_reset(&a->tool_out);
+        break;
+    case PT_E_TOOL_OUTPUT:
+        if (ev->task != a->tool_task)
+            break;
+        if (ev->data.n >= TOOL_KEEP) {
+            pt_buf_reset(&a->tool_out);
+            pt_buf_put(&a->tool_out, ev->data.p + ev->data.n - TOOL_KEEP, TOOL_KEEP);
+        } else {
+            if (a->tool_out.n + ev->data.n > 2 * TOOL_KEEP) { /* keep the end: amortized O(n) */
+                size_t k = TOOL_KEEP - ev->data.n;
+                memmove(a->tool_out.p, a->tool_out.p + a->tool_out.n - k, k);
+                a->tool_out.n = k;
+            }
+            pt_buf_puts(&a->tool_out, ev->data);
+        }
         break;
     case PT_E_RETRY:
         a->phase = PH_RETRY;
@@ -741,11 +781,16 @@ static void spinner_row(app *a, int64_t now)
 {
     char line[400];
     const char *what = a->phase == PH_THINK ? "Thinking" : a->phase == PH_WRITE ? "Writing" : "Waiting";
+    char running[80];
     int64_t frame = now / SPIN_MS;
     char el[32];
     const char *spin = a->sy->spin[frame % a->sy->nspin];
     const char *hint = now - a->esc_at < DOUBLE_MS ? "esc again to interrupt" : "esc esc to interrupt";
     int n, i, at;
+    if (a->phase == PH_TOOL) {
+        snprintf(running, sizeof running, "Running %s", a->tool_name);
+        what = running;
+    }
     pt_buf_reset(&a->tmp);
     tui_style(&a->tmp, TUI_BOLD);
     pt_buf_putz(&a->tmp, spin);
@@ -806,6 +851,9 @@ static void status_row(app *a, int64_t now, int total, int sel)
     if (now - a->ctrlc_at < DOUBLE_MS) {
         tui_style(&a->tmp, TUI_DIM);
         pt_buf_putz(&a->tmp, "ctrl-c again to quit");
+    } else if (a->asked) {
+        tui_style(&a->tmp, TUI_DIM);
+        pt_buf_putz(&a->tmp, "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
     } else if (a->menu == MENU_SETTINGS) {
         tui_style(&a->tmp, TUI_DIM);
         pt_buf_putz(&a->tmp, "↑↓ select · ←→ change · enter edit · esc close");
@@ -870,10 +918,76 @@ static void menu_row(app *a, int i)
     row(a, pt_buf_str(&a->tmp));
 }
 
+/* The first tool call waiting for approval, if any. */
+static bool asking(app *a)
+{
+    if (!a->open || a->opening || !pt_asks(a->s.a, &a->ask, 1))
+        return false;
+    if (a->ask.task != a->ask_task) { /* a new question */
+        pt_str g = call_gist(a, a->ask.args);
+        size_t n = 0;
+        a->ask_task = a->ask.task;
+        a->ask_sel = 0;
+        /* bash: allow commands with the same first word; others: the tool */
+        if (pt_str_eqz(a->ask.name, "bash"))
+            while (n < g.n && n + 1 < sizeof a->ask_prefix && !strchr(" \t\n;&|<>()`$", g.p[n]))
+                n++;
+        memcpy(a->ask_prefix, g.p, n);
+        a->ask_prefix[n] = 0;
+    }
+    return true;
+}
+
+static void ask_row(app *a, int i)
+{
+    char line[300];
+    bool on = i == a->ask_sel;
+    pt_buf_reset(&a->tmp);
+    tui_style(&a->tmp, TUI_BOLD);
+    pt_buf_putz(&a->tmp, on ? a->sy->sel : " ");
+    tui_style(&a->tmp, on ? TUI_BOLD : 0);
+    if (i == 0)
+        snprintf(line, sizeof line, " 1. Yes");
+    else if (i == 1 && a->ask_prefix[0])
+        snprintf(line, sizeof line, " 2. Yes, and allow %.*s \"%s\" this session", (int)a->ask.name.n,
+                 a->ask.name.p, a->ask_prefix);
+    else if (i == 1)
+        snprintf(line, sizeof line, " 2. Yes, and allow %.*s this session", (int)a->ask.name.n, a->ask.name.p);
+    else
+        snprintf(line, sizeof line, " 3. No (esc)");
+    pt_buf_putz(&a->tmp, line);
+    row(a, pt_buf_str(&a->tmp));
+}
+
+/* The question: the call on one row, then the choices. */
+static void ask_rows(app *a, int n)
+{
+    int col = 0, i;
+    size_t k;
+    pt_buf_reset(&a->tmp2);
+    tui_style(&a->tmp2, TUI_BOLD);
+    pt_buf_putz(&a->tmp2, a->sy->bullet);
+    pt_buf_putc(&a->tmp2, ' ');
+    pt_buf_put(&a->tmp2, a->ask.name.p, a->ask.name.n > 60 ? 60 : a->ask.name.n);
+    pt_buf_putc(&a->tmp2, ' ');
+    tui_style(&a->tmp2, 0);
+    pt_buf_reset(&a->tmp);
+    tui_clean(&a->tmp, a->ask.prompt.n ? a->ask.prompt : call_gist(a, a->ask.args), &col);
+    for (k = 0; k < a->tmp.n; k++)
+        if (a->tmp.p[k] == '\n')
+            a->tmp.p[k] = ' ';
+    pt_buf_puts(&a->tmp2, pt_buf_str(&a->tmp));
+    k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
+    a->tmp2.n = k;
+    row(a, pt_buf_str(&a->tmp2));
+    for (i = 0; i < 3 && i + 1 < n; i++)
+        ask_row(a, i);
+}
+
 /* Build the band (16.2.2) within its height budget. */
 static void build_frame(app *a, int64_t now)
 {
-    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, act, st, gaps, i, first, top;
+    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, act, st, gaps, i, first, top, nask;
     int total = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->nitems;
     int sel = a->menu == MENU_SETTINGS ? a->set_sel : a->sel;
     bool tiny = a->cols < 20 || a->rows < 4;
@@ -887,12 +1001,34 @@ static void build_frame(app *a, int64_t now)
         tui_md copy = a->md;
         live_n = tui_md_line(&copy, pt_buf_str(&a->live), a->cols, a->live_kind == LIVE_THINK ? TUI_DIM : 0, true,
                              live_rows);
+    } else if (a->phase == PH_TOOL && a->tool_out.n) { /* the end of a running tool's output */
+        pt_str o = pt_buf_str(&a->tool_out);
+        size_t at = o.n;
+        int lines = 0;
+        while (at && o.p[at - 1] == '\n')
+            at--;
+        o.n = at;
+        while (at && lines <= TOOL_LIVE)
+            lines += o.p[--at] == '\n';
+        if (o.p[at] == '\n')
+            at++;
+        while (at < o.n && ((unsigned char)o.p[at] & 0xC0) == 0x80)
+            at++;
+        out_rail(a, live_rows, a->sy->bar, TUI_DIM, TUI_DIM, (pt_str){o.p + at, o.n - at}, 0);
+        for (i = 0; (size_t)i < live_rows->n; i++)
+            live_n += live_rows->p[i] == '\n';
+        if (live_n > TOOL_LIVE)
+            live_n = TOOL_LIVE;
     }
-    act = a->running ? 1 : 0;
+    a->asked = asking(a);
+    nask = a->asked ? 4 : 0;
+    act = a->running && !nask ? 1 : 0;
     nq = a->running ? (int)(a->nq > 3 ? 4 : a->nq) : 0;
     nmenu = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->menu != MENU_NONE ? a->nitems : 0;
     if (nmenu > 8)
         nmenu = 8;
+    if (nask)
+        nmenu = 0;
     st = 1;
     gaps = 2;
     show = a->rows / 3 < 8 ? a->rows / 3 : 8;
@@ -903,10 +1039,11 @@ static void build_frame(app *a, int64_t now)
     if (tiny) {
         live_n = act = nq = nmenu = st = gaps = 0;
         show = 1;
+        nask = nask ? 1 : 0;
     }
     /* drop parts until it fits */
-    while (live_n + act + nq + show + nmenu + st + gaps > avail) {
-        int over = live_n + act + nq + show + nmenu + st + gaps - avail;
+    while (live_n + nask + act + nq + show + nmenu + st + gaps > avail) {
+        int over = live_n + nask + act + nq + show + nmenu + st + gaps - avail;
         if (nmenu) {
             nmenu = nmenu > over ? nmenu - over : 0;
         } else if (nq > 1) {
@@ -923,6 +1060,8 @@ static void build_frame(app *a, int64_t now)
             nq = 0;
         } else if (show > 1) {
             show = show > over + 1 ? show - over : 1;
+        } else if (nask > 1) {
+            nask = nask > over + 1 ? nask - over : 1;
         } else {
             break;
         }
@@ -945,6 +1084,8 @@ static void build_frame(app *a, int64_t now)
             at = e + 1;
         }
     }
+    if (nask)
+        ask_rows(a, nask);
     if (act)
         spinner_row(a, now);
     for (i = 0; i < nq; i++) {
@@ -1177,6 +1318,8 @@ static bool save_setting(app *a, int k, const char *v)
         apply_thinking(a);
     if (k == CFG_SYMBOLS)
         apply_symbols(a);
+    if (k == CFG_PERMS && pt_perm_parse(pt_strz(a->cfg->val[k]), &a->o.perm) && a->open)
+        pt_rt_set_perm(a->s.rt, a->o.perm);
     if (k == CFG_REASONING) {
         pt_reasoning r;
         if (cli_effort_parse(pt_strz(a->cfg->val[k]), &r)) {
@@ -1474,6 +1617,10 @@ static bool valid_setting(int k, const char *v)
     }
     if (k == CFG_REASONING)
         return cli_effort_parse(pt_strz(v), &r);
+    if (k == CFG_PERMS) {
+        pt_perm_mode m;
+        return pt_perm_parse(pt_strz(v), &m);
+    }
     return true;
 }
 
@@ -1874,6 +2021,9 @@ static void settings_key(app *a, const tui_ev *ev)
     } else if (k == CFG_REASONING) {
         vals = levels;
         nv = (int)(sizeof levels / sizeof levels[0]);
+    } else if (k == CFG_PERMS) {
+        vals = perm_names;
+        nv = 3;
     }
     if (vals) {
         for (i = 0; i < nv && strcmp(a->cfg->val[k], vals[i]) != 0; i++)
@@ -1894,6 +2044,40 @@ static void interrupt(app *a)
         a->esc_at = 0;
 }
 
+/* Answer the question: 0 yes, 1 yes and allow alike, 2 no. */
+static void answer(app *a, int choice)
+{
+    if (choice == 1 && !pt_rt_allow(a->s.rt, a->ask.name, pt_strz(a->ask_prefix)))
+        out_z(a, TUI_RED, "out of memory: allowed this once only");
+    if (!pt_approve(a->s.a, a->ask.task, choice != 2, PT_STR_NULL))
+        out_z(a, TUI_RED, pt_error(a->s.a));
+    a->ask_task = 0;
+    set_dirty(a);
+}
+
+/* Keys while a tool call waits: true when taken. */
+static bool ask_key(app *a, const tui_ev *ev)
+{
+    if (!asking(a))
+        return false;
+    if (ev->kind == TE_TEXT) {
+        if (ev->text.n == 1 && ev->text.p[0] >= '1' && ev->text.p[0] <= '3')
+            answer(a, ev->text.p[0] - '1');
+        return true; /* typing waits for the answer */
+    }
+    if (ev->kind != TE_KEY || (ev->mods && ev->key != TK_ENTER))
+        return false;
+    if (ev->key == TK_UP || ev->key == TK_DOWN)
+        a->ask_sel = (a->ask_sel + (ev->key == TK_UP ? 2 : 1)) % 3;
+    else if (ev->key == TK_ENTER)
+        answer(a, a->ask_sel);
+    else if (ev->key == TK_ESC)
+        answer(a, 2);
+    else
+        return false;
+    return true;
+}
+
 static void on_key(app *a, const tui_ev *ev)
 {
     int64_t now = pt_sys_now_ms();
@@ -1902,6 +2086,8 @@ static void on_key(app *a, const tui_ev *ev)
     tui_input_result r;
     size_t before = a->in.text.n;
     a->urgent = true;
+    if (ask_key(a, ev))
+        return;
     if (ev->kind == TE_TEXT || ev->kind == TE_PASTE) {
         if (a->menu == MENU_SETTINGS)
             a->menu = MENU_NONE;
@@ -2109,6 +2295,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_init(&a.live_rows, pt_sys_allocator());
     pt_buf_init(&a.live, pt_sys_allocator());
     pt_buf_init(&a.retry_err, pt_sys_allocator());
+    pt_buf_init(&a.tool_out, pt_sys_allocator());
     pt_buf_init(&a.items_buf, pt_sys_allocator());
     pt_buf_init(&a.pending_history, pt_sys_allocator());
     pt_buf_init(&a.command, pt_sys_allocator());
@@ -2316,6 +2503,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_free(&a.wrap);
     pt_buf_free(&a.live);
     pt_buf_free(&a.retry_err);
+    pt_buf_free(&a.tool_out);
     pt_buf_free(&a.items_buf);
     pt_buf_free(&a.pending_history);
     pt_buf_free(&a.command);

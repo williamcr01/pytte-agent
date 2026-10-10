@@ -32,11 +32,11 @@ pt_allocator pt_sys_allocator(void)
 
 int pt_sys_wait(pt_waitfd *fds, unsigned n, int timeout_ms)
 {
-    struct pollfd p[32];
+    struct pollfd p[64];
     unsigned i;
     int r;
-    if (n > 32)
-        n = 32;
+    if (n > 64)
+        n = 64;
     for (i = 0; i < n; i++) {
         p[i].fd = fds[i].fd;
         p[i].events = POLLIN;

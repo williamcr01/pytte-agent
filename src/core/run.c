@@ -3,7 +3,8 @@
  *   prepare ──► request ──► done
  *      ▲          │  │
  *      │          │  └──► retry (sleep) ──► prepare, attempt + 1
- *      └──────────┘ tool calls (no tools yet: each gets an error result)
+ *      │          ▼
+ *      └──── tools (waiting on one tool task per call, task_tool.c)
  *
  * prepare is pure; it pins the request's parameters in one commit.
  * request sends exactly what the pinned checkpoint describes, so a request
@@ -259,7 +260,7 @@ static int64_t backoff(pt_agent *a, uint32_t attempt, int64_t retry_after_ms)
     return d * 3 / 4 + (int64_t)(r % (uint32_t)(d / 2 + 1)); /* ±25% jitter */
 }
 
-static void write_assistant(pt_agent *a, uint32_t id, const pt_msg *m)
+void pt_run_write_assistant(pt_agent *a, uint32_t id, const pt_msg *m)
 {
     pt_core_entry_begin(a, id, "assistant");
     pt_jw_key(&a->cw, "message");
@@ -286,38 +287,62 @@ static void write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int
     pt_core_entry_end(a);
 }
 
-static void write_tool_error(pt_agent *a, const pt_block *call, const char *text)
+void pt_run_write_tool_error(pt_agent *a, uint32_t id, pt_str call_id, pt_str name, pt_str text)
 {
     pt_jw *w = &a->cw;
-    pt_core_entry_begin(a, pt_core_new_id(a), "tool_result");
+    pt_core_entry_begin(a, id, "tool_result");
     pt_jw_key(w, "call_id");
-    pt_jw_str(w, call->id);
+    pt_jw_str(w, call_id);
     pt_jw_key(w, "name");
-    pt_jw_str(w, call->name);
+    pt_jw_str(w, name);
     pt_jw_key(w, "content");
-    pt_jw_strz(w, text);
+    pt_jw_str(w, text);
     pt_jw_key(w, "is_error");
     pt_jw_bool(w, true);
     pt_core_entry_end(a);
 }
 
-static void after(pt_agent *a, after_kind k, const char *outcome, pt_str error, int64_t until)
+static bool tool_parallel(pt_agent *a, pt_str name)
 {
-    a->after = k;
-    a->after_outcome = pt_arena_dup(&a->after_a, pt_strz(outcome));
-    a->after_error = pt_arena_dup(&a->after_a, error);
-    a->after_until = until;
+    uint32_t i;
+    for (i = 0; i < a->ntools; i++)
+        if (pt_str_eq(a->tools[i].name, name))
+            return a->tool_meta[i].parallel;
+    return false;
 }
 
-static void cancel(pt_agent *a, uint32_t task_id, uint32_t fx_id)
+/* The assistant entry and a tool task per call, in one commit: a call
+ * never exists without its task, or the reverse. */
+static void write_round(pt_agent *a, task *nt, const pt_msg *m, uint32_t calls)
 {
-    pt_fx fx;
-    memset(&fx, 0, sizeof fx);
-    fx.kind = PT_FX_CANCEL;
-    fx.id = pt_core_new_fx(a);
-    fx.task = task_id;
-    fx.cancel = fx_id;
-    pt_core_queue(a, &fx, PT_STR_NULL);
+    uint32_t aid = pt_core_new_id(a), i, k = 0;
+    bool parallel = !a->o.config.serial_tools;
+    pt_run_write_assistant(a, aid, m);
+    nt->calls = (uint32_t *)pt_arena_alloc(&a->scratch, sizeof(uint32_t) * calls);
+    if (!nt->calls)
+        return;
+    for (i = 0; i < m->nblocks; i++) {
+        const pt_block *b = &m->blocks[i];
+        task tt;
+        if (b->kind != PT_BLOCK_TOOL_CALL)
+            continue;
+        memset(&tt, 0, sizeof tt);
+        tt.id = pt_core_new_id(a);
+        tt.kind = TASK_TOOL;
+        tt.owner = nt->id;
+        tt.status = ST_PENDING;
+        tt.phase = PH_CALL;
+        tt.entry = aid;
+        tt.call_id = b->id;
+        pt_write_task(&a->cw, &tt);
+        nt->calls[k++] = tt.id;
+        parallel = parallel && tool_parallel(a, b->name);
+    }
+    nt->ncalls = k;
+    nt->entry = aid;
+    nt->parallel = parallel;
+    nt->status = ST_WAITING;
+    nt->phase = PH_TOOLS;
 }
 
 static bool classify(pt_agent *a, task *t)
@@ -340,13 +365,13 @@ static bool classify(pt_agent *a, task *t)
 
     if (m->stop == PT_STOP_ERROR || m->stop == PT_STOP_ABORTED) {
         if (m->nblocks) /* keep what arrived, for the record; never sent again */
-            write_assistant(a, pt_core_new_id(a), m);
+            pt_run_write_assistant(a, pt_core_new_id(a), m);
         if (e->cls == PT_ERR_RETRYABLE) {
             int64_t until = pt_core_now(a) + backoff(a, t->attempt, e->retry_after_ms);
             write_error(a, t->attempt, e, until);
             nt.phase = PH_RETRY;
             nt.until = until;
-            after(a, AFTER_RETRY, "", e->message, until);
+            pt_core_after(a, AFTER_RETRY, "", e->message, until);
         } else {
             /* Fatal, or an overflow (compaction comes in M4). */
             write_error(a, t->attempt, e, 0);
@@ -356,21 +381,22 @@ static bool classify(pt_agent *a, task *t)
             nt.result = 0;
             nin.status = IN_FAILED;
             input_changed = true;
-            after(a, AFTER_RUN_DONE, "failed", e->message, 0);
+            pt_core_after(a, AFTER_RUN_DONE, "failed", e->message, 0);
         }
-    } else if (calls && (m->stop == PT_STOP_TOOL_USE || m->stop == PT_STOP_LENGTH)) {
-        write_assistant(a, pt_core_new_id(a), m);
+    } else if (calls && m->stop == PT_STOP_TOOL_USE) {
+        write_round(a, &nt, m, calls);
+    } else if (calls && m->stop == PT_STOP_LENGTH) {
+        /* A call may be cut off mid-input: run none of them. */
+        pt_run_write_assistant(a, pt_core_new_id(a), m);
         for (i = 0; i < m->nblocks; i++)
             if (m->blocks[i].kind == PT_BLOCK_TOOL_CALL)
-                write_tool_error(a, &m->blocks[i],
-                                 m->stop == PT_STOP_LENGTH
-                                     ? "The tool call was cut off by max_tokens. Retry in smaller pieces."
-                                     : "This tool is not available: pytte has no tools yet.");
+                pt_run_write_tool_error(a, pt_core_new_id(a), m->blocks[i].id, m->blocks[i].name,
+                                        PT_S("The tool call was cut off by max_tokens. Retry in smaller pieces."));
         nt.phase = PH_PREPARE;
         nt.attempt = 1;
     } else {
         uint32_t id = pt_core_new_id(a);
-        write_assistant(a, id, m);
+        pt_run_write_assistant(a, id, m);
         nt.status = ST_DONE;
         nt.result = id;
         nt.outcome = m->stop == PT_STOP_REFUSAL ? PT_S("failed") : PT_S("completed");
@@ -379,7 +405,7 @@ static bool classify(pt_agent *a, task *t)
                                                 : PT_STR_NULL;
         nin.status = m->stop == PT_STOP_REFUSAL ? IN_FAILED : IN_DONE;
         input_changed = true;
-        after(a, AFTER_RUN_DONE, m->stop == PT_STOP_REFUSAL ? "failed" : "completed",
+        pt_core_after(a, AFTER_RUN_DONE, m->stop == PT_STOP_REFUSAL ? "failed" : "completed",
               m->stop == PT_STOP_REFUSAL ? PT_S("the model refused") : PT_STR_NULL, 0);
     }
     pt_write_task(&a->cw, &nt);
@@ -387,7 +413,7 @@ static bool classify(pt_agent *a, task *t)
         pt_write_input(&a->cw, &nin);
     ok = pt_core_commit_end(a);
     if (!rl->http_done) /* the stream ended on its final event before the transfer did */
-        cancel(a, t->id, rl->http_fx);
+        pt_core_cancel(a, t->id, rl->http_fx);
     pt_run_free_live(a, t);
     return ok;
 }
@@ -412,42 +438,44 @@ static bool commit_rescued(pt_agent *a, task *t)
 {
     pt_msg m;
     if (!read_rescued(a, t, &m)) {
-        pt_fx fx;
-        memset(&fx, 0, sizeof fx);
-        fx.kind = PT_FX_LIVE;
-        fx.id = pt_core_new_fx(a);
-        fx.task = t->id;
-        return pt_core_queue(a, &fx, PT_STR_NULL);
+        pt_core_live_del(a, t->id);
+        return true;
     }
     pt_core_commit_begin(a, t->id);
     a->after_live_del = t->id;
-    write_assistant(a, pt_core_new_id(a), &m);
+    pt_run_write_assistant(a, pt_core_new_id(a), &m);
     return pt_core_commit_end(a);
 }
 
-/* One commit: the partial answer (if any), the run done(aborted), its
- * input aborted. Then the request or the retry sleep is cancelled. A run
- * alone has nothing to wait for; tool tasks (M3) will first commit an
- * abort flag and wait for their effects to stop. */
-bool pt_run_abort(pt_agent *a, task *t)
+static bool has_tools(pt_agent *a, const task *t)
+{
+    uint32_t i;
+    for (i = 0; i < a->ntasks; i++)
+        if (a->tasks[i]->kind == TASK_TOOL && a->tasks[i]->owner == t->id)
+            return true;
+    return false;
+}
+
+/* The run ends aborted: one commit with the partial answer (if any), the
+ * run done(aborted) and its input aborted. Then the request or the retry
+ * sleep is cancelled. */
+static bool end_aborted(pt_agent *a, task *t)
 {
     input *in = pt_core_input(a, t->input), nin;
     task nt = *t;
     uint32_t sleeping = t->phase == PH_RETRY ? t->fx : 0;
     pt_msg m;
     bool ok;
-    if (t->live && t->live->finished)
-        return false;
     pt_core_commit_begin(a, t->id);
     if (t->live) {
         m = *pt_ai_stream_message(t->live->s);
         if (m.nblocks) {
             m.stop = PT_STOP_ABORTED;
             m.error = PT_S("interrupted by the user");
-            write_assistant(a, pt_core_new_id(a), &m);
+            pt_run_write_assistant(a, pt_core_new_id(a), &m);
         }
     } else if (t->rescued.n && read_rescued(a, t, &m)) {
-        write_assistant(a, pt_core_new_id(a), &m);
+        pt_run_write_assistant(a, pt_core_new_id(a), &m);
     }
     if (t->phase == PH_REQUEST)
         a->after_live_del = t->id;
@@ -461,17 +489,56 @@ bool pt_run_abort(pt_agent *a, task *t)
         nin.status = IN_ABORTED;
         pt_write_input(&a->cw, &nin);
     }
-    after(a, AFTER_RUN_DONE, "aborted", PT_S("interrupted by the user"), 0);
+    pt_core_after(a, AFTER_RUN_DONE, "aborted", PT_S("interrupted by the user"), 0);
     ok = pt_core_commit_end(a);
     if (t->live) {
         if (!t->live->http_done)
-            cancel(a, t->id, t->live->http_fx);
+            pt_core_cancel(a, t->id, t->live->http_fx);
         pt_run_free_live(a, t);
     }
     if (sleeping)
-        cancel(a, t->id, sleeping);
+        pt_core_cancel(a, t->id, sleeping);
     t->woke = false;
     return ok;
+}
+
+/* With tool tasks running, the abort is two steps (section 8.4): first
+ * the decision is committed (calls not started end now, running ones are
+ * marked and cancelled), then each call commits its end, and the run ends
+ * once they all have. */
+bool pt_run_abort(pt_agent *a, task *t)
+{
+    task nt = *t;
+    uint32_t i;
+    bool ok;
+    if (t->live && t->live->finished)
+        return false;
+    if (t->phase != PH_TOOLS || !has_tools(a, t))
+        return end_aborted(a, t);
+    if (t->abort)
+        return true; /* already decided */
+    pt_core_commit_begin(a, t->id);
+    nt.abort = true;
+    pt_write_task(&a->cw, &nt);
+    for (i = 0; i < a->ntasks; i++)
+        if (a->tasks[i]->kind == TASK_TOOL && a->tasks[i]->owner == t->id)
+            pt_tool_abort(a, a->tasks[i]);
+    ok = pt_core_commit_end(a);
+    for (i = 0; i < a->ntasks; i++) {
+        task *tt = a->tasks[i];
+        if (tt->kind == TASK_TOOL && tt->owner == t->id && tt->tl && !pt_tool_finished(tt))
+            pt_core_cancel(a, tt->id, pt_tool_fx(tt));
+    }
+    return ok;
+}
+
+static bool tools_done(pt_agent *a, const task *t)
+{
+    uint32_t i;
+    for (i = 0; i < t->ncalls; i++)
+        if (pt_core_task(a, t->calls[i]))
+            return false;
+    return true;
 }
 
 bool pt_run_step(pt_agent *a, task *t)
@@ -493,6 +560,12 @@ bool pt_run_step(pt_agent *a, task *t)
             t->fx = fx.id;
             return pt_core_queue(a, &fx, PT_STR_NULL);
         }
+    case PH_TOOLS:
+        if (!tools_done(a, t))
+            return false;
+        if (t->abort)
+            return end_aborted(a, t);
+        return prepare(a, t, 1); /* pure: folded into the next request's commit */
     case PH_REQUEST:
         if (t->rescued.n)
             return commit_rescued(a, t);
@@ -503,6 +576,7 @@ bool pt_run_step(pt_agent *a, task *t)
         if (t->live->dirty) /* the trailing snapshot, once its time has come */
             return snapshot(t->live, pt_ai_stream_message(t->live->s), false);
         return false;
+    default:
+        return false;
     }
-    return false;
 }

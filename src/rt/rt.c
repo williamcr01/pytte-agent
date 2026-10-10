@@ -1,36 +1,15 @@
 #define _POSIX_C_SOURCE 200809L
-#include "rt/rt.h"
+#include "rt/rt_int.h"
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct req {
-    pt_rt *rt;
-    uint32_t fx;
-    void *h;
-    bool done;
-} req;
+#define MAX_FDS 64
 
-typedef struct sleeper {
-    uint32_t fx;
-    int64_t until;
-} sleeper;
-
-struct pt_rt {
-    pt_rt_cfg c;
-    pt_agent *a;
-    uint64_t log_end; /* where our last commit ended (section 6.8.4) */
-    req **reqs;
-    uint32_t nreqs, rcap;
-    sleeper *sleeps;
-    uint32_t nsleeps, scap;
-    pt_worker *worker; /* borrowed; NULL keeps the blocking host behavior */
-    pt_fx io;          /* borrowed effect bytes until the worker finishes */
-    bool io_pending, io_ok;
-    char io_error[512];
-};
+typedef rt_req req;
+typedef rt_sleeper sleeper;
 
 static bool finish_io(pt_rt *rt, bool wait);
 
@@ -57,7 +36,96 @@ pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a)
     if (!rt->c.sleep)
         rt->c.sleep = sys_sleep;
     rt->a = a;
+    pt_buf_init(&rt->scratch, pt_sys_allocator());
+    pt_arena_init(&rt->ar, pt_sys_allocator(), 4096);
     return rt;
+}
+
+pt_agent *pt_rt_agent(pt_rt *rt)
+{
+    return rt->a;
+}
+
+int64_t pt_rt_now(pt_rt *rt)
+{
+    return rt->c.now(rt->c.clock_ud);
+}
+
+bool pt_rt_grow(void **arr, uint32_t *cap, uint32_t need, size_t elem)
+{
+    uint32_t ncap = *cap ? *cap : 4;
+    void *p;
+    if (need <= *cap)
+        return true;
+    while (ncap < need)
+        ncap *= 2;
+    if (!(p = realloc(*arr, (size_t)ncap * elem)))
+        return false;
+    *arr = p;
+    *cap = ncap;
+    return true;
+}
+
+uint32_t pt_rt_timer(pt_rt *rt, int64_t at, pt_rt_fn fn, void *ud)
+{
+    rt_timer *t;
+    if (!pt_rt_grow((void **)&rt->timers, &rt->tmcap, rt->ntimers + 1, sizeof *rt->timers))
+        return 0;
+    t = &rt->timers[rt->ntimers++];
+    t->id = ++rt->next_timer;
+    t->at = at;
+    t->fn = fn;
+    t->ud = ud;
+    return t->id;
+}
+
+void pt_rt_timer_cancel(pt_rt *rt, uint32_t id)
+{
+    uint32_t i;
+    for (i = 0; i < rt->ntimers; i++)
+        if (rt->timers[i].id == id) {
+            rt->timers[i] = rt->timers[--rt->ntimers];
+            return;
+        }
+}
+
+bool pt_rt_watch(pt_rt *rt, int fd, pt_rt_fn fn, void *ud)
+{
+    rt_watch *w;
+    if (!pt_rt_grow((void **)&rt->watches, &rt->wcap, rt->nwatches + 1, sizeof *rt->watches))
+        return false;
+    w = &rt->watches[rt->nwatches++];
+    w->fd = fd;
+    w->fn = fn;
+    w->ud = ud;
+    return true;
+}
+
+void pt_rt_unwatch(pt_rt *rt, int fd)
+{
+    uint32_t i;
+    for (i = 0; i < rt->nwatches; i++)
+        if (rt->watches[i].fd == fd) {
+            rt->watches[i] = rt->watches[--rt->nwatches];
+            return;
+        }
+}
+
+/* Fire timers that are due; returns how many. */
+static uint32_t fire_timers(pt_rt *rt, int64_t now)
+{
+    uint32_t i = 0, n = 0;
+    while (i < rt->ntimers)
+        if (rt->timers[i].at <= now) {
+            rt_timer t = rt->timers[i];
+            rt->timers[i] = rt->timers[--rt->ntimers];
+            t.fn(t.ud, rt);
+            n++;
+            i = 0; /* the callback may have changed the list */
+        } else {
+            i++;
+        }
+    return n;
 }
 
 static void drop_req(pt_rt *rt, uint32_t i)
@@ -76,8 +144,14 @@ void pt_rt_free(pt_rt *rt)
     finish_io(rt, true);
     while (rt->nreqs)
         drop_req(rt, 0);
+    rt->closing = true;
+    pt_rt_tools_free(rt);
     free(rt->reqs);
     free(rt->sleeps);
+    free(rt->timers);
+    free(rt->watches);
+    pt_buf_free(&rt->scratch);
+    pt_arena_free(&rt->ar);
     if (rt->c.store)
         rt->c.store->close(rt->c.store);
     free(rt);
@@ -299,7 +373,16 @@ static void handle(pt_rt *rt, const pt_fx *fx)
     case PT_FX_LIVE:
         start_io(rt, fx);
         break;
+    case PT_FX_GATE:
+        pt_rt_gate(rt, fx);
+        break;
+    case PT_FX_ASK: /* the frontend shows PT_E_ASK and calls pt_approve */
+        break;
+    case PT_FX_TOOL:
+        pt_rt_run_tool(rt, fx);
+        break;
     case PT_FX_CANCEL:
+        pt_rt_cancel_tool(rt, fx->cancel);
         for (i = 0; i < rt->nreqs; i++)
             if (rt->reqs[i]->fx == fx->cancel) {
                 drop_req(rt, i);
@@ -347,6 +430,9 @@ static int64_t next_wake(const pt_rt *rt)
     for (i = 0; i < rt->nsleeps; i++)
         if (rt->sleeps[i].until < t)
             t = rt->sleeps[i].until;
+    for (i = 0; i < rt->ntimers; i++)
+        if (rt->timers[i].at < t)
+            t = rt->timers[i].at;
     return t;
 }
 
@@ -375,14 +461,33 @@ static void http_failed(pt_rt *rt)
         }
 }
 
-/* Wait once: for a due sleeper, HTTP progress, one of fds, or timeout_ms. */
+/* Watches whose fd is ready: called after the wait, by fd, since a
+ * callback may change the list. */
+static void fire_watches(pt_rt *rt, const pt_waitfd *all, unsigned from, unsigned to)
+{
+    unsigned i;
+    uint32_t j;
+    for (i = from; i < to; i++) {
+        if (!all[i].ready)
+            continue;
+        for (j = 0; j < rt->nwatches; j++)
+            if (rt->watches[j].fd == all[i].fd) {
+                rt->watches[j].fn(rt->watches[j].ud, rt);
+                break;
+            }
+    }
+}
+
+/* Wait once: for a due sleeper or timer, HTTP progress, a watched fd, one
+ * of fds, or timeout_ms. */
 static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     int64_t now = rt->c.now(rt->c.clock_ud), until, wait = timeout_ms;
-    pt_waitfd all[32];
-    unsigned i, total = nfds;
-    if (total > 31)
-        total = 31;
+    pt_waitfd all[MAX_FDS];
+    unsigned i, total = nfds, first_watch;
+    uint32_t j;
+    if (total > MAX_FDS / 2)
+        total = MAX_FDS / 2;
     for (i = 0; i < nfds; i++)
         fds[i].ready = false;
     for (i = 0; i < total; i++)
@@ -391,7 +496,12 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
         all[total].fd = pt_worker_fd(rt->worker);
         all[total++].ready = false;
     }
-    if (wake(rt, now))
+    first_watch = total;
+    for (j = 0; j < rt->nwatches && total < MAX_FDS; j++) {
+        all[total].fd = rt->watches[j].fd;
+        all[total++].ready = false;
+    }
+    if (wake(rt, now) + fire_timers(rt, now))
         return;
     until = next_wake(rt);
     if (until != INT64_MAX && (wait < 0 || until - now < wait))
@@ -406,14 +516,17 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
             if (total)
                 pt_sys_wait(all, total, wait < 0 || wait > 1000 ? 1000 : (int)wait);
         }
-        for (i = 0; i < nfds && i < 31; i++)
+        for (i = 0; i < nfds && i < MAX_FDS / 2; i++)
             fds[i].ready = all[i].ready;
         sweep(rt);
-    } else if (rt->nsleeps && wait > 0) {
+        fire_watches(rt, all, first_watch, total);
+    } else if ((rt->nsleeps || rt->ntimers) && wait > 0) {
         rt->c.sleep(rt->c.clock_ud, (uint32_t)wait);
     }
     finish_io(rt, false);
-    wake(rt, rt->c.now(rt->c.clock_ud));
+    now = rt->c.now(rt->c.clock_ud);
+    wake(rt, now);
+    fire_timers(rt, now);
 }
 
 static pt_rt_result status(pt_rt *rt)
@@ -422,8 +535,8 @@ static pt_rt_result status(pt_rt *rt)
         return PT_RT_FATAL;
     if (pt_idle(rt->a))
         return PT_RT_IDLE;
-    if (!rt->nreqs && !rt->nsleeps && !rt->io_pending)
-        return PT_RT_STUCK;
+    if (!rt->nreqs && !rt->nsleeps && !rt->io_pending && !rt->ncalls && !rt->ntimers && !rt->nwatches)
+        return pt_asks(rt->a, NULL, 0) ? PT_RT_ASK : PT_RT_STUCK;
     return PT_RT_BUSY;
 }
 
@@ -459,6 +572,8 @@ bool pt_rt_close(pt_rt *rt)
     while (rt->nreqs)
         drop_req(rt, 0);
     rt->nsleeps = 0;
+    rt->closing = true; /* running tools are stopped; their calls stay pending */
+    pt_rt_tools_stop(rt);
     /* Land an in-flight claim before deciding whether it needs a close. */
     finish_io(rt, true);
     pt_close(rt->a);

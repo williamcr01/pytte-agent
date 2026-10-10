@@ -186,6 +186,9 @@ static bool h_run(host *h)
         case PT_FX_CANCEL:
             h->cancelled = fx.cancel;
             break;
+        default: /* no tools here */
+            CHECK(!"unexpected effect");
+            return true;
         }
     }
     CHECK(!"runaway loop");
@@ -430,7 +433,7 @@ static void test_tool_call_without_tools(void)
     CHECK(h.done == 1);
     transcript(h.a, &t);
     CHECK(pt_str_contains(pt_buf_str(&t),
-                          PT_S("assistant/tool_use:echo\ntool_result:This tool is not available")));
+                          PT_S("assistant/tool_use:echo\ntool_result:Unknown tool: echo. No tools are available.")));
     CHECK(pt_str_contains(pt_buf_str(&t), PT_S("assistant/stop:No tools, then.\n")));
     h_free(&h);
     pt_buf_free(&t);

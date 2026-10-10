@@ -4,6 +4,7 @@
  *   pytte -c / -r [ID]          the TUI on this directory's newest session / on ID
  *   pytte -p "PROMPT"           one-shot: run until idle and print the answer
  *   pytte log [ID] [--json]     print a session's transcript
+ *   pytte approve ID TASK yes|no   answer a tool call waiting for approval
  *
  * Kill the process at any point and `pytte -c` continues from its last
  * commit. */
@@ -23,6 +24,8 @@ static const char usage[] =
     "       pytte -p [options] [PROMPT]   print mode: run until done, print the answer\n"
     "                                     (PROMPT from stdin when it is piped)\n"
     "       pytte log [ID] [--json]       print a session's transcript\n"
+    "       pytte approve ID TASK yes|no  answer a tool call waiting for approval,\n"
+    "                                     then go on as -p would\n"
     "\n"
     "  -c, --continue          the newest session started in this directory\n"
     "  -r, --resume [ID]       that session, or pick from this directory's\n"
@@ -36,19 +39,22 @@ static const char usage[] =
     "  --append-system-prompt TEXT\n"
     "  --output-format FMT     with -p: text (default), json (one object at the end),\n"
     "                          stream-json (every commit as a JSON line)\n"
+    "  --permission-mode MODE  ask (default), auto or read-only: what tools that may\n"
+    "                          change things do (config: permissions.mode)\n"
     "  --script FILE           faux provider script (default: $PYTTE_FAUX_SCRIPT)\n"
     "  --no-sync               do not fsync commits (survives crashes, not power loss)\n"
     "  --force                 take over a session another host left open\n"
     "\n"
-    "Exit codes: 0 done, 1 usage or setup, 10 the run failed, 20 storage error,\n"
+    "Exit codes: 0 done, 1 usage or setup, 3 waiting for approval (-p), 10 the run\n"
+    "failed, 20 storage error, "
     "130 interrupted (the session stays resumable).\n";
 
 enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 
 typedef struct opts {
     cli_opts c;
-    const char *cmd_log, *id, *prompt;
-    bool print, cont, resume, json, model_flag, effort_flag;
+    const char *cmd_log, *cmd_approve, *id, *prompt, *task, *answer;
+    bool print, cont, resume, json, model_flag, effort_flag, perm_flag;
     int out;
 } opts;
 
@@ -106,6 +112,10 @@ static void parse_args(int argc, char **argv, opts *o)
             if (!cli_effort_parse(pt_strz(v), &o->c.reasoning))
                 die("unknown effort level", v);
             o->effort_flag = true;
+        } else if (TAKES("--permission-mode")) {
+            if (!pt_perm_parse(pt_strz(v), &o->c.perm))
+                die("unknown permission mode (ask, auto, read-only)", v);
+            o->perm_flag = true;
         } else if (TAKES("--output-format")) {
             if (strcmp(v, "text") == 0)
                 o->out = OUT_TEXT;
@@ -129,8 +139,16 @@ static void parse_args(int argc, char **argv, opts *o)
             die("unknown option", a);
         } else if (i == 1 && strcmp(a, "log") == 0) {
             o->cmd_log = a;
-        } else if (o->cmd_log && !o->id) {
+        } else if (i == 1 && strcmp(a, "approve") == 0) {
+            o->cmd_approve = a;
+        } else if ((o->cmd_log || o->cmd_approve) && !o->id) {
             o->id = a;
+        } else if (o->cmd_approve && !o->task) {
+            o->task = a;
+        } else if (o->cmd_approve && !o->answer) {
+            if (strcmp(a, "yes") != 0 && strcmp(a, "no") != 0)
+                die("answer yes or no", a);
+            o->answer = a;
         } else if (!o->prompt) {
             o->prompt = a;
         } else {
@@ -138,6 +156,8 @@ static void parse_args(int argc, char **argv, opts *o)
         }
 #undef TAKES
     }
+    if (o->cmd_approve && !o->answer)
+        die("usage: pytte approve ID TASK yes|no", NULL);
     if (!o->c.script)
         o->c.script = getenv("PYTTE_FAUX_SCRIPT");
 }
@@ -160,6 +180,13 @@ static void apply_config(opts *o, cli_config *cfg, bool create)
     } else if (!cli_effort_parse(pt_strz(cfg->val[CFG_REASONING]), &o->c.reasoning)) {
         fprintf(stderr, "pytte: unknown effort level %s (from %s)\n", cfg->val[CFG_REASONING],
                 cfg->src[CFG_REASONING]);
+        exit(1);
+    }
+    if (o->perm_flag) {
+        cli_config_set(cfg, CFG_PERMS, pt_perm_name(o->c.perm), "flag");
+    } else if (!pt_perm_parse(pt_strz(cfg->val[CFG_PERMS]), &o->c.perm)) {
+        fprintf(stderr, "pytte: unknown permission mode %s (from %s)\n", cfg->val[CFG_PERMS],
+                cfg->src[CFG_PERMS]);
         exit(1);
     }
     if (o->c.model && *o->c.model) { /* before a session exists to leave behind */
@@ -329,6 +356,22 @@ static pt_str read_stdin(pt_buf *b)
     return pt_str_trim(pt_buf_str(b));
 }
 
+/* Tool calls waiting for approval, with the command that answers each. */
+static void print_asks(cli_session *s)
+{
+    pt_ask_view v[8];
+    pt_arena ar;
+    uint32_t n = pt_asks(s->a, v, 8), i;
+    pt_arena_init(&ar, pt_sys_allocator(), 0);
+    for (i = 0; i < n && i < 8; i++) {
+        pt_str gist = pt_rt_gist(v[i].args, &ar);
+        fprintf(stderr, "pytte: %.*s wants approval: %.*s\n", (int)v[i].name.n, v[i].name.p,
+                (int)(gist.n > 300 ? 300 : gist.n), gist.p);
+        fprintf(stderr, "  answer with: pytte approve %s %u yes|no\n", s->id, v[i].task);
+    }
+    pt_arena_free(&ar);
+}
+
 /* Run until idle; returns the exit code. */
 static int print_mode(opts *o, const char *id, cli_config *cfg)
 {
@@ -350,13 +393,22 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
         prompt = pt_strz(o->prompt);
     else if (!isatty(STDIN_FILENO))
         prompt = read_stdin(&in_buf);
-    if (!id && !prompt.n)
+    if (!id && !prompt.n && !o->cmd_approve)
         die("no prompt (give one as an argument or on stdin)", NULL);
     apply_config(o, cfg, id == NULL);
     o->c.stop = should_stop;
     if ((rc = cli_session_open(&s, &o->c, id, on_event, &u, err, sizeof err)) != 0) {
         fprintf(stderr, "pytte: %s\n", err);
         return rc;
+    }
+    if (o->cmd_approve) {
+        uint64_t task = 0;
+        if (!pt_str_to_u64(pt_strz(o->task), &task) || task > UINT32_MAX ||
+            !pt_approve(s.a, (uint32_t)task, strcmp(o->answer, "yes") == 0, PT_STR_NULL)) {
+            fprintf(stderr, "pytte: task %s: %s\n", o->task, task ? pt_error(s.a) : "not a task number");
+            cli_session_close(&s);
+            return 1;
+        }
     }
     if (prompt.n) {
         pt_input in;
@@ -397,6 +449,13 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
         }
         status = "error";
         fprintf(stderr, "pytte: the session is safe up to its last commit; continue with: pytte -r %s\n", s.id);
+        break;
+    case PT_RT_ASK:
+        end_text(&u);
+        print_asks(&s);
+        cli_session_close(&s);
+        rc = 3;
+        status = "waiting";
         break;
     default: /* STUCK; BUSY is not returned by pt_rt_run */
         fprintf(stderr, "pytte: internal error: the agent is stuck\n");
@@ -534,6 +593,10 @@ int main(int argc, char **argv)
     parse_args(argc, argv, &o);
     if (o.cmd_log)
         return cmd_log(&o);
+    if (o.cmd_approve) {
+        cli_config_load(&cfg, warn, sizeof warn);
+        return print_mode(&o, o.id, &cfg);
+    }
     cli_config_load(&cfg, warn, sizeof warn);
     if (warn[0])
         fprintf(stderr, "pytte: %s\n", warn);

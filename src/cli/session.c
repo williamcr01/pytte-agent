@@ -376,6 +376,9 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
         st->close(st);
         return fail(s, 1, err, cap, "out of memory");
     }
+    if (!pt_rt_add_builtins(s->rt)) /* the store is the runtime's now */
+        return fail(s, 1, err, cap, "out of memory");
+    pt_rt_set_perm(s->rt, o->perm);
     memset(&me, 0, sizeof me);
     pt_sys_identity(s->host, sizeof s->host, s->boot, sizeof s->boot, &me.pid);
     me.host = pt_strz(s->host);
@@ -394,6 +397,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
         c.cwd = pt_strz(getcwd(cwd, sizeof cwd) ? cwd : ".");
         c.host = me.host;
         c.system = pt_buf_str(&sys);
+        c.tools = pt_rt_tool_defs(s->rt, &c.ntools);
         ok = pt_create(s->a, &c);
         pt_buf_free(&sys);
         if (!ok)

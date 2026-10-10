@@ -107,6 +107,75 @@ entry *pt_core_last_entry(pt_agent *a)
     return a->nentries ? &a->entries[a->nentries - 1] : NULL;
 }
 
+entry *pt_core_entry(pt_agent *a, uint32_t id)
+{
+    uint32_t lo = 0, hi = a->nentries;
+    while (lo < hi) { /* entries are in ID order */
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (a->entries[mid].id < id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < a->nentries && a->entries[lo].id == id ? &a->entries[lo] : NULL;
+}
+
+void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value)
+{
+    pt_jw *w = &a->cw;
+    uint32_t i, id = 0;
+    for (i = 0; i < a->ndocs; i++)
+        if (pt_str_eq(a->docs[i].key, key))
+            id = a->docs[i].id;
+    pt_jw_obj(w);
+    pt_jw_key(w, "t");
+    pt_jw_strz(w, "doc");
+    pt_jw_key(w, "id");
+    pt_jw_uint(w, id ? id : pt_core_new_id(a));
+    pt_jw_key(w, "key");
+    pt_jw_str(w, key);
+    pt_jw_key(w, "value");
+    pt_jw_raw(w, value);
+    pt_jw_obj_end(w);
+}
+
+void pt_core_after(pt_agent *a, after_kind k, const char *outcome, pt_str error, int64_t until)
+{
+    a->after = k;
+    a->after_outcome = pt_arena_dup(&a->after_a, pt_strz(outcome));
+    a->after_error = pt_arena_dup(&a->after_a, error);
+    a->after_until = until;
+}
+
+void pt_core_cancel(pt_agent *a, uint32_t task_id, uint32_t fx_id)
+{
+    pt_fx fx;
+    memset(&fx, 0, sizeof fx);
+    fx.kind = PT_FX_CANCEL;
+    fx.id = pt_core_new_fx(a);
+    fx.task = task_id;
+    fx.cancel = fx_id;
+    pt_core_queue(a, &fx, PT_STR_NULL);
+}
+
+void pt_core_live_del(pt_agent *a, uint32_t task_id)
+{
+    pt_fx fx;
+    memset(&fx, 0, sizeof fx);
+    fx.kind = PT_FX_LIVE;
+    fx.id = pt_core_new_fx(a);
+    fx.task = task_id;
+    pt_core_queue(a, &fx, PT_STR_NULL);
+}
+
+void pt_task_release(pt_agent *a, task *t)
+{
+    pt_run_free_live(a, t);
+    pt_tool_free_live(a, t);
+    pt_buf_reset(&t->rescued);
+    pt_buf_reset(&t->gate_text);
+}
+
 static void hex(char *out, const unsigned char *p, size_t n)
 {
     static const char digits[] = "0123456789abcdef";
@@ -212,14 +281,8 @@ static void commit_landed(pt_agent *a, const char *error)
     ev.task = a->commit_task;
     ev.line = line;
     pt_core_emit(a, &ev);
-    if (a->after_live_del) {
-        pt_fx fx;
-        memset(&fx, 0, sizeof fx);
-        fx.kind = PT_FX_LIVE;
-        fx.id = pt_core_new_fx(a);
-        fx.task = a->after_live_del;
-        pt_core_queue(a, &fx, PT_STR_NULL);
-    }
+    if (a->after_live_del)
+        pt_core_live_del(a, a->after_live_del);
     if (a->after != AFTER_NONE) {
         memset(&ev, 0, sizeof ev);
         ev.kind = a->after == AFTER_RETRY ? PT_E_RETRY : PT_E_RUN_DONE;
@@ -266,6 +329,7 @@ static void build_create(pt_agent *a)
 {
     pt_jw *w = &a->cw;
     const pt_session_cfg *c = &a->create;
+    uint32_t i;
     pt_core_commit_begin(a, 0);
     pt_jw_obj(w);
     pt_jw_key(w, "t");
@@ -291,7 +355,25 @@ static void build_create(pt_agent *a)
     pt_jw_key(w, "system");
     pt_jw_str(w, c->system);
     pt_jw_key(w, "tools");
-    pt_jw_raw(w, PT_S("[]"));
+    pt_jw_arr(w);
+    for (i = 0; i < c->ntools; i++) {
+        const pt_tool_def *d = &c->tools[i];
+        pt_jw_obj(w);
+        pt_jw_key(w, "name");
+        pt_jw_str(w, d->name);
+        pt_jw_key(w, "description");
+        pt_jw_str(w, d->description);
+        pt_jw_key(w, "input_schema");
+        pt_jw_raw(w, d->schema);
+        pt_jw_key(w, "replay");
+        pt_jw_strz(w, d->replay == PT_REPLAY_SAFE ? "safe" : "unsafe");
+        pt_jw_key(w, "parallel");
+        pt_jw_bool(w, d->parallel);
+        pt_jw_key(w, "source");
+        pt_jw_str(w, d->source);
+        pt_jw_obj_end(w);
+    }
+    pt_jw_arr_end(w);
     pt_jw_key(w, "skills");
     pt_jw_raw(w, PT_S("[]"));
     pt_core_entry_end(a);
@@ -373,7 +455,7 @@ static input *first_queued(pt_agent *a)
 {
     uint32_t i;
     for (i = 0; i < a->ninputs; i++)
-        if (a->inputs[i]->status == IN_QUEUED)
+        if (a->inputs[i]->status == IN_QUEUED && a->inputs[i]->kind == INK_USER)
             return a->inputs[i];
     return NULL;
 }
@@ -411,10 +493,13 @@ static void build_submit(pt_agent *a)
     memset(&in, 0, sizeof in);
     pt_core_commit_begin(a, 0);
     in.id = pt_core_new_id(a);
+    in.kind = s.kind;
     in.text = s.text;
     in.req = s.req;
+    in.task = s.task;
+    in.yes = s.yes;
     in.status = IN_QUEUED;
-    if (place)
+    if (place && s.kind == INK_USER)
         write_placement(a, &in);
     else
         pt_write_input(&a->cw, &in);
@@ -435,7 +520,7 @@ static void build_place(pt_agent *a, input *in)
 
 static bool step(pt_agent *a)
 {
-    uint32_t i;
+    uint32_t i, blocked = 0;
     input *q;
     pt_arena_reset(&a->scratch);
     if (a->commit_out || a->fatal)
@@ -485,8 +570,22 @@ static bool step(pt_agent *a)
     }
     for (i = 0; i < a->ntasks; i++) {
         task *t = a->tasks[i];
-        if (t->status != ST_DONE && !t->fx && pt_run_step(a, t))
+        if (t->status == ST_DONE)
+            continue;
+        if (t->kind == TASK_TOOL) {
+            /* A round runs one call at a time, in call order, unless all
+             * of its tools may run together (section 7.5). */
+            task *run = pt_core_task(a, t->owner);
+            bool serial = !run || !run->parallel;
+            if (serial && blocked == t->owner)
+                continue;
+            if (serial)
+                blocked = t->owner;
+            if (!t->fx && pt_tool_step(a, t))
+                return true;
+        } else if (!t->fx && pt_run_step(a, t)) {
             return true;
+        }
         if (a->fatal || a->commit_out)
             return false;
     }
@@ -538,7 +637,7 @@ bool pt_idle(const pt_agent *a)
         if (a->tasks[i]->status != ST_DONE)
             return false;
     for (i = 0; i < a->ninputs; i++)
-        if (a->inputs[i]->status == IN_QUEUED)
+        if (a->inputs[i]->status == IN_QUEUED && a->inputs[i]->kind == INK_USER)
             return false;
     return true;
 }
@@ -553,8 +652,8 @@ void pt_fx_head(pt_agent *a, uint32_t fx, int status, pt_str retry_after)
 
 void pt_fx_data(pt_agent *a, uint32_t fx, const void *p, size_t n)
 {
-    if (!a->fatal)
-        pt_run_http_data(a, fx, p, n);
+    if (!a->fatal && !pt_run_http_data(a, fx, p, n))
+        pt_tool_data(a, fx, p, n);
 }
 
 void pt_fx_done(pt_agent *a, uint32_t fx, const char *error)
@@ -569,7 +668,7 @@ void pt_fx_done(pt_agent *a, uint32_t fx, const char *error)
     if (pt_run_http_done(a, fx, error))
         return;
     for (i = 0; i < a->ntasks; i++) /* a retry sleep */
-        if (a->tasks[i]->fx == fx) {
+        if (a->tasks[i]->fx == fx && a->tasks[i]->phase == PH_RETRY) {
             a->tasks[i]->fx = 0;
             a->tasks[i]->woke = true;
         }
@@ -625,10 +724,21 @@ void pt_free(pt_agent *a)
         return;
     for (i = 0; i < a->ntasks; i++) {
         task *t = a->tasks[i];
-        pt_run_free_live(a, t);
+        pt_task_release(a, t);
         pt_arena_free(&t->a);
         pt_buf_free(&t->rescued);
+        pt_buf_free(&t->gate_text);
     }
+    while (a->free_tasks) {
+        task *t = a->free_tasks;
+        a->free_tasks = t->next_free;
+        pt_arena_free(&t->a);
+        pt_buf_free(&t->rescued);
+        pt_buf_free(&t->gate_text);
+    }
+    for (i = 0; i < a->ndocs; i++)
+        pt_buf_free(&a->docs[i].value);
+    a->al.fn(a->al.ud, a->docs, sizeof(doc) * a->dcap, 0);
     for (i = 0; i < a->ninputs; i++) {
         pt_arena_free(&a->inputs[i]->a);
     }
@@ -672,6 +782,22 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
     a->create.cwd = pt_arena_dup(&a->reqs, c->cwd);
     a->create.host = pt_arena_dup(&a->reqs, c->host);
     a->create.system = pt_arena_dup(&a->reqs, c->system);
+    a->create.ntools = 0;
+    if (c->ntools) {
+        pt_tool_def *d = (pt_tool_def *)pt_arena_alloc(&a->reqs, sizeof(pt_tool_def) * c->ntools);
+        uint32_t i;
+        if (!d)
+            return false;
+        for (i = 0; i < c->ntools; i++) {
+            d[i] = c->tools[i];
+            d[i].name = pt_arena_dup(&a->reqs, c->tools[i].name);
+            d[i].description = pt_arena_dup(&a->reqs, c->tools[i].description);
+            d[i].schema = pt_arena_dup(&a->reqs, c->tools[i].schema);
+            d[i].source = pt_arena_dup(&a->reqs, c->tools[i].source);
+        }
+        a->create.tools = d;
+        a->create.ntools = c->ntools;
+    }
     a->want_create = true;
     a->loaded = true;
     a->have_session = true;
@@ -709,16 +835,11 @@ pt_load_result pt_load_line(pt_agent *a, pt_str line, bool complete, bool last)
 void pt_load_live(pt_agent *a, uint32_t task_id, pt_str bytes)
 {
     task *t = pt_core_task(a, task_id);
-    if (t && t->status != ST_DONE && t->phase == PH_REQUEST) {
+    if (t && t->status != ST_DONE && (t->phase == PH_REQUEST || t->phase == PH_EXECUTE)) {
         pt_buf_reset(&t->rescued);
         pt_buf_puts(&t->rescued, bytes);
     } else { /* stale: its commit landed, but the delete did not */
-        pt_fx fx;
-        memset(&fx, 0, sizeof fx);
-        fx.kind = PT_FX_LIVE;
-        fx.id = pt_core_new_fx(a);
-        fx.task = task_id;
-        pt_core_queue(a, &fx, PT_STR_NULL);
+        pt_core_live_del(a, task_id);
     }
 }
 
@@ -795,6 +916,7 @@ bool pt_submit(pt_agent *a, const pt_input *in)
     }
     if (!pt_core_grow(a, (void **)&a->subs, &a->scap, a->nsubs + 1, sizeof(sub)))
         return false;
+    memset(&a->subs[a->nsubs], 0, sizeof(sub));
     a->subs[a->nsubs].text = pt_arena_dup(&a->subs_a, in->text);
     a->subs[a->nsubs].req = pt_arena_dup(&a->subs_a, in->req);
     a->nsubs++;
@@ -806,7 +928,7 @@ bool pt_abort(pt_agent *a)
 {
     uint32_t i;
     for (i = 0; i < a->ntasks; i++)
-        if (a->tasks[i]->status != ST_DONE) {
+        if (a->tasks[i]->status != ST_DONE && a->tasks[i]->kind == TASK_RUN) {
             a->abort_run = a->tasks[i]->id;
             a->idle_sent = false;
             return true;
@@ -815,6 +937,20 @@ bool pt_abort(pt_agent *a)
 }
 
 /* ---- reading ---- */
+
+pt_str pt_doc(const pt_agent *a, pt_str key)
+{
+    uint32_t i;
+    for (i = 0; i < a->ndocs; i++)
+        if (pt_str_eq(a->docs[i].key, key))
+            return pt_buf_str(&a->docs[i].value);
+    return PT_STR_NULL;
+}
+
+pt_str pt_session_cwd(const pt_agent *a)
+{
+    return a->cwd.n ? a->cwd : a->create.cwd;
+}
 
 uint32_t pt_entry_count(const pt_agent *a)
 {

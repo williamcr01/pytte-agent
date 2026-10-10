@@ -6,7 +6,9 @@
 #include <string.h>
 
 static const char *const task_status_names[] = {"pending", "running", "waiting", "done"};
-static const char *const phase_names[] = {"prepare", "request", "retry"};
+static const char *const phase_names[] = {"prepare", "request", "retry", "tools",
+                                          "call", "approve", "execute"};
+#define NPHASES 7
 static const char *const input_status_names[] = {"queued", "placed", "done", "failed", "aborted"};
 static const char *const ent_names[] = {"epoch", "user", "assistant", "tool_result", "note", "error"};
 
@@ -34,6 +36,61 @@ static uint32_t getid(const pt_json *o, const char *k)
 
 /* ---- writing ---- */
 
+static void write_state(pt_jw *w, const task *t)
+{
+    uint32_t i;
+    pt_jw_key(w, "phase");
+    pt_jw_strz(w, phase_names[t->phase]);
+    if (t->kind == TASK_TOOL) {
+        pt_jw_key(w, "entry");
+        pt_jw_uint(w, t->entry);
+        pt_jw_key(w, "call_id");
+        pt_jw_str(w, t->call_id);
+        if (t->args.n) {
+            pt_jw_key(w, "args");
+            pt_jw_raw(w, t->args);
+        }
+        if (t->phase == PH_APPROVE) {
+            pt_jw_key(w, "prompt");
+            pt_jw_str(w, t->prompt);
+        } else if (t->phase == PH_EXECUTE) {
+            pt_jw_key(w, "replay");
+            pt_jw_strz(w, t->replay == PT_REPLAY_SAFE ? "safe" : "unsafe");
+            pt_jw_key(w, "attempt");
+            pt_jw_uint(w, t->attempt);
+        }
+        return;
+    }
+    pt_jw_key(w, "attempt");
+    pt_jw_uint(w, t->attempt);
+    if (t->phase == PH_REQUEST) {
+        pt_jw_key(w, "cutoff");
+        pt_jw_uint(w, t->cutoff);
+        pt_jw_key(w, "params");
+        pt_jw_obj(w);
+        pt_jw_key(w, "model");
+        pt_jw_str(w, t->model);
+        pt_jw_key(w, "reasoning");
+        pt_jw_strz(w, pt_reasoning_name(t->reasoning));
+        pt_jw_key(w, "max_tokens");
+        pt_jw_uint(w, t->max_tokens);
+        pt_jw_obj_end(w);
+    } else if (t->phase == PH_RETRY) {
+        pt_jw_key(w, "until");
+        pt_jw_int(w, t->until);
+    } else if (t->phase == PH_TOOLS) {
+        pt_jw_key(w, "assistant");
+        pt_jw_uint(w, t->entry);
+        pt_jw_key(w, "calls");
+        pt_jw_arr(w);
+        for (i = 0; i < t->ncalls; i++)
+            pt_jw_uint(w, t->calls[i]);
+        pt_jw_arr_end(w);
+        pt_jw_key(w, "parallel");
+        pt_jw_bool(w, t->parallel);
+    }
+}
+
 void pt_write_task(pt_jw *w, const task *t)
 {
     pt_jw_obj(w);
@@ -42,11 +99,21 @@ void pt_write_task(pt_jw *w, const task *t)
     pt_jw_key(w, "id");
     pt_jw_uint(w, t->id);
     pt_jw_key(w, "kind");
-    pt_jw_strz(w, "run");
+    pt_jw_strz(w, t->kind == TASK_TOOL ? "tool" : "run");
+    if (t->kind == TASK_TOOL) {
+        pt_jw_key(w, "owner");
+        pt_jw_uint(w, t->owner);
+    }
     pt_jw_key(w, "status");
     pt_jw_strz(w, task_status_names[t->status]);
-    pt_jw_key(w, "input");
-    pt_jw_uint(w, t->input);
+    if (t->kind == TASK_RUN) {
+        pt_jw_key(w, "input");
+        pt_jw_uint(w, t->input);
+    }
+    if (t->abort && t->status != ST_DONE) {
+        pt_jw_key(w, "abort");
+        pt_jw_bool(w, true);
+    }
     if (t->status == ST_DONE) {
         pt_jw_key(w, "outcome");
         pt_jw_obj(w);
@@ -64,26 +131,7 @@ void pt_write_task(pt_jw *w, const task *t)
     } else {
         pt_jw_key(w, "state");
         pt_jw_obj(w);
-        pt_jw_key(w, "phase");
-        pt_jw_strz(w, phase_names[t->phase]);
-        pt_jw_key(w, "attempt");
-        pt_jw_uint(w, t->attempt);
-        if (t->phase == PH_REQUEST) {
-            pt_jw_key(w, "cutoff");
-            pt_jw_uint(w, t->cutoff);
-            pt_jw_key(w, "params");
-            pt_jw_obj(w);
-            pt_jw_key(w, "model");
-            pt_jw_str(w, t->model);
-            pt_jw_key(w, "reasoning");
-            pt_jw_strz(w, pt_reasoning_name(t->reasoning));
-            pt_jw_key(w, "max_tokens");
-            pt_jw_uint(w, t->max_tokens);
-            pt_jw_obj_end(w);
-        } else if (t->phase == PH_RETRY) {
-            pt_jw_key(w, "until");
-            pt_jw_int(w, t->until);
-        }
+        write_state(w, t);
         pt_jw_obj_end(w);
     }
     pt_jw_obj_end(w);
@@ -101,7 +149,13 @@ void pt_write_input(pt_jw *w, const input *in)
         pt_jw_str(w, in->req);
     }
     pt_jw_key(w, "kind");
-    pt_jw_strz(w, "user");
+    pt_jw_strz(w, in->kind == INK_APPROVE ? "approve" : "user");
+    if (in->kind == INK_APPROVE) {
+        pt_jw_key(w, "task");
+        pt_jw_uint(w, in->task);
+        pt_jw_key(w, "answer");
+        pt_jw_strz(w, in->yes ? "yes" : "no");
+    }
     pt_jw_key(w, "text");
     pt_jw_str(w, in->text);
     pt_jw_key(w, "status");
@@ -118,24 +172,43 @@ void pt_write_input(pt_jw *w, const input *in)
 static bool read_task(const pt_json *r, task *t, pt_arena *ar)
 {
     const pt_json *st = pt_json_get(r, "state"), *out = pt_json_get(r, "outcome");
+    pt_str kind = pt_json_gets(r, "kind", ar);
     unsigned v;
-    if (!pt_str_eqz(pt_json_gets(r, "kind", ar), "run"))
+    if (pt_str_eqz(kind, "run"))
+        t->kind = TASK_RUN;
+    else if (pt_str_eqz(kind, "tool"))
+        t->kind = TASK_TOOL;
+    else
         return false;
-    t->kind = TASK_RUN;
     if (!lookup(pt_json_gets(r, "status", ar), task_status_names, 4, &v))
         return false;
     t->status = (task_status)v;
     t->input = getid(r, "input");
+    t->owner = getid(r, "owner");
+    t->abort = pt_json_truthy(pt_json_get(r, "abort"));
+    if (t->kind == TASK_TOOL && !t->owner)
+        return false;
     if (t->status == ST_DONE) {
         t->outcome = pt_json_gets(out, "status", ar);
         t->reason = pt_json_gets(out, "reason", ar);
         t->result = getid(out, "entry");
         return t->outcome.n > 0;
     }
-    if (!lookup(pt_json_gets(st, "phase", ar), phase_names, 3, &v))
+    if (!lookup(pt_json_gets(st, "phase", ar), phase_names, NPHASES, &v))
         return false;
-    t->phase = (run_phase)v;
+    t->phase = (task_phase)v;
+    if ((t->kind == TASK_TOOL) != (t->phase >= PH_CALL))
+        return false;
     t->attempt = getid(st, "attempt");
+    if (t->kind == TASK_TOOL) {
+        const pt_json *args = pt_json_get(st, "args");
+        t->entry = getid(st, "entry");
+        t->call_id = pt_json_gets(st, "call_id", ar);
+        t->args = pt_json_is(args, PT_J_OBJ) ? args->raw : PT_STR_NULL;
+        t->prompt = pt_json_gets(st, "prompt", ar);
+        t->replay = pt_str_eqz(pt_json_gets(st, "replay", ar), "safe") ? PT_REPLAY_SAFE : PT_REPLAY_UNSAFE;
+        return t->entry > 0 && (t->phase != PH_EXECUTE || t->attempt > 0);
+    }
     if (t->phase == PH_REQUEST) {
         const pt_json *p = pt_json_get(st, "params");
         int64_t mt = pt_json_geti(p, "max_tokens", 0);
@@ -148,8 +221,42 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
             return false;
     } else if (t->phase == PH_RETRY) {
         t->until = pt_json_geti(st, "until", 0);
+    } else if (t->phase == PH_TOOLS) {
+        const pt_json *calls = pt_json_get(st, "calls"), *c;
+        uint32_t i = 0;
+        t->entry = getid(st, "assistant");
+        t->parallel = pt_json_truthy(pt_json_get(st, "parallel"));
+        if (!pt_json_is(calls, PT_J_ARR) || !t->entry)
+            return false;
+        t->ncalls = calls->len;
+        t->calls = (uint32_t *)pt_arena_alloc(ar, sizeof(uint32_t) * (calls->len ? calls->len : 1));
+        if (!t->calls)
+            return false;
+        for (c = calls->child; c; c = c->next) {
+            int64_t id;
+            if (!pt_json_int(c, &id) || id <= 0 || id > (int64_t)UINT32_MAX)
+                return false;
+            t->calls[i++] = (uint32_t)id;
+        }
     }
     return t->attempt > 0;
+}
+
+/* A task that is gone from memory: done tool tasks leave the table, and
+ * their struct is reused by the next one. */
+static void drop_task(pt_agent *a, task *t)
+{
+    uint32_t i;
+    for (i = 0; i < a->ntasks && a->tasks[i] != t; i++)
+        ;
+    if (i == a->ntasks)
+        return;
+    memmove(a->tasks + i, a->tasks + i + 1, sizeof(task *) * (a->ntasks - i - 1));
+    a->ntasks--;
+    pt_task_release(a, t);
+    pt_arena_reset(&t->a);
+    t->next_free = a->free_tasks;
+    a->free_tasks = t;
 }
 
 static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
@@ -162,24 +269,41 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
     nt.id = id;
     if (nt.status != ST_DONE && nt.phase == PH_REQUEST && !pt_str_eq(nt.model, a->last_model))
         a->last_model = pt_arena_dup(&a->perm, nt.model);
+    if (nt.status == ST_DONE && nt.kind == TASK_TOOL) {
+        if (t)
+            drop_task(a, t);
+        return true;
+    }
     if (!t) {
         if (!pt_core_grow(a, (void **)&a->tasks, &a->tcap, a->ntasks + 1, sizeof(task *)))
             goto oom;
-        t = (task *)pt_arena_zalloc(&a->objects, sizeof *t);
-        if (!t)
-            goto oom;
-        pt_arena_init(&t->a, a->al, 128);
-        pt_buf_init(&t->rescued, a->al);
+        if (a->free_tasks) {
+            pt_arena ar;
+            pt_buf rescued, gate_text;
+            t = a->free_tasks;
+            a->free_tasks = t->next_free;
+            ar = t->a;
+            rescued = t->rescued;
+            gate_text = t->gate_text;
+            memset(t, 0, sizeof *t);
+            t->a = ar;
+            t->rescued = rescued;
+            t->gate_text = gate_text;
+        } else {
+            t = (task *)pt_arena_zalloc(&a->objects, sizeof *t);
+            if (!t)
+                goto oom;
+            pt_arena_init(&t->a, a->al, 128);
+            pt_buf_init(&t->rescued, a->al);
+            pt_buf_init(&t->gate_text, a->al);
+        }
         a->tasks[a->ntasks++] = t; /* IDs only grow, so this stays sorted */
     } else {
         pt_arena_reset(&t->a);
     }
     /* Replace the durable part; keep what belongs to this process. */
     {
-        uint32_t fx = t->fx;
-        run_live *live = t->live;
-        pt_buf rescued = t->rescued;
-        bool woke = t->woke;
+        task keep = *t;
         nt.a = t->a;
         if (nt.model.n)
             nt.model = pt_arena_dup(&nt.a, nt.model);
@@ -187,11 +311,30 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
             nt.outcome = pt_arena_dup(&nt.a, nt.outcome);
         if (nt.reason.n)
             nt.reason = pt_arena_dup(&nt.a, nt.reason);
+        if (nt.call_id.n)
+            nt.call_id = pt_arena_dup(&nt.a, nt.call_id);
+        if (nt.args.n)
+            nt.args = pt_arena_dup(&nt.a, nt.args);
+        if (nt.prompt.n)
+            nt.prompt = pt_arena_dup(&nt.a, nt.prompt);
+        if (nt.ncalls) {
+            uint32_t *c = (uint32_t *)pt_arena_alloc(&nt.a, sizeof(uint32_t) * nt.ncalls);
+            if (c)
+                memcpy(c, nt.calls, sizeof(uint32_t) * nt.ncalls);
+            nt.calls = c;
+        }
         *t = nt;
-        t->fx = fx;
-        t->live = live;
-        t->rescued = rescued;
-        t->woke = woke;
+        t->fx = keep.fx;
+        t->live = keep.live;
+        t->tl = keep.tl;
+        t->rescued = keep.rescued;
+        t->woke = keep.woke;
+        t->recovered = !a->loaded; /* this record came from the log */
+        t->asked = keep.asked && t->phase == PH_APPROVE;
+        t->gated = keep.gated && t->phase == PH_CALL;
+        t->gate = keep.gate;
+        t->gate_text = keep.gate_text;
+        t->next_free = NULL;
     }
     if (t->a.oom || a->perm.oom)
         goto oom;
@@ -205,11 +348,13 @@ static bool apply_input(pt_agent *a, const pt_json *r, uint32_t id)
 {
     input *in = pt_core_input(a, id);
     pt_str req, text;
+    input_kind kind;
     unsigned v;
     if (!lookup(pt_json_gets(r, "status", &a->scratch), input_status_names, 5, &v))
         return false;
     req = pt_json_gets(r, "req", &a->scratch);
     text = pt_json_gets(r, "text", &a->scratch);
+    kind = pt_str_eqz(pt_json_gets(r, "kind", &a->scratch), "approve") ? INK_APPROVE : INK_USER;
     if (a->scratch.oom)
         goto oom;
     if (!in) {
@@ -229,9 +374,82 @@ static bool apply_input(pt_agent *a, const pt_json *r, uint32_t id)
             goto oom;
     }
     in->id = id;
+    in->kind = kind;
     in->status = (input_status)v;
     in->run = getid(r, "run");
+    in->task = getid(r, "task");
+    in->yes = pt_str_eqz(pt_json_gets(r, "answer", &a->scratch), "yes");
     return true;
+oom:
+    pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
+    return false;
+}
+
+/* The epoch's tools: parsed once into the epoch arena, so building a
+ * request or checking a call needs no parsing. */
+static bool apply_tools(pt_agent *a, const pt_json *list)
+{
+    pt_arena *ea = &a->epoch;
+    const pt_json *t;
+    uint32_t n = 0;
+    a->tools = NULL;
+    a->tool_meta = NULL;
+    a->ntools = 0;
+    if (!pt_json_is(list, PT_J_ARR))
+        return list == NULL;
+    if (!list->len)
+        return true;
+    a->tools = (pt_tool *)pt_arena_zalloc(ea, sizeof(pt_tool) * list->len);
+    a->tool_meta = (tool_meta *)pt_arena_zalloc(ea, sizeof(tool_meta) * list->len);
+    if (!a->tools || !a->tool_meta)
+        return false;
+    for (t = list->child; t; t = t->next) {
+        const pt_json *schema = pt_json_get(t, "input_schema");
+        pt_tool *d = &a->tools[n];
+        tool_meta *m = &a->tool_meta[n];
+        if (!pt_json_is(t, PT_J_OBJ))
+            return false;
+        d->name = pt_arena_dup(ea, pt_json_gets(t, "name", &a->scratch));
+        d->description = pt_arena_dup(ea, pt_json_gets(t, "description", &a->scratch));
+        d->schema = pt_arena_dup(ea, schema ? schema->raw : PT_S("{\"type\":\"object\"}"));
+        m->replay = pt_str_eqz(pt_json_gets(t, "replay", &a->scratch), "safe") ? PT_REPLAY_SAFE
+                                                                              : PT_REPLAY_UNSAFE;
+        m->parallel = pt_json_truthy(pt_json_get(t, "parallel"));
+        m->schema = pt_json_parse(d->schema, ea, NULL);
+        if (!d->name.n)
+            return false;
+        n++;
+    }
+    a->ntools = n;
+    return !ea->oom;
+}
+
+static bool apply_doc(pt_agent *a, const pt_json *r, uint32_t id)
+{
+    pt_str key = pt_json_gets(r, "key", &a->scratch);
+    const pt_json *v = pt_json_get(r, "value");
+    doc *d = NULL;
+    uint32_t i;
+    if (!key.n || !v)
+        return false;
+    for (i = 0; i < a->ndocs; i++)
+        if (pt_str_eq(a->docs[i].key, key)) {
+            d = &a->docs[i];
+            break;
+        }
+    if (!d) {
+        if (!pt_core_grow(a, (void **)&a->docs, &a->dcap, a->ndocs + 1, sizeof(doc)))
+            goto oom;
+        d = &a->docs[a->ndocs];
+        d->key = pt_arena_dup(&a->perm, key);
+        pt_buf_init(&d->value, a->al);
+        a->ndocs++;
+    }
+    d->id = id;
+    pt_buf_reset(&d->value);
+    pt_buf_puts(&d->value, v->raw);
+    if (!d->value.oom && !a->perm.oom)
+        return true;
 oom:
     pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
     return false;
@@ -267,6 +485,8 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
     case ENT_EPOCH:
         e->msg.role = PT_ROLE_SYSTEM;
         e->msg.text = pt_arena_dup(ea, pt_json_gets(d, "system", sa));
+        if (!apply_tools(a, pt_json_get(d, "tools")))
+            return false;
         break;
     case ENT_USER:
         e->msg.role = PT_ROLE_USER;
@@ -325,6 +545,7 @@ static bool apply_record(pt_agent *a, const pt_json *r)
             return false;
         }
         a->have_session = true;
+        a->cwd = pt_arena_dup(&a->perm, pt_json_gets(r, "cwd", &a->scratch));
     } else if (pt_str_eqz(type, "entry")) {
         ok = apply_entry(a, r, id);
     } else if (pt_str_eqz(type, "task")) {
@@ -333,8 +554,10 @@ static bool apply_record(pt_agent *a, const pt_json *r)
         ok = apply_input(a, r, id);
     } else if (pt_str_eqz(type, "claim")) {
         apply_claim(a, r, id);
+    } else if (pt_str_eqz(type, "doc")) {
+        ok = apply_doc(a, r, id);
     }
-    /* Other types (docs, later kinds) are not needed here yet. */
+    /* Other types are not needed here. */
     if (ok && id >= a->next_id)
         a->next_id = id + 1;
     return ok;

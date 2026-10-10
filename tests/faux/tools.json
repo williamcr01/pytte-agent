@@ -1,0 +1,20 @@
+{
+  "turns": [
+    {
+      "content": [
+        {"type": "text", "text": "Checking."},
+        {"type": "tool_call", "name": "bash", "args": {"command": "echo hi-from-bash; echo second-line"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "bash", "args": {"command": "touch should-not-exist"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "All done with tools."}
+      ]
+    }
+  ]
+}

@@ -33,8 +33,14 @@ typedef enum {
     PT_FX_SLEEP,      /* complete with pt_fx_done once the wall clock reaches until */
     PT_FX_LIVE,       /* best effort: replace the task's live file with bytes, or delete it
                          when bytes is empty. No completion. */
-    PT_FX_CANCEL      /* stop effect `cancel` (an HTTP request); no completion */
+    PT_FX_CANCEL,     /* stop effect `cancel` (a request, a sleep, a tool); no completion */
+    PT_FX_GATE,       /* may this tool call run? answer with pt_fx_gate */
+    PT_FX_ASK,        /* ask the user about a tool call; answered by pt_approve, no completion */
+    PT_FX_TOOL        /* run a tool: pt_fx_data for its output as it comes, then pt_fx_tool */
 } pt_fx_kind;
+
+/* What running a tool again after an unknown partial run does (section 13.4). */
+typedef enum { PT_REPLAY_UNSAFE, PT_REPLAY_SAFE } pt_replay;
 
 typedef struct pt_fx {
     pt_fx_kind kind;
@@ -47,6 +53,12 @@ typedef struct pt_fx {
     const pt_http_req *http;  /* HTTP: valid until completed or cancelled */
     int64_t until;            /* SLEEP: wall-clock ms */
     uint32_t cancel;          /* CANCEL */
+    /* GATE, ASK, TOOL: valid until completed (ASK: until answered). */
+    pt_str name, args;        /* the tool and its arguments (a JSON object) */
+    pt_str call_id;           /* TOOL: stable across attempts */
+    pt_str prompt;            /* ASK */
+    uint32_t attempt;         /* TOOL: 2 and up when run again after a crash */
+    pt_replay replay;         /* GATE, TOOL */
 } pt_fx;
 
 /* ---- events (display only; no reply) ----------------------------------------- */
@@ -57,7 +69,10 @@ typedef enum {
     PT_E_RETRY,     /* error, until: the run waits to try again */
     PT_E_RUN_DONE,  /* outcome, error: a run finished */
     PT_E_IDLE,      /* nothing left to do until a new input */
-    PT_E_FATAL      /* error: the agent stopped (see pt_fatal) */
+    PT_E_FATAL,     /* error: the agent stopped (see pt_fatal) */
+    PT_E_TOOL_START,  /* name, args, call_id: a tool starts running */
+    PT_E_TOOL_OUTPUT, /* data: output of a running tool */
+    PT_E_ASK          /* name, args, prompt: a tool call waits for pt_approve */
 } pt_event_kind;
 
 typedef struct pt_event {
@@ -68,6 +83,7 @@ typedef struct pt_event {
     pt_str outcome; /* "completed", "failed" */
     pt_str error;   /* why, when something failed */
     int64_t until;
+    pt_str name, args, call_id, prompt, data; /* tool events */
 } pt_event;
 
 /* Called from inside pt_poll and pt_fx_*. Must not call back into the
@@ -85,6 +101,7 @@ typedef struct pt_config {
     uint32_t retry_max_ms;     /* backoff cap; 0: 300000 */
     uint32_t live_interval_ms; /* live file snapshots at most this often; 0: 250 */
     bool no_sync;              /* skip fsync: survives process crashes, not power loss */
+    bool serial_tools;         /* run a round's tools one at a time even when all may run together */
 } pt_config;
 
 typedef struct pt_opts {
@@ -110,9 +127,21 @@ void pt_set_config(pt_agent *a, const pt_config *c);
  * pt_load_line, any live files with pt_load_live, then pt_load_done and
  * pt_open. Both queue commits; nothing else runs before they are done. */
 
+/* A tool as the core knows it: frozen into each epoch. Running it is the
+ * host's job (PT_FX_TOOL). */
+typedef struct pt_tool_def {
+    pt_str name, description;
+    pt_str schema;   /* JSON Schema of the arguments, raw JSON */
+    pt_replay replay;
+    bool parallel;   /* may run at the same time as other parallel tools */
+    pt_str source;   /* who runs it: "builtin", ... */
+} pt_tool_def;
+
 typedef struct pt_session_cfg {
     pt_str cwd, host;
     pt_str system; /* the system prompt, frozen into the first epoch */
+    const pt_tool_def *tools; /* ...with these tools */
+    uint32_t ntools;
 } pt_session_cfg;
 
 bool pt_create(pt_agent *a, const pt_session_cfg *c);
@@ -160,6 +189,10 @@ bool pt_submit(pt_agent *a, const pt_input *in);
  * stay queued. False when no run is active. */
 bool pt_abort(pt_agent *a);
 
+/* Answer a tool call that waits for approval (PT_E_ASK). The answer is
+ * committed, so it survives restarts. False when the task is not waiting. */
+bool pt_approve(pt_agent *a, uint32_t task, bool yes, pt_str reason);
+
 /* ---- the loop ---------------------------------------------------------------------- */
 
 /* The next effect to start: 1 = *out is set, 0 = nothing right now. */
@@ -170,6 +203,28 @@ void pt_fx_data(pt_agent *a, uint32_t fx, const void *p, size_t n);
 void pt_fx_done(pt_agent *a, uint32_t fx, const char *error);
 /* Nothing to do, and nothing outstanding, until a new input. */
 bool pt_idle(const pt_agent *a);
+
+typedef enum { PT_GATE_ALLOW, PT_GATE_DENY, PT_GATE_ASK, PT_GATE_REWRITE } pt_gate_kind;
+
+typedef struct pt_gate {
+    pt_gate_kind kind;
+    pt_str text; /* DENY: why; ASK: the question */
+    pt_str args; /* REWRITE: the arguments to run with instead (a JSON object) */
+} pt_gate;
+
+/* The answer to a GATE. Strings are copied. */
+void pt_fx_gate(pt_agent *a, uint32_t fx, const pt_gate *g);
+
+typedef struct pt_tool_result {
+    pt_str content;  /* what the model sees */
+    bool is_error;
+    pt_str details;  /* a JSON object for humans and tools (exit code, duration, blob), or empty */
+    /* Optionally replace one doc in the same commit (a JSON value). */
+    pt_str doc_key, doc_value;
+} pt_tool_result;
+
+/* A TOOL ended (also after PT_FX_CANCEL: with what it produced). Copied. */
+void pt_fx_tool(pt_agent *a, uint32_t fx, const pt_tool_result *r);
 
 typedef enum {
     PT_FATAL_NONE,
@@ -190,6 +245,19 @@ typedef struct pt_entry_view {
     const pt_msg *msg; /* NULL for error entries */
     pt_str raw;        /* the record */
 } pt_entry_view;
+
+/* Tool calls waiting for pt_approve, in task order; returns how many
+ * (up to max are written). Strings live until the next commit applies. */
+typedef struct pt_ask_view {
+    uint32_t task;
+    pt_str name, args, prompt;
+} pt_ask_view;
+uint32_t pt_asks(const pt_agent *a, pt_ask_view *out, uint32_t max);
+
+/* A doc's value (raw JSON), or empty. Lives until the next commit applies. */
+pt_str pt_doc(const pt_agent *a, pt_str key);
+/* The working directory the session was started in. */
+pt_str pt_session_cwd(const pt_agent *a);
 
 /* Entries of the current epoch, in order. */
 uint32_t pt_entry_count(const pt_agent *a);

@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 static const char *const keys[CFG_N] = {"model", "reasoning", "tui.thinking", "tui.symbols",
-                                        "tui.pager"};
+                                        "tui.pager", "permissions.mode"};
 
 const char *cli_config_key(int k)
 {
@@ -95,6 +95,7 @@ void cli_config_load(cli_config *c, char *warn, size_t cap)
     cli_config_set(c, CFG_REASONING, pt_reasoning_name(DEFAULT_EFFORT), "default");
     cli_config_set(c, CFG_THINKING, "collapsed", "default");
     cli_config_set(c, CFG_SYMBOLS, "auto", "default");
+    cli_config_set(c, CFG_PERMS, "ask", "default");
     e = getenv("PAGER");
     cli_config_set(c, CFG_PAGER, e && *e ? e : "less -R", "default");
     if (xdg && *xdg)

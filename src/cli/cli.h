@@ -12,7 +12,7 @@
 
 /* ---- config.c: settings (section 19) ---- */
 
-enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_N };
+enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_PERMS, CFG_N };
 
 typedef struct cli_config {
     char val[CFG_N][512];
@@ -49,6 +49,7 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap);
 typedef struct cli_opts {
     const char *model, *system, *append_system, *script;
     pt_reasoning reasoning;
+    pt_perm_mode perm;
     uint32_t max_tokens, retry_base_ms;
     bool no_sync, force, continue_current;
     bool (*stop)(void *ud); /* polled by pt_rt_run (print mode) */
