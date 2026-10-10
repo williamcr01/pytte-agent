@@ -9,6 +9,9 @@ Only models that can call tools are kept. The output is committed, so builds
 stay offline; run `make models` to refresh it and review the diff.
 
 Model behavior that no source records (compat flags) lives in COMPAT below.
+
+The table grows with each provider, which is fine. Later (M5): a build option
+to compile in only some providers, for small targets.
 """
 import json
 import re
