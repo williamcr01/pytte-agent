@@ -1928,7 +1928,9 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
             save_draft(&a);
         if (a.quit)
             break;
-        if (a.urgent || (a.dirty && now - a.last_paint >= a.interval))
+        /* Not while a resize waits out its debounce: the terminal has
+         * already rewrapped, and rows placed by the old size land wrong. */
+        if (!a.winch_at && (a.urgent || (a.dirty && now - a.last_paint >= a.interval)))
             paint(&a);
     }
     /* quit: the close claim, then the terminal. What was shown of an

@@ -361,6 +361,49 @@ static void test_suspend_and_signals(void)
     pty_free(&p);
 }
 
+static int count(pty *p, const char *text)
+{
+    const char *at;
+    int n = 0;
+    vt_lines(p->v, p->v->rows, &p->scratch);
+    pt_buf_putc(&p->scratch, 0);
+    for (at = p->scratch.p; (at = strstr(at, text)) != NULL; at += strlen(text))
+        n++;
+    return n;
+}
+
+/* Resizes while an answer streams leave nothing behind: the terminal has
+ * rewrapped at once, so nothing may be painted with the old size while
+ * the resize waits out its debounce. */
+static void test_resize_while_streaming(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/slow.json", NULL};
+    struct winsize ws;
+    int i;
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "list the files\r");
+    CHECK(wait_for(&p, "esc esc to interrupt", 3000));
+    for (i = 0; i < 40; i++) {
+        memset(&ws, 0, sizeof ws);
+        ws.ws_row = 24;
+        ws.ws_col = (unsigned short)(i % 2 ? 80 - (i * 3) % 30 : 40 + (i * 7) % 40);
+        vt_resize(p.v, ws.ws_row, ws.ws_col);
+        ioctl(p.fd, TIOCSWINSZ, &ws);
+        pump(&p, 25 + (i * 13) % 30);
+    }
+    CHECK(wait_idle(&p, 10000));
+    CHECK(count(&p, "esc esc to interrupt") == 0);
+    CHECK(count(&p, "The user wants a listing") == 0); /* the live tail of the thinking */
+    CHECK(count(&p, "┃ list the files") == 1);
+    CHECK(count(&p, "Let me look at the files first.") == 1);
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+}
+
 /* Esc Esc interrupts; input sent meanwhile is queued, then answered. */
 static void test_interrupt_and_queue(void)
 {
@@ -530,6 +573,7 @@ int main(void)
     RUN(test_kill9);
     RUN(test_suspend_and_signals);
     RUN(test_interrupt_and_queue);
+    RUN(test_resize_while_streaming);
     RUN(test_commands);
     RUN(test_history_pager_draft);
     RUN(test_sigterm);
