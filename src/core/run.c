@@ -40,6 +40,8 @@ void pt_run_free_live(pt_agent *a, task *t)
 static bool resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
 {
     const char *why;
+    if (!ref.n) /* none configured: keep the session's model */
+        ref = a->last_model;
     if (!ref.n) {
         pt_core_fail(a, PT_FATAL_CONFIG, "no model configured", PT_STR_NULL);
         return false;
@@ -51,6 +53,26 @@ static bool resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
     return true;
 }
 
+/* The provider's API key; a missing one stops the agent without a commit,
+ * so the run can continue once it is set (or with another model). */
+static bool credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
+{
+    pt_buf m;
+    memset(cred, 0, sizeof *cred);
+    if (!a->o.credentials || a->o.credentials(a->o.ud, p, cred))
+        return true;
+    pt_buf_init(&m, a->al);
+    pt_buf_putz(&m, "no API key for ");
+    pt_buf_putz(&m, p->id);
+    if (p->key_env[0]) {
+        pt_buf_putz(&m, ": set ");
+        pt_buf_putz(&m, p->key_env[0]);
+    }
+    pt_core_fail(a, PT_FATAL_CONFIG, "", pt_buf_str(&m));
+    pt_buf_free(&m);
+    return false;
+}
+
 /* ---- prepare ---- */
 
 static bool prepare(pt_agent *a, task *t, uint32_t attempt)
@@ -59,11 +81,12 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     const pt_config *c = &a->o.config;
     pt_ai_target target;
     pt_ai_context ctx;
+    pt_credentials cred;
     entry *last = pt_core_last_entry(a);
     task nt = *t;
     pt_buf ref;
     bool ok;
-    if (!resolve(a, c->model, &target, sa))
+    if (!resolve(a, c->model, &target, sa) || !credentials(a, target.provider, &cred))
         return false;
     nt.cutoff = last ? last->id : 0;
     if (!pt_core_context(a, nt.cutoff, &ctx, sa)) {
@@ -144,10 +167,8 @@ static bool start_request(pt_agent *a, task *t)
     if (!resolve(a, t->model, &rl->target, &rl->a))
         goto fail;
     memset(&cred, 0, sizeof cred);
-    if (a->o.credentials && !a->o.credentials(a->o.ud, rl->target.provider, &cred)) {
-        pt_core_fail(a, PT_FATAL_CONFIG, "no API key for", pt_strz(rl->target.provider->id));
+    if (!credentials(a, rl->target.provider, &cred))
         goto fail;
-    }
     memset(&opts, 0, sizeof opts);
     opts.max_tokens = t->max_tokens;
     opts.reasoning = t->reasoning;

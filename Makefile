@@ -17,16 +17,19 @@ AI_SRC   := $(wildcard src/ai/*.c)
 CORE_SRC := $(wildcard src/core/*.c)
 LIB_SRC  := $(BASE_SRC) $(AI_SRC) $(CORE_SRC)
 # Host parts.
-SYS_SRC  := src/drv/sys_posix.c src/drv/http_faux.c
+DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/drv/store_memory.c
+RT_SRC   := src/rt/rt.c
+SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
-CLI_SRC  := src/cli/pytte_ai.c
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
 LIB_OBJ  := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
-HOST_OBJ := $(SYS_SRC:%.c=$(BUILD)/obj/%.o) $(CURL_SRC:%.c=$(BUILD)/obj/%.o) $(CLI_SRC:%.c=$(BUILD)/obj/%.o)
+obj       = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
+PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) src/cli/pytte_ai.c)
+PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) src/cli/main.c)
 
-.PHONY: all test portable fuzz clean fixtures-update models
-all: $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a
+.PHONY: all test crash portable fuzz clean fixtures-update models
+all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a
 
 $(BUILD)/obj/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -38,7 +41,10 @@ $(BUILD)/libpytte-ai.a: $(AI_OBJ)
 $(BUILD)/libpytte.a: $(LIB_OBJ)
 	$(AR) rcs $@ $^
 
-$(BUILD)/pytte-ai: $(HOST_OBJ) $(BUILD)/libpytte-ai.a
+$(BUILD)/pytte-ai: $(PYTTE_AI_OBJ) $(BUILD)/libpytte-ai.a
+	$(CC) $(CFLAGS) $^ $(CURL_LIBS) -o $@
+
+$(BUILD)/pytte: $(PYTTE_OBJ) $(BUILD)/libpytte.a
 	$(CC) $(CFLAGS) $^ $(CURL_LIBS) -o $@
 
 # ---- tests: built from source with ASan and UBSan ----
@@ -50,9 +56,14 @@ $(BUILD)/test/%: tests/%.c tests/t.h $(LIB_SRC) $(SYS_SRC) $(wildcard include/*.
 	@mkdir -p $(dir $@)
 	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) -o $@
 
-test: $(TESTS) $(BUILD)/pytte-ai
+test: $(TESTS) $(BUILD)/pytte-ai $(BUILD)/pytte
 	@for t in $(TESTS); do ./$$t || exit 1; done
-	@echo "cli:" && sh tests/cli.sh $(BUILD)/pytte-ai
+	@echo "cli:" && sh tests/cli.sh $(BUILD)/pytte-ai $(BUILD)/pytte
+	@bash tests/crash.sh $(BUILD)/pytte 3
+
+# kill -9 pytte at random moments, many times (section 22.3).
+crash: $(BUILD)/pytte
+	bash tests/crash.sh $(BUILD)/pytte 100
 
 # Regenerate the expected results of the stream fixtures (review the diff!).
 fixtures-update: $(BUILD)/test/test_fixtures

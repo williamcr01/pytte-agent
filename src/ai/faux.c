@@ -47,6 +47,18 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
         pt_jw_key(&w, "last");
         pt_jw_str(&w, ctx->msgs[ctx->nmsgs - 1].text);
     }
+    if (o) {
+        pt_jw_key(&w, "max_tokens");
+        pt_jw_uint(&w, o->max_tokens);
+        pt_jw_key(&w, "reasoning");
+        pt_jw_strz(&w, pt_reasoning_name(o->reasoning));
+    }
+    /* Everything the model would see, so tests can compare request bytes. */
+    pt_jw_key(&w, "context");
+    pt_jw_arr(&w);
+    for (i = 0; i < ctx->nmsgs; i++)
+        pt_msg_write_json(&w, &ctx->msgs[i]);
+    pt_jw_arr_end(&w);
     pt_jw_obj_end(&w);
     if (!pt_req_init(out, t, o, "/v1/respond", 1, a)) {
         pt_buf_free(&b);

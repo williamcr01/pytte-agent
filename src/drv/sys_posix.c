@@ -4,7 +4,9 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static void *libc_alloc(void *ud, void *p, size_t old, size_t n)
 {
@@ -93,4 +95,40 @@ bool pt_sys_write_file(const char *path, const void *p, size_t n)
     ok = fwrite(p, 1, n, f) == n;
     ok = fclose(f) == 0 && ok;
     return ok;
+}
+
+void pt_sys_random(void *ud, void *out, size_t n)
+{
+    FILE *f = fopen("/dev/urandom", "rb");
+    (void)ud;
+    if (!f || fread(out, 1, n, f) != n) {
+        /* no randomness to be had: still unique enough for tokens */
+        unsigned char *p = (unsigned char *)out;
+        uint64_t x = (uint64_t)pt_sys_now_ms() ^ ((uint64_t)getpid() << 32);
+        size_t i;
+        for (i = 0; i < n; i++) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            p[i] = (unsigned char)x;
+        }
+    }
+    if (f)
+        fclose(f);
+}
+
+void pt_sys_identity(char *host, size_t hcap, char *boot, size_t bcap, int64_t *pid)
+{
+    FILE *f;
+    if (gethostname(host, hcap) != 0 || !host[0])
+        snprintf(host, hcap, "unknown");
+    host[hcap - 1] = 0;
+    boot[0] = 0;
+    f = fopen("/proc/sys/kernel/random/boot_id", "r");
+    if (f) {
+        if (fgets(boot, (int)bcap, f))
+            boot[strcspn(boot, "\n")] = 0;
+        fclose(f);
+    }
+    *pid = (int64_t)getpid();
 }

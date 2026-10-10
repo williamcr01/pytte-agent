@@ -1,0 +1,18 @@
+{
+  "chunk": 6,
+  "delay_ms": 15,
+  "turns": [
+    {
+      "content": [
+        {"type": "thinking", "text": "The user wants a listing. There are no tools yet, so try one and see."},
+        {"type": "text", "text": "Let me look at the files first."},
+        {"type": "tool_call", "name": "bash", "args": {"cmd": "ls"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "No tools are available yet, so I cannot list the files. This answer streams slowly on purpose, so there is plenty of time to kill the process in the middle of it and resume."}
+      ]
+    }
+  ]
+}

@@ -162,6 +162,8 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
         return false;
     }
     nt.id = id;
+    if (nt.status != ST_DONE && nt.phase == PH_REQUEST && !pt_str_eq(nt.model, a->last_model))
+        a->last_model = pt_arena_dup(&a->perm, nt.model);
     if (!t) {
         if (!pt_core_grow(a, (void **)&a->tasks, &a->tcap, a->ntasks + 1, sizeof(task *)))
             goto oom;

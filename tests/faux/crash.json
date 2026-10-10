@@ -1,0 +1,18 @@
+{
+  "chunk": 8,
+  "delay_ms": 4,
+  "turns": [
+    {
+      "content": [
+        {"type": "thinking", "text": "A listing is wanted. Try the bash tool."},
+        {"type": "text", "text": "Let me look at the files first."},
+        {"type": "tool_call", "name": "bash", "args": {"cmd": "ls"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "No tools are available yet, so I cannot list the files. This answer streams slowly enough to be killed halfway."}
+      ]
+    }
+  ]
+}

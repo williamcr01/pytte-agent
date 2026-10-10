@@ -99,6 +99,7 @@ struct pt_agent {
     uint64_t seq;    /* of the last applied commit */
     uint32_t cur_epoch;
     bool have_session, loaded;
+    pt_str last_model; /* the newest model a run pinned (in perm) */
 
     /* requested session writes */
     bool want_create, want_open, want_close, closing, closed;
