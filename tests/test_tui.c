@@ -170,6 +170,163 @@ static void test_wrap(void)
     CHECK(tui_fit(pt_strz("abc"), 10, false) == 3);
 }
 
+/* ---- keys ---- */
+
+static void describe(pt_buf *out, const tui_ev *ev)
+{
+    char tmp[64];
+    switch (ev->kind) {
+    case TE_KEY:
+        if (ev->key >= TK_ENTER)
+            snprintf(tmp, sizeof tmp, "K%u", (unsigned)(ev->key - TK_ENTER));
+        else
+            snprintf(tmp, sizeof tmp, "K'%c'", (char)ev->key);
+        pt_buf_putz(out, tmp);
+        if (ev->mods) {
+            snprintf(tmp, sizeof tmp, "+%d", ev->mods);
+            pt_buf_putz(out, tmp);
+        }
+        break;
+    case TE_TEXT:
+    case TE_PASTE:
+        pt_buf_putz(out, ev->kind == TE_TEXT ? "T[" : "P[");
+        pt_buf_puts(out, ev->text);
+        pt_buf_putc(out, ']');
+        break;
+    case TE_REPLY:
+        snprintf(tmp, sizeof tmp, "R%d:%d:%d", ev->reply, ev->a, ev->b);
+        pt_buf_putz(out, tmp);
+        break;
+    }
+    pt_buf_putc(out, ' ');
+}
+
+/* Decode bytes fed in pieces (cut at the positions in cuts, ascending), with
+ * a flush at the end; text events are merged, as the box sees them. */
+static void decode(pt_buf *out, const char *in, size_t n, const size_t *cuts, int ncuts, bool cpr)
+{
+    tui_keys k;
+    tui_ev ev;
+    size_t at = 0;
+    int c;
+    pt_buf text;
+    pt_buf_init(&text, T_AL);
+    tui_keys_init(&k);
+    k.want_cpr = cpr;
+    pt_buf_reset(out);
+    for (c = 0; c <= ncuts; c++) {
+        size_t to = c < ncuts ? cuts[c] : n;
+        bool last = c == ncuts;
+        tui_keys_feed(&k, in + at, to - at);
+        at = to;
+        while (tui_keys_next(&k, &ev, last)) {
+            if (ev.kind == TE_TEXT) {
+                pt_buf_puts(&text, ev.text);
+                continue;
+            }
+            if (text.n) {
+                pt_buf_putz(out, "T[");
+                pt_buf_puts(out, pt_buf_str(&text));
+                pt_buf_putz(out, "] ");
+                pt_buf_reset(&text);
+            }
+            describe(out, &ev);
+        }
+    }
+    if (text.n) {
+        pt_buf_putz(out, "T[");
+        pt_buf_puts(out, pt_buf_str(&text));
+        pt_buf_putz(out, "] ");
+    }
+    CHECK(!tui_keys_pending(&k));
+    tui_keys_free(&k);
+    pt_buf_free(&text);
+}
+
+static void check_keys(const char *in, size_t n, const char *want, bool cpr, int line)
+{
+    pt_buf got;
+    size_t a, b;
+    pt_buf_init(&got, T_AL);
+    decode(&got, in, n, NULL, 0, cpr);
+    t_checks++;
+    if (!pt_str_eqz(pt_buf_str(&got), want)) {
+        t_failed++;
+        fprintf(stderr, "test_tui.c:%d: decoded \"%.*s\", want \"%s\"\n", line, (int)got.n, got.p, want);
+    }
+    /* the same, split at every byte, and at every pair of bytes */
+    for (a = 1; a < n; a++)
+        for (b = a; b < n; b++) {
+            size_t cuts[2];
+            cuts[0] = a;
+            cuts[1] = b;
+            decode(&got, in, n, cuts, a == b ? 1 : 2, cpr);
+            t_checks++;
+            if (!pt_str_eqz(pt_buf_str(&got), want)) {
+                t_failed++;
+                fprintf(stderr, "test_tui.c:%d: split at %zu,%zu: \"%.*s\"\n", line, a, b, (int)got.n, got.p);
+                a = n;
+                break;
+            }
+        }
+    pt_buf_free(&got);
+}
+#define KEYS(in, want) check_keys((in), sizeof(in) - 1, (want), false, __LINE__)
+
+static void test_keys(void)
+{
+    /* K0 enter, 1 tab, 2 backspace, 3 esc, 4-7 up down left right, 8 home,
+     * 9 end, 10 insert, 11 delete, 12 pgup, 13 pgdn; +1 shift +2 alt +4 ctrl */
+    KEYS("hi", "T[hi] ");
+    KEYS("h\xc3\xa9\xe4\xb8\xad", "T[h\xc3\xa9\xe4\xb8\xad] ");
+    KEYS("\r", "K0 ");
+    KEYS("\n", "K'j'+4 ");
+    KEYS("\t", "K1 ");
+    KEYS("\x7f\x08", "K2 K2 ");
+    KEYS("\x03\x04\x01", "K'c'+4 K'd'+4 K'a'+4 ");
+    KEYS("\x1b", "K3 ");
+    KEYS("\x1b\x1b", "K3 K3 ");
+    KEYS("\x1b[A\x1b[B\x1b[C\x1b[D", "K4 K5 K7 K6 ");
+    KEYS("\x1bOA\x1bOD\x1bOH\x1bOF", "K4 K6 K8 K9 ");
+    KEYS("\x1b[1;5C\x1b[1;3D\x1b[1;2A", "K7+4 K6+2 K4+1 ");
+    KEYS("\x1b[H\x1b[F\x1b[1~\x1b[4~\x1b[7~\x1b[8~", "K8 K9 K8 K9 K8 K9 ");
+    KEYS("\x1b[3~\x1b[5~\x1b[6~\x1b[3;5~\x1b[2~", "K11 K12 K13 K11+4 K10 ");
+    KEYS("\x1b[Z", "K1+1 ");
+    KEYS("\x1b" "b\x1b" "f\x1b\x7f\x1b\r\x1b" "B", "K'b'+2 K'f'+2 K2+2 K0+2 K'b'+3 ");
+    /* kitty: Shift+Enter, Esc, Ctrl-C, Alt-b, a keypad key (ignored) */
+    KEYS("\x1b[13;2u\x1b[27u\x1b[99;5u\x1b[98;3u\x1b[57399u", "K0+1 K3 K'c'+4 K'b'+2 ");
+    KEYS("\x1b[13;2:1u\x1b[97;133u", "K0+1 K'a'+4 "); /* event type; num lock dropped */
+    KEYS("\x1b[27;2;13~", "K0+1 "); /* xterm modifyOtherKeys */
+    /* paste: verbatim, newlines normalized, cleaned; ends split anywhere */
+    KEYS("a\x1b[200~x\r\ny\rz\x1b[A\x03\x1b[201~b", "T[a] P[x\ny\nz[A] T[b] ");
+    KEYS("\x1b[200~\x1b[201~", "P[] ");
+    /* replies */
+    KEYS("\x1b[?62;22c\x1b[?1u", "R1:0:0 R2:1:0 ");
+    KEYS("\x1b[5;1R", ""); /* no query outstanding: Shift+F3, dropped */
+    check_keys("\x1b[12;40R", 8, "R3:12:40 ", true, __LINE__);
+    /* skipped: OSC, DCS, focus, unknown */
+    KEYS("\x1b]11;rgb:0/0/0\x07x\x1b]52;c;eA==\x1b\\y", "T[xy] ");
+    KEYS("\x1bP1$r0m\x1b\\z\x1b[I\x1b[O\x1b[15~\x1bOP", "T[z] ");
+    /* an invalid byte in text */
+    KEYS("a\xff" "b", "T[a\xef\xbf\xbd" "b] ");
+}
+
+static void test_keys_esc_wait(void)
+{
+    tui_keys k;
+    tui_ev ev;
+    tui_keys_init(&k);
+    tui_keys_feed(&k, "\x1b", 1);
+    CHECK(!tui_keys_next(&k, &ev, false)); /* maybe a sequence: wait */
+    CHECK(tui_keys_pending(&k));
+    tui_keys_feed(&k, "[A", 2);
+    CHECK(tui_keys_next(&k, &ev, false) && ev.kind == TE_KEY && ev.key == TK_UP);
+    tui_keys_feed(&k, "\x1b", 1);
+    CHECK(tui_keys_next(&k, &ev, true) && ev.key == TK_ESC); /* the timeout passed */
+    CHECK(!tui_keys_pending(&k));
+    tui_keys_free(&k);
+}
+
 int main(void)
 {
     pt_buf_init(&tb, T_AL);
@@ -179,6 +336,8 @@ int main(void)
     RUN(test_clean);
     RUN(test_styled);
     RUN(test_wrap);
+    RUN(test_keys);
+    RUN(test_keys_esc_wait);
     pt_buf_free(&tb);
     return t_done("test_tui");
 }

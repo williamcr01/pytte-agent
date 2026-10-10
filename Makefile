@@ -92,9 +92,10 @@ portable:
 
 # ---- fuzzing (clang + libFuzzer) ----
 FUZZERS := $(patsubst tests/fuzz/%.c,$(BUILD)/fuzz/%,$(wildcard tests/fuzz/fuzz_*.c))
-$(BUILD)/fuzz/%: tests/fuzz/%.c $(LIB_SRC)
+FUZZ_TUI := src/tui/text.c src/tui/keys.c
+$(BUILD)/fuzz/%: tests/fuzz/%.c $(LIB_SRC) $(FUZZ_TUI)
 	@mkdir -p $(dir $@)
-	clang -g -O1 -fsanitize=fuzzer,address,undefined $(CPPFLAGS) $< $(LIB_SRC) -o $@
+	clang -g -O1 -fsanitize=fuzzer,address,undefined $(CPPFLAGS) $< $(LIB_SRC) $(FUZZ_TUI) -o $@
 fuzz: $(FUZZERS)
 	@echo "run e.g.: ./$(BUILD)/fuzz/fuzz_json -max_total_time=60"
 

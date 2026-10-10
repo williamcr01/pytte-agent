@@ -73,4 +73,54 @@ int tui_wrap(pt_buf *out, pt_str s, int cols, int indent, bool words, bool max);
  * drops the colours (NO_COLOR) but keeps bold and dim. */
 void tui_sgr(pt_buf *out, pt_str s, bool color);
 
+/* ---- keys.c: the input decoder (16.2.7) ---- */
+
+enum { /* special keys, above the code points */
+    TK_ENTER = 0x110001,
+    TK_TAB,
+    TK_BACKSPACE,
+    TK_ESC,
+    TK_UP,
+    TK_DOWN,
+    TK_LEFT,
+    TK_RIGHT,
+    TK_HOME,
+    TK_END,
+    TK_INSERT,
+    TK_DELETE,
+    TK_PGUP,
+    TK_PGDN
+};
+enum { TM_SHIFT = 1, TM_ALT = 2, TM_CTRL = 4 };
+typedef enum { TE_KEY = 1, TE_TEXT, TE_PASTE, TE_REPLY } tui_ev_kind;
+typedef enum { TR_DA1 = 1, TR_KITTY, TR_CPR } tui_reply;
+
+typedef struct tui_ev {
+    tui_ev_kind kind;
+    uint32_t key; /* KEY: a TK_ key, or a code point (lower case for Ctrl/Alt letters) */
+    int mods;
+    pt_str text; /* TEXT, PASTE: clean UTF-8, valid until the next call */
+    tui_reply reply;
+    int a, b; /* KITTY: flags in a; CPR: row a, column b */
+} tui_ev;
+
+typedef struct tui_keys {
+    pt_buf in;   /* bytes not decoded yet */
+    size_t at;   /* how far they were */
+    pt_buf out;  /* the text of the last event */
+    bool paste;  /* inside a bracketed paste */
+    pt_buf pasted;
+    bool want_cpr; /* a cursor position query is outstanding */
+} tui_keys;
+
+void tui_keys_init(tui_keys *k);
+void tui_keys_free(tui_keys *k);
+void tui_keys_feed(tui_keys *k, const char *p, size_t n);
+/* The next event, or false when the bytes left are an incomplete sequence
+ * (or none). flush: the Esc timeout has passed, so a lone ESC is the Esc
+ * key and an unfinished sequence is dropped. */
+bool tui_keys_next(tui_keys *k, tui_ev *ev, bool flush);
+/* Bytes are waiting for more (the caller should time out and flush). */
+bool tui_keys_pending(const tui_keys *k);
+
 #endif
