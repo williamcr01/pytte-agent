@@ -274,6 +274,7 @@ static void test_chat(void)
     CHECK(wait_for(&p, "Hello from the faux provider! Nothing here touched the network.", 5000));
     CHECK(wait_for(&p, "✻ thought", 2000));
     CHECK(wait_idle(&p, 3000));
+    CHECK(wait_for(&p, "network.\n\nWorked for ", 1000)); /* the spinner's time, kept */
     CHECK(wait_for(&p, "\nfaux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
     CHECK(finish(&p, 3000) == 0);

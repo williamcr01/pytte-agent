@@ -296,6 +296,18 @@ static void out_call(app *a, pt_buf *out, const pt_block *b, bool full)
     }
 }
 
+/* A duration, short: 5s, 2m 5s, 1h 2m. */
+static void secs_short(char *out, size_t cap, int64_t ms)
+{
+    long long t = (long long)(ms < 0 ? 0 : ms / 1000);
+    if (t < 60)
+        snprintf(out, cap, "%llds", t);
+    else if (t < 3600)
+        snprintf(out, cap, "%lldm %llds", t / 60, t % 60);
+    else
+        snprintf(out, cap, "%lldh %lldm", t / 3600, t / 60 % 60);
+}
+
 static void out_thinking(app *a, pt_buf *out, pt_str text, int64_t ms, bool full)
 {
     char line[80];
@@ -517,7 +529,19 @@ static void on_event(void *ud, const pt_event *ev)
             snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
                      ev->error.p);
             out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(line), 2);
+        } else {
+            /* What the spinner said, kept: how long the run took. */
+            char took[32];
+            int64_t ms = pt_sys_now_ms() - a->run_at;
+            if (ms < 1000)
+                snprintf(took, sizeof took, "<1s");
+            else
+                secs_short(took, sizeof took, ms);
+            snprintf(line, sizeof line, "Worked for %s", took);
+            out_blank(&a->lines);
+            out_z(a, TUI_DIM, line);
         }
+        a->run_at = pt_sys_now_ms(); /* a queued input runs next */
         break;
     case PT_E_FATAL:
         snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
@@ -652,7 +676,8 @@ static void spinner_row(app *a, int64_t now)
 {
     char line[400];
     const char *what = a->phase == PH_THINK ? "Thinking" : a->phase == PH_WRITE ? "Writing" : "Waiting";
-    int64_t el = (now - a->run_at) / 1000, frame = now / SPIN_MS;
+    int64_t frame = now / SPIN_MS;
+    char el[32];
     const char *spin = a->sy->spin[frame % a->sy->nspin];
     const char *hint = now - a->esc_at < DOUBLE_MS ? "esc again to interrupt" : "esc esc to interrupt";
     int n, i, at;
@@ -675,7 +700,8 @@ static void spinner_row(app *a, int64_t now)
             pt_buf_putc(&a->tmp, what[i]);
         }
         tui_style(&a->tmp, TUI_DIM);
-        snprintf(line, sizeof line, " · %llds · %s", (long long)el, hint);
+        secs_short(el, sizeof el, now - a->run_at);
+        snprintf(line, sizeof line, " · %s · %s", el, hint);
         pt_buf_putz(&a->tmp, line);
     }
     row(a, pt_buf_str(&a->tmp));
