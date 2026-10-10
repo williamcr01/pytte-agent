@@ -79,14 +79,22 @@ size_t tui_utf8_enc(uint32_t cp, char out[4])
 
 /* ---- widths ---- */
 
-/* bits: best (0-1), max (2-3), class (4-5), pictographic (6) */
+static bool amb_wide;
+
+void tui_set_ambiguous_wide(bool wide)
+{
+    amb_wide = wide;
+}
+
+/* bits: best (0-1), max (2-3), class (4-5), pictographic (6), min (7-8),
+ * East Asian ambiguous (9) */
 static unsigned props(uint32_t cp)
 {
     size_t lo = 0, hi = sizeof tui_wtab / sizeof *tui_wtab;
     if (cp >= 0x20 && cp < 0x7F)
-        return 1 | 1 << 2;
+        return 1 | 1 << 2 | 1 << 7;
     if (cp >= 0x110000)
-        return 1 | 2 << 2;
+        return 1 | 2 << 2 | 1 << 7;
     while (hi - lo > 1) { /* the last entry starting at or before cp */
         size_t mid = (lo + hi) / 2;
         if ((tui_wtab[mid] & 0x1FFFFF) <= cp)
@@ -94,6 +102,8 @@ static unsigned props(uint32_t cp)
         else
             hi = mid;
     }
+    if (amb_wide && tui_wtab[lo] >> 30 & 1)
+        return (tui_wtab[lo] >> 21 & 0x70) | 2 | 2 << 2 | 2 << 7;
     return tui_wtab[lo] >> 21;
 }
 
@@ -166,6 +176,24 @@ size_t tui_prev_cluster(pt_str s, size_t i)
     return prev;
 }
 
+int tui_cluster_wmin(pt_str s, size_t i, size_t j)
+{
+    int w = 0;
+    bool first = true;
+    while (i < j) {
+        uint32_t cp;
+        unsigned p;
+        i += tui_utf8_dec(s.p + i, j - i, &cp);
+        p = props(cp);
+        if (cls(p) == CLS_ZWJ)
+            break;
+        if (first || !(cls(p) == CLS_EXTEND && (p & 3) == 2))
+            w += (int)(p >> 7 & 3);
+        first = false;
+    }
+    return w;
+}
+
 int tui_cluster_w(pt_str s, size_t i, size_t j, bool max)
 {
     int best = 0, mx = 0, ris = 0;
@@ -196,6 +224,64 @@ int tui_cluster_w(pt_str s, size_t i, size_t j, bool max)
             mx = 2;
     }
     return max ? mx : best;
+}
+
+/* ---- layout ---- */
+
+/* The width of the code point at s[i] when placed alone, at its least:
+ * parts after a ZWJ and emoji modifiers take nothing. *joined carries the
+ * ZWJ state from one code point to the next. */
+static int cp_min(pt_str s, size_t *i, bool *joined)
+{
+    uint32_t cp;
+    unsigned p;
+    int w;
+    *i += tui_utf8_dec(s.p + *i, s.n - *i, &cp);
+    p = props(cp);
+    w = *joined || (cls(p) == CLS_EXTEND && (p & 3) == 2) ? 0 : (int)(p >> 7 & 3);
+    *joined = cls(p) == CLS_ZWJ;
+    return w;
+}
+
+int tui_rows(pt_str s, int cols, bool max, int *endcol)
+{
+    size_t i = 0;
+    int rows = 1, col = 0;
+    bool joined = false;
+    while (i < s.n) {
+        size_t j = i;
+        int w;
+        if (s.p[i] == TUI_STY) {
+            i += 2;
+            continue;
+        }
+        if (max) {
+            j = tui_next_cluster(s, i);
+            w = tui_cluster_w(s, i, j, true);
+        } else {
+            w = cp_min(s, &j, &joined);
+        }
+        if (col + w > cols && col > 0) {
+            rows++;
+            col = 0;
+        }
+        col += w;
+        i = j;
+    }
+    *endcol = col;
+    return rows;
+}
+
+int tui_next_w(pt_str s, size_t i, bool max)
+{
+    bool joined = false;
+    while (i < s.n && s.p[i] == TUI_STY)
+        i += 2;
+    if (i >= s.n)
+        return 0;
+    if (max)
+        return tui_cluster_w(s, i, tui_next_cluster(s, i), true);
+    return cp_min(s, &i, &joined);
 }
 
 /* ---- sanitizing ---- */

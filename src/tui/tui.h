@@ -26,6 +26,10 @@ size_t tui_utf8_enc(uint32_t cp, char out[4]);
  * terminal is known to use (16.2.4). */
 int tui_cp_best(uint32_t cp);
 int tui_cp_max(uint32_t cp);
+/* East Asian ambiguous characters (é, ±, °, ...) are one column, as nearly
+ * every terminal draws them, unless the terminal is set to draw them wide
+ * (PYTTE_AMBIGUOUS=wide). */
+void tui_set_ambiguous_wide(bool wide);
 
 /* Grapheme clusters, simplified: a base plus combining marks, variation
  * selectors, emoji modifiers and ZWJ-joined parts; regional indicators in
@@ -33,6 +37,9 @@ int tui_cp_max(uint32_t cp);
 size_t tui_next_cluster(pt_str s, size_t i);
 size_t tui_prev_cluster(pt_str s, size_t i);
 int tui_cluster_w(pt_str s, size_t i, size_t j, bool max);
+/* The least any terminal is known to use (older tables draw emoji in one
+ * column): with w_max, it brackets what the terminal really does. */
+int tui_cluster_wmin(pt_str s, size_t i, size_t j);
 
 /* Clean text from outside for display (R6): invalid UTF-8 becomes U+FFFD;
  * C0 controls except \n and \t, DEL, C1 and bidi controls are dropped;
@@ -61,6 +68,16 @@ int tui_width(pt_str s, bool max);
 int tui_style_at(pt_str s, int style);
 /* The longest prefix of s (in bytes) that fits in `cols` columns. */
 size_t tui_fit(pt_str s, int cols, bool max);
+
+/* How a terminal that rewraps lines lays styled text out in `cols`
+ * columns: the rows it takes, and the column after the last character.
+ * max: whole clusters at w_max, which no terminal exceeds; else single
+ * code points at their least (ZWJ-joined parts and emoji modifiers take
+ * nothing), which no terminal undercuts, whether it splits clusters at
+ * the edge or not. A wide character that does not fit wraps whole. */
+int tui_rows(pt_str s, int cols, bool max, int *endcol);
+/* The width the next character at s[i] takes, in the same two ways. */
+int tui_next_w(pt_str s, size_t i, bool max);
 
 /* Break styled text (no newlines) into rows of at most `cols` columns.
  * Each row is appended to out followed by '\n', starting with the style in
@@ -122,5 +139,69 @@ void tui_keys_feed(tui_keys *k, const char *p, size_t n);
 bool tui_keys_next(tui_keys *k, tui_ev *ev, bool flush);
 /* Bytes are waiting for more (the caller should time out and flush). */
 bool tui_keys_pending(const tui_keys *k);
+
+/* ---- band.c: the frame model (16.2.3, 16.2.6) ---- */
+
+/* What the band should show: styled rows, each followed by '\n' and at
+ * most cols - 1 columns wide by w_max (the band clips them anyway), and
+ * where the cursor is: a row, and the byte offset in it. */
+typedef struct tui_frame {
+    pt_buf rows;
+    int n;
+    int cur_row;
+    size_t cur_at;
+} tui_frame;
+
+void tui_frame_init(tui_frame *f, pt_allocator al);
+void tui_frame_free(tui_frame *f);
+void tui_frame_reset(tui_frame *f);
+/* Add a row (clipped to cols - 1 by w_max); returns its index. */
+int tui_frame_row(tui_frame *f, pt_str styled, int cols);
+
+typedef struct tui_band {
+    int rows, cols;
+    bool reflow; /* the terminal rewraps lines on resize (16.2.6) */
+    bool color;
+    pt_buf out;  /* bytes for the terminal, sent in one write */
+    /* the last frame */
+    pt_buf drawn; /* its rows, each followed by '\n' */
+    int h, cur;   /* its height and the cursor's row */
+    size_t cur_at; /* the cursor's byte offset in its row */
+    int up;       /* rows from the cursor up to the top of the band */
+    bool clear;   /* erase from the top before the next paint (resize, Ctrl-L) */
+    bool gap;     /* and leave one empty row there first (a resize that had to guess) */
+} tui_band;
+
+void tui_band_init(tui_band *b, int rows, int cols, pt_allocator al);
+void tui_band_free(tui_band *b);
+/* Redraw the band to show f (only the rows that changed). */
+void tui_band_paint(tui_band *b, const tui_frame *f);
+/* Add lines to the transcript above the band (styled text, each line
+ * followed by '\n'; any width, the terminal wraps them), then draw f. */
+void tui_band_commit(tui_band *b, pt_str lines, const tui_frame *f);
+/* The terminal now has this size: the next paint starts from the band's
+ * new top, found from the reflow model. */
+void tui_band_resize(tui_band *b, int rows, int cols);
+/* Repaint everything from the top (Ctrl-L). */
+void tui_band_redraw(tui_band *b);
+/* Erase the band, leaving the cursor where its top was (exit, suspend). */
+void tui_band_erase(tui_band *b);
+
+/* ---- md.c: line-based Markdown (16.2.5) ---- */
+
+typedef struct tui_md {
+    bool code;  /* inside a fenced block */
+    char fch;   /* its fence character and length */
+    int flen;
+    bool ascii; /* ASCII symbols */
+} tui_md;
+
+/* Render one complete source line (no newline) as styled rows, each
+ * followed by '\n', at most cols - 1 wide. base: a style under everything
+ * (dim for thinking). band: for the band, where code lines are cut into
+ * rows and widths are w_max; otherwise code and table lines are left for
+ * the terminal to wrap. Returns the rows added. Advances the fence state;
+ * render a copy to show an unfinished line. */
+int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *out);
 
 #endif

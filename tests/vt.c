@@ -463,14 +463,21 @@ static void vt_resize(vt *v, int rows, int cols)
         i = 0;
         while (i <= last) {
             vt_line l = {NULL, 0, 0};
-            int first = i, k, col = 0, offset = -1, line_start;
+            int k, col = 0, offset = -1, lw = 0;
+            bool placed = false;
             /* a logical line: rows joined while wrapped */
             for (;;) {
-                for (j = 0; j < all[i].n; j++)
-                    if (all[i].c[j].w != 0)
+                int end = all[i].n;
+                if (all[i].wrapped) /* padding left by a wide character that did not fit */
+                    while (end > 0 && !all[i].c[end - 1].n && all[i].c[end - 1].w == 1)
+                        end--;
+                if (i == cur) /* the cursor: so many columns of content into the line */
+                    offset = lw + v->c;
+                for (j = 0; j < end; j++)
+                    if (all[i].c[j].w != 0) {
                         line_push(&l, &all[i].c[j]);
-                if (i == cur)
-                    offset = (i - first) * v->cols + v->c;
+                        lw += all[i].c[j].w;
+                    }
                 if (!all[i].wrapped || i == last)
                     break;
                 i++;
@@ -479,7 +486,7 @@ static void vt_resize(vt *v, int rows, int cols)
             while (l.n && !l.c[l.n - 1].n) /* trailing blanks */
                 l.n--;
             OUT_ROW();
-            line_start = nout - 1;
+            lw = 0;
             for (k = 0; k < l.n; k++) {
                 int w = l.c[k].w;
                 if (col + w > cols) {
@@ -487,18 +494,26 @@ static void vt_resize(vt *v, int rows, int cols)
                     OUT_ROW();
                     col = 0;
                 }
+                if (offset >= 0 && !placed && lw >= offset) { /* it moves with its cell */
+                    cur_out = nout - 1;
+                    cur_col = col;
+                    placed = true;
+                }
                 out[nout - 1].c[col] = l.c[k];
                 if (w == 2 && col + 1 < cols)
                     out[nout - 1].c[col + 1].w = 0;
                 col += w;
+                lw += w;
             }
-            if (offset >= 0) { /* the cursor: as many columns from the line start */
-                cur_out = line_start + offset / cols;
-                cur_col = offset % cols;
-                while (cur_out >= nout) {
+            if (offset >= 0 && !placed) { /* past the end of the content */
+                col += offset - lw;
+                while (col >= cols) {
                     out[nout - 1].wrapped = true;
                     OUT_ROW();
+                    col -= cols;
                 }
+                cur_out = nout - 1;
+                cur_col = col;
             }
             free(l.c);
         }
@@ -521,6 +536,8 @@ static void vt_resize(vt *v, int rows, int cols)
     /* the screen ends at the cursor or the last content below it */
     bottom = nout - 1 > cur_out ? nout - 1 : cur_out;
     top = bottom - rows + 1;
+    if (top > cur_out)
+        top = cur_out; /* the cursor stays on screen; rows below it may not */
     if (top < 0)
         top = 0;
     v->rows = rows;
@@ -534,6 +551,8 @@ static void vt_resize(vt *v, int rows, int cols)
         else
             row_init(&v->screen[i], cols);
     }
+    for (i = top + rows; i < nout; i++)
+        row_free(&out[i]);
     free(out);
     v->r = cur_out - top;
     v->c = cur_col;

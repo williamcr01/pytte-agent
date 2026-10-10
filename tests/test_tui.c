@@ -50,13 +50,17 @@ static void test_widths(void)
     CHECK(tui_cp_best(0x4E2D) == 2); /* 中 */
     CHECK(tui_cp_best(0x0301) == 0 && tui_cp_max(0x0301) == 0); /* combining acute */
     CHECK(tui_cp_best(0x1F600) == 2); /* 😀 */
-    CHECK(tui_cp_best(0x00B1) == 1 && tui_cp_max(0x00B1) == 2); /* ± is ambiguous */
+    CHECK(tui_cp_best(0x00B1) == 1 && tui_cp_max(0x00B1) == 1); /* ± is ambiguous: narrow... */
+    tui_set_ambiguous_wide(true);
+    CHECK(tui_cp_best(0x00B1) == 2 && tui_cp_max(0x00B1) == 2); /* ...unless set wide */
+    CHECK(tui_cp_best('a') == 1 && tui_cp_best(0x0301) == 0);
+    tui_set_ambiguous_wide(false);
     CHECK(tui_cp_best(0x2764) == 1 && tui_cp_max(0x2764) == 2); /* ❤ text by default */
     CHECK(tui_cp_best(0x200D) == 0);                           /* ZWJ */
     CHECK(tui_cp_best(0xFE0F) == 0);
     CHECK(tui_cp_best(0x1160) == 0); /* hangul medial vowel */
     CHECK(tui_cp_best(0x3400) == 2 && tui_cp_best(0x2FFFD) == 2);
-    CHECK(tui_cp_max(0x10FFFD) == 2); /* private use is ambiguous */
+    CHECK(tui_cp_max(0x10FFFD) == 1); /* private use is ambiguous */
 
     CHECK(wb("hello") == 5 && wm("hello") == 5);
     CHECK(wb("中文") == 4);
@@ -327,6 +331,89 @@ static void test_keys_esc_wait(void)
     tui_keys_free(&k);
 }
 
+/* ---- markdown ---- */
+
+/* Styled rows made readable: {b} bold, {d} dim, {c} cyan, {} plain, ... */
+static void readable(pt_buf *out, pt_str s)
+{
+    size_t i;
+    for (i = 0; i < s.n; i++) {
+        if (s.p[i] == TUI_STY && i + 1 < s.n) {
+            int st = (unsigned char)s.p[++i] - 0x20;
+            pt_buf_putc(out, '{');
+            if (st & TUI_BOLD)
+                pt_buf_putc(out, 'b');
+            if (st & TUI_DIM)
+                pt_buf_putc(out, 'd');
+            if ((st & TUI_COLOR_MASK) == TUI_CYAN)
+                pt_buf_putc(out, 'c');
+            if ((st & TUI_COLOR_MASK) == TUI_RED)
+                pt_buf_putc(out, 'r');
+            pt_buf_putc(out, '}');
+        } else {
+            pt_buf_putc(out, s.p[i]);
+        }
+    }
+}
+
+static pt_str md(tui_md *m, const char *line, int cols, int base, bool band)
+{
+    pt_buf rows;
+    pt_buf_init(&rows, T_AL);
+    tui_md_line(m, pt_strz(line), cols, base, band, &rows);
+    pt_buf_reset(&tb);
+    readable(&tb, pt_buf_str(&rows));
+    pt_buf_free(&rows);
+    return pt_buf_str(&tb);
+}
+
+#define MD(line, want) CHECK_STR(md(&m, (line), 31, 0, false), (want))
+
+static void test_md(void)
+{
+    tui_md m;
+    memset(&m, 0, sizeof m);
+    MD("Plain text.", "Plain text.\n");
+    MD("", "\n");
+    MD("A long paragraph that goes on and on past the edge.", "A long paragraph that goes on\nand on past the edge.\n");
+    MD("Some **bold** and `code` here.", "Some {b}bold{} and {c}code{} here.\n");
+    MD("An *em*, _em_, snake_case_x.", "An em, em, snake_case_x.\n");
+    MD("Unclosed **bold and `tick", "Unclosed **bold and `tick\n");
+    MD("2 * 3 * 4 = 24", "2 * 3 * 4 = 24\n");
+    MD("**`x` inside**", "{b}{bc}x{b} inside{}\n");
+    MD("See [the docs](https://x.io) now", "See the docs {d}https://x.io{} now\n");
+    MD("[https://x.io](https://x.io)", "https://x.io\n");
+    MD("Escaped \\*not em\\*", "Escaped *not em*\n");
+    MD("# Title", "{b}Title\n");
+    MD("### Sub ###", "{b}Sub\n");
+    MD("#hashtag", "#hashtag\n");
+    MD("- an item that wraps onto a second row", "\xe2\x80\xa2 an item that wraps onto a\n  second row\n");
+    MD("  * nested", "  \xe2\x80\xa2 nested\n");
+    MD("12. twelfth", "12. twelfth\n");
+    MD("> quoted **text**", "{d}\xe2\x94\x82 {}quoted {b}text{}\n");
+    MD("---", "{d}\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+               "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+               "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
+               "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\n");
+    MD("| a | b |", "| a | b |\n");
+    /* fenced code: dim fences, lines as they are, no markdown inside */
+    MD("```c", "{d}```c\n");
+    CHECK(m.code);
+    MD("int **p = `x`; // a long line that the terminal wraps by itself", "int **p = `x`; // a long line that the terminal wraps by itself\n");
+    MD("~~~", "~~~\n");
+    MD("```", "{d}```\n");
+    CHECK(!m.code);
+    /* in the band: code is cut into rows, and widths are pessimistic */
+    MD("~~~~", "{d}~~~~\n");
+    CHECK_STR(md(&m, "0123456789012345678901234567890123456789", 31, 0, true),
+              "012345678901234567890123456789\n0123456789\n");
+    MD("~~~~", "{d}~~~~\n");
+    /* thinking: dim under everything */
+    CHECK_STR(md(&m, "Let me **think**.", 31, TUI_DIM, false), "{d}Let me {bd}think{d}.\n");
+    m.ascii = true;
+    MD("- ascii", "- ascii\n");
+}
+
 int main(void)
 {
     pt_buf_init(&tb, T_AL);
@@ -338,6 +425,7 @@ int main(void)
     RUN(test_wrap);
     RUN(test_keys);
     RUN(test_keys_esc_wait);
+    RUN(test_md);
     pt_buf_free(&tb);
     return t_done("test_tui");
 }

@@ -29,7 +29,7 @@ obj       = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
 PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) src/cli/pytte_ai.c)
 PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) src/cli/main.c)
 
-.PHONY: all test crash portable fuzz clean fixtures-update models width
+.PHONY: all test crash screen portable fuzz clean fixtures-update models width
 all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a
 
 $(BUILD)/obj/%.o: %.c
@@ -61,6 +61,10 @@ test: $(TESTS) $(BUILD)/pytte-ai $(BUILD)/pytte
 	@for t in $(TESTS); do ./$$t || exit 1; done
 	@echo "cli:" && sh tests/cli.sh $(BUILD)/pytte-ai $(BUILD)/pytte
 	@bash tests/crash.sh $(BUILD)/pytte 3
+
+# The screen property test with many more random sessions (section 22.5).
+screen: $(BUILD)/test/test_screen
+	BAND_SEEDS=400 ./$(BUILD)/test/test_screen
 
 # kill -9 pytte at random moments, many times (section 22.3).
 crash: $(BUILD)/pytte
