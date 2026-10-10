@@ -4,3 +4,4 @@
 crash-*
 leak-*
 timeout-*
+.env
