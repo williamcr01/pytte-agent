@@ -12,8 +12,8 @@
 static const char usage[] =
     "usage: pytte-ai [options] MODEL [PROMPT]\n"
     "\n"
-    "MODEL is provider or provider/model-id, e.g. anthropic, anthropic/claude-opus-5-5,\n"
-    "openai/gpt-5, openrouter/<vendor>/<model>, faux. PROMPT is read from stdin when\n"
+    "MODEL is provider/model-id, e.g. anthropic/claude-opus-5-5, openai/gpt-5,\n"
+    "openrouter/<vendor>/<model>, faux/faux. PROMPT is read from stdin when\n"
     "omitted.\n"
     "\n"
     "  --system TEXT       system prompt\n"
@@ -400,9 +400,8 @@ static void list_models(void)
             if (strcmp(m->provider, p->id) != 0)
                 continue;
             snprintf(ref, sizeof ref, "%s/%s", p->id, m->id);
-            printf("  %-30s %8lu ctx %7lu out%s%s\n", ref, (unsigned long)m->context_window,
-                   (unsigned long)m->max_tokens, m->reasoning ? "  reasoning" : "",
-                   strcmp(m->id, p->default_model) == 0 ? "  (default)" : "");
+            printf("  %-30s %8lu ctx %7lu out%s\n", ref, (unsigned long)m->context_window,
+                   (unsigned long)m->max_tokens, m->reasoning ? "  reasoning" : "");
         }
         if (strcmp(p->id, "openrouter") == 0)
             printf("  %-30s any OpenRouter model ID\n", "openrouter/<vendor>/<model>");

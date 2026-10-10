@@ -197,7 +197,7 @@ static pt_rt_result client(world *w, const scenario *sc)
     o.random = w_random;
     o.ud = w;
     o.on_event = w_event;
-    o.config.model = PT_S("faux");
+    o.config.model = PT_S("faux/faux");
     o.config.live_interval_ms = 1;
     a = pt_new(&o);
     w->sc = sc;

@@ -109,7 +109,9 @@ static void test_resolve(void)
 {
     pt_ai_target t;
     const char *why;
-    t = target("anthropic");
+    CHECK(!pt_ai_resolve(pt_ai_builtin_catalog(), PT_S("anthropic"), &t, &A, &why) && why);
+    CHECK(!pt_ai_resolve(pt_ai_builtin_catalog(), PT_S("anthropic/"), &t, &A, &why) && why);
+    t = target("anthropic/claude-opus-5-5");
     CHECK(t.known);
     CHECK(strcmp(t.model.id, "claude-opus-5-5") == 0);
     CHECK(t.compat.mid_conversation_system == PT_YES && t.compat.fallbacks == PT_YES);
@@ -134,13 +136,13 @@ static void test_keys(void)
 {
     pt_credentials c;
     const char *which;
-    pt_ai_target t = target("openai");
+    pt_ai_target t = target("openai/gpt-5");
     CHECK(pt_ai_find_key(t.provider, fake_env, NULL, &c, &which));
     CHECK_STR(c.api_key, "sk-test");
     CHECK(strcmp(which, "OPENAI_API_KEY") == 0);
-    t = target("anthropic");
+    t = target("anthropic/claude-opus-5-5");
     CHECK(!pt_ai_find_key(t.provider, fake_env, NULL, &c, &which));
-    t = target("faux");
+    t = target("faux/faux");
     CHECK(pt_ai_find_key(t.provider, fake_env, NULL, &c, &which) && !c.api_key.n);
 }
 
@@ -419,7 +421,7 @@ static const char *script =
 /* Run turn n of the script (by faking n assistant messages in the context). */
 static const pt_msg *faux_turn(uint32_t n, sink *k, const pt_ai_error **err)
 {
-    pt_ai_target t = target("faux");
+    pt_ai_target t = target("faux/faux");
     pt_msg msgs[8];
     pt_ai_context c;
     pt_http_req r;
@@ -508,7 +510,7 @@ static void test_faux(void)
 
 static void test_abort(void)
 {
-    pt_ai_target t = target("faux");
+    pt_ai_target t = target("faux/faux");
     sink k;
     pt_ai_stream *s;
     pt_buf_init(&k.text, T_AL);
@@ -533,7 +535,7 @@ static void test_abort(void)
 
 static void test_transport_error(void)
 {
-    pt_ai_target t = target("anthropic");
+    pt_ai_target t = target("anthropic/claude-opus-5-5");
     pt_ai_stream *s = pt_ai_stream_new(&t, &A, T_AL, NULL, NULL, 0);
     pt_ai_stream_end(s, "Could not resolve host", 10);
     CHECK(pt_ai_stream_error(s)->cls == PT_ERR_RETRYABLE);

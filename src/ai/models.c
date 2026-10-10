@@ -46,10 +46,8 @@ bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_a
         *why = "unknown provider";
         return false;
     }
-    if (!mid.n)
-        mid = pt_strz(p->default_model);
     if (!mid.n) {
-        *why = "no model given and the provider has no default";
+        *why = "no model given: use provider/model-id";
         return false;
     }
     for (i = 0; i < cat->nmodels; i++)

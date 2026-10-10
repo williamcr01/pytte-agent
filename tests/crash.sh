@@ -29,14 +29,14 @@ run_and_kill() {
 for round in $(seq "$rounds"); do
     export XDG_STATE_HOME
     XDG_STATE_HOME=$(mktemp -d)
-    run_and_kill "$bin" -p -m faux --script "$script" "list the files"
+    run_and_kill "$bin" -p -m faux/faux --script "$script" "list the files"
     status=$?
     for attempt in $(seq 40); do
         [ "$status" -eq 0 ] && break
         if ! "$bin" log >/dev/null 2>&1 || [ -z "$("$bin" log --json)" ]; then
             # killed before the first commit: the session never existed
             rm -rf "$XDG_STATE_HOME/pytte"
-            run_and_kill "$bin" -p -m faux --script "$script" "list the files"
+            run_and_kill "$bin" -p -m faux/faux --script "$script" "list the files"
         else
             run_and_kill "$bin" -p -c --script "$script"
         fi

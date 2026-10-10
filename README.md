@@ -32,14 +32,14 @@ make width      # regenerate the display-width table from Unicode (network)
 ```sh
 export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, OPENROUTER_API_KEY
 
-build/pytte                                  # the TUI, new session (model: anthropic)
+build/pytte                                  # the TUI, new session (model: anthropic/claude-opus-5-5)
 build/pytte -m openai/gpt-5 --effort high    # another model
 build/pytte -c                               # continue this directory's newest session
 build/pytte -r [ID]                          # that session, or pick one
 build/pytte -p "what is 25*18?"              # print mode: run, print the answer, exit
 echo "hello" | build/pytte -p --output-format json
 build/pytte log [ID]                         # a transcript (--json: records)
-build/pytte -m faux --script tests/faux/slow.json   # offline
+build/pytte -m faux/faux --script tests/faux/slow.json   # offline
 ```
 
 In the TUI: Enter sends (queued while a run is active), Shift+Enter or
@@ -73,11 +73,11 @@ result and the run goes on.
 ```sh
 export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, OPENROUTER_API_KEY
 
-build/pytte-ai anthropic "what is 25*18?"
+build/pytte-ai anthropic/claude-opus-5-5 "what is 25*18?"
 build/pytte-ai openai/gpt-5 --system "be brief" "hello"
 build/pytte-ai openrouter/<vendor>/<model> --reasoning high "hello"
-build/pytte-ai anthropic --tools tests/tools/echo.json --turns 2 "echo hi"
-build/pytte-ai faux --script tests/faux/tool_call.json --turns 2 "anything"
+build/pytte-ai anthropic/claude-opus-5-5 --tools tests/tools/echo.json --turns 2 "echo hi"
+build/pytte-ai faux/faux --script tests/faux/tool_call.json --turns 2 "anything"
 build/pytte-ai --list
 ```
 

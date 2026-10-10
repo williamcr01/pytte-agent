@@ -27,8 +27,8 @@ static const char usage[] =
     "  -c, --continue          the newest session started in this directory\n"
     "  -r, --resume [ID]       that session, or pick from this directory's\n"
     "  -p, --print             no TUI (also when stdin or stdout is not a terminal)\n"
-    "  -m, --model REF         provider or provider/model-id (default: $PYTTE_MODEL, the\n"
-    "                          config file; else the session's last, or anthropic)\n"
+    "  -m, --model REF         provider/model-id (default: $PYTTE_MODEL, the config\n"
+    "                          file; else the session's last, or " DEFAULT_MODEL ")\n"
     "  --effort LEVEL          off, minimal, low, medium, high, xhigh, max ($PYTTE_EFFORT)\n"
     "  --max-tokens N          default: the model's maximum that fits the context\n"
     "  --system-prompt TEXT    system prompt of a new session\n"
@@ -151,7 +151,7 @@ static void apply_config(opts *o, cli_config *cfg, bool create)
     else if (cfg->val[CFG_MODEL][0] && env_or_new)
         o->c.model = cfg->val[CFG_MODEL];
     else if (create)
-        o->c.model = "anthropic";
+        o->c.model = DEFAULT_MODEL;
     env_or_new = create || strcmp(cfg->src[CFG_REASONING], "env") == 0;
     if (o->effort_flag) {
         cli_config_set(cfg, CFG_REASONING, pt_reasoning_name(o->c.reasoning), "flag");
@@ -159,6 +159,20 @@ static void apply_config(opts *o, cli_config *cfg, bool create)
         if (!pt_reasoning_parse(pt_strz(cfg->val[CFG_REASONING]), &o->c.reasoning))
             fprintf(stderr, "pytte: unknown effort level %s (from %s); ignored\n",
                     cfg->val[CFG_REASONING], cfg->src[CFG_REASONING]);
+    }
+    if (o->c.model && *o->c.model) { /* before a session exists to leave behind */
+        pt_arena a;
+        pt_ai_target t;
+        const char *why;
+        bool ok;
+        pt_arena_init(&a, pt_sys_allocator(), 0);
+        ok = pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(o->c.model), &t, &a, &why);
+        pt_arena_free(&a);
+        if (!ok) {
+            fprintf(stderr, "pytte: model %s (from %s): %s, e.g. %s\n", o->c.model,
+                    o->c.model == cfg->val[CFG_MODEL] ? cfg->src[CFG_MODEL] : "flag", why, DEFAULT_MODEL);
+            exit(1);
+        }
     }
 }
 

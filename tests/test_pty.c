@@ -263,7 +263,7 @@ static char *last_log(size_t *n)
 static void test_chat(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux", "--script", "tests/faux/hello.json", NULL};
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "session ", 3000));
     CHECK(p.v->kitty == 1); /* the query was answered: flags pushed */
@@ -286,7 +286,7 @@ static void test_chat(void)
 static void test_kill9(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux", "--script", "tests/faux/slow.json", NULL};
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/slow.json", NULL};
     const char *again[] = {"-c", "--script", "tests/faux/slow.json", NULL};
     size_t n;
     char *log;
@@ -319,7 +319,7 @@ static void test_kill9(void)
 static void test_suspend_and_signals(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux", "--script", "tests/faux/hello.json", NULL};
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     struct winsize ws;
     int i;
     pty_start(&p, 24, 80, args);
@@ -364,7 +364,7 @@ static void test_suspend_and_signals(void)
 static void test_interrupt_and_queue(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux", "--script", "tests/faux/slow.json", NULL};
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/slow.json", NULL};
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "session ", 3000));
     keys(&p, "list the files\r");
@@ -391,7 +391,7 @@ static void test_interrupt_and_queue(void)
 static void test_commands(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux", "--script", "tests/faux/hello.json", NULL};
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     char path[300];
     size_t n;
     char *cfg;
@@ -413,6 +413,18 @@ static void test_commands(void)
     CHECK(wait_for(&p, "faux · high · ", 1000));
     keys(&p, "/model nosuch/provider\r");
     CHECK(wait_for(&p, "nosuch/provider: ", 1000));
+    /* a model is always named: the menu lists no bare providers */
+    keys(&p, "/model anthropic");
+    CHECK(wait_for(&p, "anthropic/claude-fable-5  Claude Fable 5", 1000));
+    CHECK(!has(&p, "anthropic  Anthropic"));
+    keys(&p, "\x1b"); /* Esc closes the menu, so Enter sends what was typed */
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "anthropic: no model given", 1000));
+    keys(&p, "/settings model anthropic\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "› /settings model anthropic\nanthropic: no model given", 1000));
     keys(&p, "/status\r");
     CHECK(wait_for(&p, "kitty keys on", 1000));
     keys(&p, "/help\r");
@@ -435,7 +447,7 @@ static void test_commands(void)
 static void test_history_pager_draft(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux", "--script", "tests/faux/hello.json", NULL};
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "session ", 3000));
@@ -468,7 +480,7 @@ static void test_history_pager_draft(void)
 static void test_sigterm(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux", "--script", "tests/faux/hello.json", NULL};
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "session ", 3000));
     keys(&p, "hello\r");

@@ -28,7 +28,7 @@ static void on_event(void *ud, const pt_ai_event *ev)
 int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size);
 int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size)
 {
-    static const char *const refs[] = {"anthropic", "openai", "openrouter/x/y", "faux"};
+    static const char *const refs[] = {"anthropic/claude-opus-5-5", "openai/gpt-5", "openrouter/x/y", "faux/faux"};
     pt_allocator al = {al_fn, NULL};
     pt_arena a;
     pt_ai_target t;

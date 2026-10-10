@@ -82,7 +82,7 @@ static pt_agent *h_agent(host *h)
     o.random = h_random;
     o.on_event = h_event;
     o.ud = h;
-    o.config.model = PT_S("faux");
+    o.config.model = PT_S("faux/faux");
     o.config.live_interval_ms = 1;
     h->a = pt_new(&o);
     return h->a;

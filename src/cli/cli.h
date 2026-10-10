@@ -5,6 +5,9 @@
 
 #include "rt/rt.h"
 
+/* The model for a new session when nothing else names one. */
+#define DEFAULT_MODEL "anthropic/claude-opus-5-5"
+
 /* ---- config.c: settings (section 19) ---- */
 
 enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_N };

@@ -504,9 +504,6 @@ static void add_models(app *a, pt_str q)
     const pt_ai_catalog *cat = pt_ai_builtin_catalog();
     char ref[256];
     uint32_t i;
-    for (i = 0; i < cat->nproviders; i++)
-        if (pt_str_icontains(pt_strz(cat->providers[i].id), q))
-            add_item(a, cat->providers[i].id, strlen(cat->providers[i].id), cat->providers[i].name);
     for (i = 0; i < cat->nmodels; i++) {
         int n = snprintf(ref, sizeof ref, "%s/%s", cat->models[i].provider, cat->models[i].id);
         if (n > 0 && (size_t)n < sizeof ref && pt_str_icontains(pt_strz(ref), q))
@@ -862,6 +859,14 @@ static void apply_thinking(app *a)
 static void save_setting(app *a, int k, const char *v)
 {
     char err[700];
+    pt_ai_target t;
+    const char *why = NULL;
+    pt_arena_reset(&a->ar);
+    if (k == CFG_MODEL && !pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(v), &t, &a->ar, &why)) {
+        snprintf(err, sizeof err, "%s: %s", v, why ? why : "unknown");
+        out_z(a, TUI_RED, err);
+        return;
+    }
     if (!cli_config_save(a->cfg, k, v, err, sizeof err))
         out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(err), 2);
     if (k == CFG_THINKING)

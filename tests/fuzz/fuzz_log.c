@@ -42,7 +42,7 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size)
     memset(&o, 0, sizeof o);
     o.alloc = al;
     o.now_ms = now_fn;
-    o.config.model = PT_S("faux");
+    o.config.model = PT_S("faux/faux");
     a = pt_new(&o);
     pt_buf_init(&line, al);
     for (i = 0; i <= n; i++) {

@@ -116,7 +116,6 @@ typedef struct pt_provider {
     pt_auth_style auth;
     pt_header headers[4];       /* extra headers; NULL name ends the list */
     pt_compat compat;
-    const char *default_model;  /* used when a reference names only the provider */
     uint32_t context_window, max_tokens; /* defaults for models not in the catalog */
     bool reasoning;             /* default for models not in the catalog */
 } pt_provider;
@@ -152,8 +151,9 @@ typedef struct pt_ai_target {
     bool known;       /* model is in the catalog */
 } pt_ai_target;
 
-/* Resolve "provider/model-id" (split at the first slash) or "provider".
- * Returns false with *why set when the provider or its API is unknown. */
+/* Resolve "provider/model-id" (split at the first slash). Returns false
+ * with *why set when the model is missing or the provider or its API is
+ * unknown. */
 bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_arena *a,
                    const char **why);
 /* Talk to the target through another API (for example OpenAI through Chat
