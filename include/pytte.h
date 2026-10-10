@@ -154,6 +154,12 @@ typedef struct pt_input {
 
 bool pt_submit(pt_agent *a, const pt_input *in);
 
+/* Interrupt the active run (section 8.4): what has arrived of its answer
+ * is committed as an aborted assistant entry, and the run and its input
+ * end "aborted". Unlike exiting, this is a durable decision. Queued inputs
+ * stay queued. False when no run is active. */
+bool pt_abort(pt_agent *a);
+
 /* ---- the loop ---------------------------------------------------------------------- */
 
 /* The next effect to start: 1 = *out is set, 0 = nothing right now. */

@@ -309,6 +309,17 @@ static void after(pt_agent *a, after_kind k, const char *outcome, pt_str error, 
     a->after_until = until;
 }
 
+static void cancel(pt_agent *a, uint32_t task_id, uint32_t fx_id)
+{
+    pt_fx fx;
+    memset(&fx, 0, sizeof fx);
+    fx.kind = PT_FX_CANCEL;
+    fx.id = pt_core_new_fx(a);
+    fx.task = task_id;
+    fx.cancel = fx_id;
+    pt_core_queue(a, &fx, PT_STR_NULL);
+}
+
 static bool classify(pt_agent *a, task *t)
 {
     run_live *rl = t->live;
@@ -375,18 +386,23 @@ static bool classify(pt_agent *a, task *t)
     if (in && input_changed)
         pt_write_input(&a->cw, &nin);
     ok = pt_core_commit_end(a);
-    if (!rl->http_done) {
-        /* The stream ended on its final event before the transfer did. */
-        pt_fx fx;
-        memset(&fx, 0, sizeof fx);
-        fx.kind = PT_FX_CANCEL;
-        fx.id = pt_core_new_fx(a);
-        fx.task = t->id;
-        fx.cancel = rl->http_fx;
-        pt_core_queue(a, &fx, PT_STR_NULL);
-    }
+    if (!rl->http_done) /* the stream ended on its final event before the transfer did */
+        cancel(a, t->id, rl->http_fx);
     pt_run_free_live(a, t);
     return ok;
+}
+
+/* The partial message in a live file from before a crash, if it has any. */
+static bool read_rescued(pt_agent *a, task *t, pt_msg *m)
+{
+    pt_arena *sa = &a->scratch;
+    pt_json *v = pt_json_parse(pt_buf_str(&t->rescued), sa, NULL);
+    pt_buf_reset(&t->rescued);
+    if (!v || !pt_msg_read_json(v, m, sa) || m->role != PT_ROLE_ASSISTANT || !m->nblocks)
+        return false;
+    m->stop = PT_STOP_ABORTED;
+    m->error = PT_S("interrupted: the process stopped during this response");
+    return true;
 }
 
 /* A partial answer from before a crash goes into the transcript as an
@@ -394,11 +410,8 @@ static bool classify(pt_agent *a, task *t)
  * sent again. */
 static bool commit_rescued(pt_agent *a, task *t)
 {
-    pt_arena *sa = &a->scratch;
-    pt_json *v = pt_json_parse(pt_buf_str(&t->rescued), sa, NULL);
     pt_msg m;
-    pt_buf_reset(&t->rescued);
-    if (!v || !pt_msg_read_json(v, &m, sa) || m.role != PT_ROLE_ASSISTANT || !m.nblocks) {
+    if (!read_rescued(a, t, &m)) {
         pt_fx fx;
         memset(&fx, 0, sizeof fx);
         fx.kind = PT_FX_LIVE;
@@ -406,12 +419,59 @@ static bool commit_rescued(pt_agent *a, task *t)
         fx.task = t->id;
         return pt_core_queue(a, &fx, PT_STR_NULL);
     }
-    m.stop = PT_STOP_ABORTED;
-    m.error = PT_S("interrupted: the process stopped during this response");
     pt_core_commit_begin(a, t->id);
     a->after_live_del = t->id;
     write_assistant(a, pt_core_new_id(a), &m);
     return pt_core_commit_end(a);
+}
+
+/* One commit: the partial answer (if any), the run done(aborted), its
+ * input aborted. Then the request or the retry sleep is cancelled. A run
+ * alone has nothing to wait for; tool tasks (M3) will first commit an
+ * abort flag and wait for their effects to stop. */
+bool pt_run_abort(pt_agent *a, task *t)
+{
+    input *in = pt_core_input(a, t->input), nin;
+    task nt = *t;
+    uint32_t sleeping = t->phase == PH_RETRY ? t->fx : 0;
+    pt_msg m;
+    bool ok;
+    if (t->live && t->live->finished)
+        return false;
+    pt_core_commit_begin(a, t->id);
+    if (t->live) {
+        m = *pt_ai_stream_message(t->live->s);
+        if (m.nblocks) {
+            m.stop = PT_STOP_ABORTED;
+            m.error = PT_S("interrupted by the user");
+            write_assistant(a, pt_core_new_id(a), &m);
+        }
+    } else if (t->rescued.n && read_rescued(a, t, &m)) {
+        write_assistant(a, pt_core_new_id(a), &m);
+    }
+    if (t->phase == PH_REQUEST)
+        a->after_live_del = t->id;
+    nt.status = ST_DONE;
+    nt.outcome = PT_S("aborted");
+    nt.reason = PT_S("interrupted by the user");
+    nt.result = 0;
+    pt_write_task(&a->cw, &nt);
+    if (in) {
+        nin = *in;
+        nin.status = IN_ABORTED;
+        pt_write_input(&a->cw, &nin);
+    }
+    after(a, AFTER_RUN_DONE, "aborted", PT_S("interrupted by the user"), 0);
+    ok = pt_core_commit_end(a);
+    if (t->live) {
+        if (!t->live->http_done)
+            cancel(a, t->id, t->live->http_fx);
+        pt_run_free_live(a, t);
+    }
+    if (sleeping)
+        cancel(a, t->id, sleeping);
+    t->woke = false;
+    return ok;
 }
 
 bool pt_run_step(pt_agent *a, task *t)

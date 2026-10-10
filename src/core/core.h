@@ -129,6 +129,8 @@ struct pt_agent {
     uint32_t next_fx;
     pt_buf live_out; /* the LIVE snapshot handed out by pt_poll */
 
+    uint32_t abort_run; /* pt_abort: the run to stop */
+
     pt_fatal_kind fatal;
     char err[512];
     bool idle_sent;
@@ -170,6 +172,10 @@ bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena 
 /* Advance a run task; true when it queued something. */
 bool pt_run_step(pt_agent *a, task *t);
 void pt_run_free_live(pt_agent *a, task *t);
+/* Commit the end of an interrupted run; true when it queued the commit.
+ * False when the answer is complete: it is kept, and the abort waits for
+ * what comes after it (the run may be done then). */
+bool pt_run_abort(pt_agent *a, task *t);
 /* HTTP progress of a request; false when fx is not one in flight. */
 bool pt_run_http_head(pt_agent *a, uint32_t fx, int status, pt_str retry_after);
 bool pt_run_http_data(pt_agent *a, uint32_t fx, const void *p, size_t n);

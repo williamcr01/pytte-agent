@@ -443,6 +443,17 @@ static bool step(pt_agent *a)
         build_open(a);
         return true;
     }
+    if (a->abort_run) {
+        task *t = pt_core_task(a, a->abort_run);
+        if (!t || t->status == ST_DONE) {
+            a->abort_run = 0;
+        } else if (pt_run_abort(a, t)) {
+            a->abort_run = 0;
+            return true;
+        } else if (a->fatal) {
+            return false;
+        }
+    }
     if (a->closing) {
         if (!a->want_close)
             return false;
@@ -763,6 +774,18 @@ bool pt_submit(pt_agent *a, const pt_input *in)
     a->nsubs++;
     a->idle_sent = false;
     return !a->subs_a.oom;
+}
+
+bool pt_abort(pt_agent *a)
+{
+    uint32_t i;
+    for (i = 0; i < a->ntasks; i++)
+        if (a->tasks[i]->status != ST_DONE) {
+            a->abort_run = a->tasks[i]->id;
+            a->idle_sent = false;
+            return true;
+        }
+    return false;
 }
 
 /* ---- reading ---- */

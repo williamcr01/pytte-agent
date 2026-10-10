@@ -20,11 +20,13 @@
 
 static bool use_step; /* drive clients with pt_rt_step instead of pt_rt_run */
 
-static pt_rt_result run_stepped(pt_rt *rt)
+static bool w_stop(void *ud);
+
+static pt_rt_result run_stepped(pt_rt *rt, void *w)
 {
     pt_rt_result r;
     while ((r = pt_rt_step(rt, 100, NULL, 0)) == PT_RT_BUSY)
-        ;
+        w_stop(w);
     return r;
 }
 
@@ -71,7 +73,13 @@ static void rh_free(pt_http_driver *d)
     free(r);
 }
 
+typedef struct scenario scenario;
+
 typedef struct world {
+    const scenario *sc;
+    pt_agent *agent;  /* the current client's */
+    uint32_t streamed; /* stream events of the first prompt's run */
+    bool aborted;
     pt_store *store;
     pt_store *via; /* when set, clients use this store (wrapping store) */
     char err[512]; /* the last client's fatal error */
@@ -126,10 +134,51 @@ static void world_free(world *w)
     rh_free(&w->http->vt);
 }
 
-typedef struct scenario {
+enum { ABORT_NONE, ABORT_STREAM, ABORT_RETRY };
+
+/* The user interrupts the first prompt's run: after abort_after stream
+ * events, or once it waits to retry. Each client decides again from what
+ * it sees, as a user would after a crash lost an abort that never landed. */
+struct scenario {
     const char *name, *script;
     const char *prompts[3];
-} scenario;
+    int abort;
+    uint32_t abort_after;
+};
+
+static task *first_run(world *w)
+{
+    uint32_t i;
+    for (i = 0; i < w->agent->ntasks; i++) {
+        task *t = w->agent->tasks[i];
+        input *in = pt_core_input(w->agent, t->input);
+        if (in && pt_str_eqz(in->text, w->sc->prompts[0]))
+            return t;
+    }
+    return NULL;
+}
+
+static void w_event(void *ud, const pt_event *ev)
+{
+    world *w = (world *)ud;
+    task *t;
+    if (ev->kind == PT_E_STREAM && w->sc->abort == ABORT_STREAM && (t = first_run(w)) && t->id == ev->task)
+        w->streamed++;
+}
+
+/* Between steps (not inside the agent's callbacks). */
+static bool w_stop(void *ud)
+{
+    world *w = (world *)ud;
+    task *t = first_run(w);
+    if (!w->aborted && t && t->status != ST_DONE &&
+        ((w->sc->abort == ABORT_STREAM && w->streamed >= w->sc->abort_after) ||
+         (w->sc->abort == ABORT_RETRY && t->phase == PH_RETRY))) {
+        w->aborted = true;
+        CHECK(pt_abort(w->agent));
+    }
+    return false;
+}
 
 /* One process. Returns how its run loop ended. */
 static pt_rt_result client(world *w, const scenario *sc)
@@ -147,11 +196,18 @@ static pt_rt_result client(world *w, const scenario *sc)
     o.now_ms = w_now;
     o.random = w_random;
     o.ud = w;
+    o.on_event = w_event;
     o.config.model = PT_S("faux");
     o.config.live_interval_ms = 1;
     a = pt_new(&o);
+    w->sc = sc;
+    w->agent = a;
+    w->streamed = 0;
+    w->aborted = false;
     memset(&rc, 0, sizeof rc);
     rc.store = w->via ? w->via : w->store;
+    rc.stop = w_stop;
+    rc.stop_ud = w;
     rc.http = &w->http->vt;
     rc.now = w_now;
     rc.sleep = w_sleep;
@@ -184,13 +240,14 @@ static pt_rt_result client(world *w, const scenario *sc)
         in.req = pt_strz(req);
         CHECK(pt_submit(a, &in));
     }
-    res = use_step ? run_stepped(rt) : pt_rt_run(rt);
+    res = use_step ? run_stepped(rt, w) : pt_rt_run(rt);
     if (res == PT_RT_IDLE && !pt_rt_close(rt))
         res = PT_RT_FATAL; /* the close commit failed: also a crash */
     snprintf(w->err, sizeof w->err, "%s", pt_error(a));
 out:
     pt_rt_free(rt);
     pt_free(a);
+    w->agent = NULL;
     return res;
 }
 
@@ -289,12 +346,12 @@ static bool known_request(const rec_http *ref, const char *body)
     return false;
 }
 
-static int64_t turn_of(const char *body)
+static int64_t field_of(const char *body, const char *key)
 {
     pt_arena ar;
     int64_t t;
     pt_arena_init(&ar, T_AL, 0);
-    t = pt_json_geti(pt_json_parse(pt_strz(body), &ar, NULL), "turn", -1);
+    t = pt_json_geti(pt_json_parse(pt_strz(body), &ar, NULL), key, -1);
     pt_arena_free(&ar);
     return t;
 }
@@ -312,12 +369,12 @@ static void check_against(const scenario *sc, world *w, const pt_buf *want, cons
         fprintf(stderr, "%s: crash at commit %u (%s): outcome differs:\n%.*s---\n%.*s\n", sc->name, n,
                 how, (int)got.n, got.p, (int)want->n, want->p);
     }
-    /* A request is built from committed state only, so every request for
-     * the same turn (the same committed history) has the same bytes; the
-     * first turn's must match the reference run's exactly. */
+    /* A request is built from committed state only, so every request with
+     * the same history (the same number of messages) has the same bytes;
+     * the first turn's must match the reference run's exactly. */
     for (i = 0; i < w->http->n; i++) {
         const char *bi = w->http->bodies[i];
-        int64_t ti = turn_of(bi);
+        int64_t ti = field_of(bi, "turn"), mi = field_of(bi, "messages");
         uint32_t j;
         t_checks++;
         if (ti == 0 && !known_request(ref, bi)) {
@@ -327,10 +384,10 @@ static void check_against(const scenario *sc, world *w, const pt_buf *want, cons
         }
         for (j = 0; j < i; j++) {
             t_checks++;
-            if (turn_of(w->http->bodies[j]) == ti && strcmp(w->http->bodies[j], bi) != 0) {
+            if (field_of(w->http->bodies[j], "messages") == mi && strcmp(w->http->bodies[j], bi) != 0) {
                 t_failed++;
-                fprintf(stderr, "%s: crash at commit %u (%s): turn %lld was sent with different bytes:\n%s\n%s\n",
-                        sc->name, n, how, (long long)ti, w->http->bodies[j], bi);
+                fprintf(stderr, "%s: crash at commit %u (%s): a history of %lld messages was sent with different bytes:\n%s\n%s\n",
+                        sc->name, n, how, (long long)mi, w->http->bodies[j], bi);
                 break;
             }
         }
@@ -395,29 +452,36 @@ static const scenario scenarios[] = {
     {"answer",
      "{\"chunk\":7,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Easy.\"},"
      "{\"type\":\"text\",\"text\":\"The answer is 450, since 25 times 18 is 450.\"}]}]}",
-     {"what is 25*18?", NULL, NULL}},
+     {"what is 25*18?", NULL, NULL}, ABORT_NONE, 0},
     {"retry",
      "{\"chunk\":7,\"turns\":[[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"This stream gets cut off somewhere in the middle\"}],"
      "\"cut\":150},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Third time lucky.\"}]}]]}",
-     {"go", NULL, NULL}},
+     {"go", NULL, NULL}, ABORT_NONE, 0},
     {"tool_round",
      "{\"chunk\":9,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Let me look.\"},"
      "{\"type\":\"tool_call\",\"name\":\"bash\",\"args\":{\"cmd\":\"ls\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"No tools here, so I will just answer.\"}]}]}",
-     {"list the files", NULL, NULL}},
+     {"list the files", NULL, NULL}, ABORT_NONE, 0},
     {"fatal",
      "{\"turns\":[{\"status\":401,\"body\":{\"class\":\"fatal\",\"message\":\"invalid key\"}}]}",
-     {"hello?", NULL, NULL}},
+     {"hello?", NULL, NULL}, ABORT_NONE, 0},
     {"length",
      "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"This is cut by max_tok\"}],"
      "\"stop\":\"length\"}]}",
-     {"write a novel", NULL, NULL}},
+     {"write a novel", NULL, NULL}, ABORT_NONE, 0},
     {"two_inputs",
      "{\"chunk\":6,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First answer.\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Second answer.\"}]}]}",
-     {"first question", "second question", NULL}},
+     {"first question", "second question", NULL}, ABORT_NONE, 0},
+    {"abort_stream",
+     "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Long.\"},"
+     "{\"type\":\"text\",\"text\":\"A long answer that the user interrupts somewhere in the middle.\"}]}]}",
+     {"first question", "second question", NULL}, ABORT_STREAM, 6},
+    {"abort_retry",
+     "{\"turns\":[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}}]}",
+     {"go", NULL, NULL}, ABORT_RETRY, 0},
 };
 
 /* Another writer appends to the log behind the owner's back (shared

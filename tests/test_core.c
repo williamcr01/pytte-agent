@@ -26,7 +26,9 @@ typedef struct host {
     uint32_t commits, requests;
     pt_buf last_request;
     pt_buf text; /* streamed text */
-    int retries, done, failed, idle;
+    int retries, done, failed, aborted, idle;
+    pt_fx held;      /* the request h_run stopped at */
+    uint32_t cancelled; /* the last PT_FX_CANCEL's target */
     uint32_t stop_at_request; /* return before answering request n (1-based) */
     pt_str body;              /* answer with this SSE body instead of the faux script */
     uint32_t snapshots;       /* live files written */
@@ -58,6 +60,8 @@ static void h_event(void *ud, const pt_event *ev)
     case PT_E_RUN_DONE:
         if (pt_str_eqz(ev->outcome, "completed"))
             h->done++;
+        else if (pt_str_eqz(ev->outcome, "aborted"))
+            h->aborted++;
         else
             h->failed++;
         break;
@@ -157,8 +161,10 @@ static bool h_run(host *h)
             pt_fx_done(h->a, fx.id, NULL);
             break;
         case PT_FX_HTTP:
-            if (++h->requests == h->stop_at_request)
+            if (++h->requests == h->stop_at_request) {
+                h->held = fx;
                 return false;
+            }
             answer(h, &fx);
             break;
         case PT_FX_SLEEP:
@@ -178,6 +184,7 @@ static bool h_run(host *h)
             }
             break;
         case PT_FX_CANCEL:
+            h->cancelled = fx.cancel;
             break;
         }
     }
@@ -543,6 +550,79 @@ static void test_live_snapshots(void)
     free(sse);
 }
 
+/* Feed the held request the first `upto` bytes of its faux answer. */
+static void feed_held(host *h, size_t upto)
+{
+    pt_arena ar;
+    pt_faux_response r;
+    pt_arena_init(&ar, T_AL, 0);
+    CHECK(pt_faux_respond(pt_strz(h->script), h->held.http->body, &h->faux, &r, &ar));
+    pt_fx_head(h->a, h->held.id, r.status, PT_STR_NULL);
+    pt_fx_data(h->a, h->held.id, r.body.p, upto < r.body.n ? upto : r.body.n);
+    pt_arena_free(&ar);
+}
+
+static void test_abort(void)
+{
+    host h;
+    pt_buf t, before;
+    uint32_t i;
+    pt_buf_init(&t, T_AL);
+    pt_buf_init(&before, T_AL);
+    h_init(&h, hello);
+    h_create(&h);
+    h_run(&h);
+    CHECK(!pt_abort(h.a)); /* nothing is running */
+
+    /* mid-stream: the partial answer is kept, marked aborted */
+    h_submit(&h, "hi", NULL);
+    h.stop_at_request = 1;
+    CHECK(!h_run(&h));
+    feed_held(&h, 330);
+    CHECK(h.text.n > 0 && h.text.n < 23);
+    CHECK(pt_abort(h.a));
+    h_run(&h);
+    CHECK(h.aborted == 1 && h.done == 0 && h.failed == 0 && pt_idle(h.a));
+    CHECK(h.cancelled == h.held.id);
+    transcript(h.a, &t);
+    CHECK(pt_str_contains(pt_buf_str(&t), PT_S("user:hi\nassistant/aborted:Short.:Hel")));
+    CHECK(h.a->tasks[0]->status == ST_DONE && pt_str_eqz(h.a->tasks[0]->outcome, "aborted"));
+    for (i = 0; i < h.a->ninputs; i++)
+        CHECK(h.a->inputs[i]->status == IN_ABORTED);
+    for (i = 0; i < 16; i++)
+        CHECK(h.live[i].n == 0);
+    /* the rest of the cancelled response is ignored */
+    pt_fx_data(h.a, h.held.id, "data: x\n\n", 9);
+    pt_fx_done(h.a, h.held.id, NULL);
+    CHECK(!pt_fatal(h.a) && pt_idle(h.a));
+    /* the same after recovery */
+    transcript(h.a, &before);
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    transcript(h.a, &t);
+    CHECK_SAME(pt_buf_str(&t), pt_buf_str(&before));
+    h_open(&h, "testhost", false, true);
+
+    /* the next input runs; the aborted answer is not sent to the model */
+    h.stop_at_request = 0;
+    h_submit(&h, "again", NULL);
+    h_run(&h);
+    CHECK(h.done == 1);
+    CHECK(!pt_str_contains(pt_buf_str(&h.last_request), PT_S("Hel\"")));
+    CHECK(pt_str_contains(pt_buf_str(&h.last_request), PT_S("{\"role\":\"user\",\"text\":\"hi\"}")));
+
+    /* an answer that has fully arrived is kept */
+    h_submit(&h, "once more", NULL);
+    h.stop_at_request = 3;
+    CHECK(!h_run(&h));
+    feed_held(&h, 100000);
+    CHECK(pt_abort(h.a));
+    h_run(&h);
+    CHECK(h.done == 2 && h.aborted == 1);
+    h_free(&h);
+    pt_buf_free(&t);
+    pt_buf_free(&before);
+}
+
 static void test_claims(void)
 {
     host h;
@@ -585,6 +665,7 @@ int main(void)
     RUN(test_queue_and_req);
     RUN(test_resend_is_identical);
     RUN(test_claims);
+    RUN(test_abort);
     RUN(test_live_snapshots);
     return t_done("test_core");
 }
