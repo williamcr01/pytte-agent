@@ -1,0 +1,20 @@
+{
+  "turns": [
+    {
+      "content": [
+        {"type": "tool_call", "id": "big", "name": "bash", "args": {"command": "seq 1 10000"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "page", "name": "read_output", "args": {"call_id": "big", "offset": 38893, "limit": 30}},
+        {"type": "tool_call", "id": "miss", "name": "read_output", "args": {"call_id": "nope"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "Paged through the output."}
+      ]
+    }
+  ]
+}

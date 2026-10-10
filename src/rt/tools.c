@@ -1,6 +1,7 @@
 /* Tools in the runtime: the registry, the gate (permissions, section
  * 15.5) and running calls, with their output kept for the result: all of
- * it up to OUT_CAP, else its head and tail (section 12.2). */
+ * it up to OUT_CAP, else its head and tail, with the whole output in a
+ * blob (section 12.2). */
 #define _POSIX_C_SOURCE 200809L
 #include "rt/rt_int.h"
 
@@ -187,6 +188,8 @@ void pt_rt_run_tool(pt_rt *rt, const pt_fx *fx)
     c->tool = (uint32_t)k;
     c->started = pt_rt_now(rt);
     c->total = 0;
+    c->blob = NULL;
+    c->nospill = false;
     pt_buf_reset(&c->head);
     pt_buf_reset(&c->tail);
     rt->tools[k].run(rt->tools[k].ud, rt, fx);
@@ -197,6 +200,46 @@ void pt_rt_cancel_tool(pt_rt *rt, uint32_t fx)
     rt_call *c = find_call(rt, fx);
     if (c && rt->tools[c->tool].cancel)
         rt->tools[c->tool].cancel(rt->tools[c->tool].ud, rt, fx);
+}
+
+static void blob_abort(pt_rt *rt, rt_call *c)
+{
+    if (c->blob)
+        rt->c.store->blob_abort(rt->c.store, c->blob);
+    c->blob = NULL;
+}
+
+static bool blob_put(pt_rt *rt, rt_call *c, const char *p, size_t n)
+{
+    if (rt->c.store->blob_write(rt->c.store, c->blob, p, n) != 0) {
+        blob_abort(rt, c); /* the result still has the head and tail */
+        c->nospill = true;
+        return false;
+    }
+    pt_sha256_update(&c->sha, p, n);
+    return true;
+}
+
+/* Before keep(): once the output passes OUT_CAP, start a blob with
+ * everything so far (all still in head) and stream the rest into it. */
+static void spill(pt_rt *rt, rt_call *c, const char *p, size_t n)
+{
+    pt_store *st = rt->c.store;
+    if (c->nospill)
+        return;
+    if (!c->blob) {
+        if (c->total + n <= OUT_CAP)
+            return;
+        c->blob = st->blob_begin ? st->blob_begin(st) : NULL;
+        if (!c->blob) {
+            c->nospill = true;
+            return;
+        }
+        pt_sha256_init(&c->sha);
+        if (!blob_put(rt, c, c->head.p, c->head.n))
+            return;
+    }
+    blob_put(rt, c, p, n);
 }
 
 /* Keep p in the call's head and tail. Amortized O(n): the tail buffer
@@ -233,13 +276,14 @@ void pt_rt_tool_output(pt_rt *rt, uint32_t fx, const void *p, size_t n)
     rt_call *c = find_call(rt, fx);
     if (!c || !n)
         return;
+    spill(rt, c, (const char *)p, n);
     keep(c, (const char *)p, n);
     if (!rt->closing)
         pt_fx_data(rt->a, fx, p, n);
 }
 
 /* The kept output: whole, or head, a marker and tail. */
-static void kept_text(const rt_call *c, pt_buf *out)
+static void kept_text(const rt_call *c, bool stored, pt_buf *out)
 {
     pt_str tail = pt_buf_str(&c->tail);
     uint64_t omitted;
@@ -259,32 +303,86 @@ static void kept_text(const rt_call *c, pt_buf *out)
     pt_buf_puts(out, pt_buf_str(&c->head));
     pt_buf_putz(out, "\n\n…[");
     pt_buf_u64(out, omitted);
-    pt_buf_putz(out, " bytes omitted]…\n\n");
+    pt_buf_putz(out, stored ? " bytes omitted; read_output pages through them]…\n\n" : " bytes omitted]…\n\n");
     pt_buf_puts(out, tail);
+}
+
+/* Seal the call's blob: true with its reference merged into details. The
+ * blob is durable before the result that names it is committed. */
+static bool blob_seal(pt_rt *rt, rt_call *c, pt_str *details)
+{
+    static const char digits[] = "0123456789abcdef";
+    unsigned char d[32];
+    char hex[65];
+    pt_str in = *details;
+    pt_buf *b = &rt->scratch;
+    size_t i;
+    if (!c->blob)
+        return false;
+    if (rt->closing) {
+        blob_abort(rt, c);
+        return false;
+    }
+    pt_sha256_final(&c->sha, d);
+    for (i = 0; i < 32; i++) {
+        hex[2 * i] = digits[d[i] >> 4];
+        hex[2 * i + 1] = digits[d[i] & 15];
+    }
+    hex[64] = 0;
+    i = (size_t)rt->c.store->blob_commit(rt->c.store, c->blob, hex);
+    c->blob = NULL;
+    if (i != 0)
+        return false;
+    /* {"blob":"sha256:…","size":N, and the tool's own fields} */
+    pt_buf_putz(b, "{\"blob\":\"sha256:");
+    pt_buf_put(b, hex, 64);
+    pt_buf_putz(b, "\",\"size\":");
+    pt_buf_u64(b, c->total);
+    in = pt_str_trim(in);
+    if (in.n >= 2 && in.p[0] == '{' && in.p[in.n - 1] == '}') {
+        in = pt_str_trim((pt_str){in.p + 1, in.n - 2});
+        if (in.n) {
+            pt_buf_putz(b, ",");
+            pt_buf_puts(b, in);
+        }
+    }
+    pt_buf_putz(b, "}");
+    return true;
 }
 
 void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
 {
     rt_call *c = find_call(rt, fx), done;
     pt_tool_result res;
+    pt_str details = r->details;
+    size_t dn = 0;
+    bool stored;
     uint32_t i;
     if (!c)
         return;
     pt_buf_reset(&rt->scratch);
     if (r->content.p) { /* given whole: cut it the same way */
+        blob_abort(rt, c);
+        c->nospill = false;
         pt_buf_reset(&c->head);
         pt_buf_reset(&c->tail);
         c->total = 0;
+        spill(rt, c, r->content.p, r->content.n);
         keep(c, r->content.p, r->content.n);
     }
-    kept_text(c, &rt->scratch);
+    /* scratch: the merged details, then the text */
+    stored = blob_seal(rt, c, &details);
+    if (stored)
+        dn = rt->scratch.n;
+    kept_text(c, stored, &rt->scratch);
     pt_buf_puts(&rt->scratch, r->note);
-    if (!rt->scratch.n)
+    if (rt->scratch.n == dn)
         pt_buf_putz(&rt->scratch, "(no output)");
     memset(&res, 0, sizeof res);
-    res.content = rt->scratch.oom ? PT_S("out of memory keeping the output") : pt_buf_str(&rt->scratch);
+    res.content = rt->scratch.oom ? PT_S("out of memory keeping the output")
+                                  : (pt_str){rt->scratch.p + dn, rt->scratch.n - dn};
     res.is_error = r->is_error || rt->scratch.oom;
-    res.details = r->details;
+    res.details = stored && !rt->scratch.oom ? (pt_str){rt->scratch.p, dn} : r->details;
     res.doc_key = r->doc_key;
     res.doc_value = r->doc_value;
     /* The slot goes back to the free part of the array, buffers and all. */
@@ -303,7 +401,9 @@ void pt_rt_tools_stop(pt_rt *rt)
         uint32_t before = rt->ncalls;
         pt_rt_cancel_tool(rt, rt->calls[0].fx);
         if (rt->ncalls == before) { /* a tool that cannot stop: drop the call */
-            rt_call done = rt->calls[0];
+            rt_call done;
+            blob_abort(rt, &rt->calls[0]);
+            done = rt->calls[0];
             rt->calls[0] = rt->calls[--rt->ncalls];
             rt->calls[rt->ncalls] = done;
         }

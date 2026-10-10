@@ -73,6 +73,20 @@ out=$("$pytte" -p -m faux/faux --script tests/faux/tool_call.json "echo hi" 2>/d
 check "tool calls get an error result, then the run goes on" [ "$out" = "I'll echo that.
 The echo tool said: hi" ]
 
+out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/big_output.json "count" 2>/dev/null)
+check "a cut output can be paged" [ "$out" = "Paged through the output." ]
+if command -v jq >/dev/null; then
+    id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
+    results=$("$pytte" log "$id" --json | jq -c 'select(.kind == "tool_result")')
+    sum=$(seq 1 10000 | sha256sum | cut -c1-64)
+    check "...its whole output is a blob" sh -c 'printf "%s" "$1" | jq -se ".[0].data.details | .blob == \"sha256:$2\" and .size == 48894 and .exit == 0" >/dev/null' _ "$results" "$sum"
+    blob="$XDG_STATE_HOME/pytte/sessions/$id/blobs/$(echo "$sum" | cut -c1-2)/$(echo "$sum" | cut -c3-)"
+    check "...stored under its hash" [ "$(sha256sum <"$blob" | cut -c1-64)" = "$sum" ]
+    check "...the result says how to read it" sh -c 'printf "%s" "$1" | jq -se ".[0].data.content | contains(\"read_output pages through them\")" >/dev/null' _ "$results"
+    check "...read_output returns the asked bytes" sh -c 'printf "%s" "$1" | jq -se ".[1].data.content == \"8001\n8002\n8003\n8004\n8005\n8006\n…[bytes 38893-38923 of 48894; read on with offset 38923]\"" >/dev/null' _ "$results"
+    check "...and refuses an unknown call" sh -c 'printf "%s" "$1" | jq -se ".[2].data.is_error == true" >/dev/null' _ "$results"
+fi
+
 printf '%s' '{"turns": [[{"status": 529}, {"status": 400, "body": {"message": "bad request"}}]]}' \
     >"$XDG_STATE_HOME/fail.json"
 "$pytte" -p -m faux/faux --script "$XDG_STATE_HOME/fail.json" --retry-base-ms 1 x >/dev/null 2>&1

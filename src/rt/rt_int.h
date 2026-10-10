@@ -42,6 +42,10 @@ typedef struct rt_call {
     int64_t started;
     pt_buf head, tail;
     uint64_t total;
+    /* Output past OUT_CAP also goes, whole, to a blob (section 12.2). */
+    void *blob;
+    bool nospill; /* the store keeps no blobs, or writing one failed */
+    pt_sha256 sha;
 } rt_call;
 
 typedef struct rt_rule {

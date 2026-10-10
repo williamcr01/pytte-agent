@@ -94,7 +94,7 @@ typedef struct world {
     struct pend {
         struct world *w;
         uint32_t fx, timer;
-        bool used;
+        bool used, big;
     } pend[8];
     int64_t now;
     uint64_t rng;
@@ -202,10 +202,21 @@ static bool w_stop(void *ud)
     return false;
 }
 
+/* Where needle starts in s, or NULL. */
+static const char *find(pt_str s, const char *needle)
+{
+    size_t n = strlen(needle), i;
+    for (i = 0; i + n <= s.n; i++)
+        if (memcmp(s.p + i, needle, n) == 0)
+            return s.p + i;
+    return NULL;
+}
+
 /* ---- fake tools ----
  * count: unsafe, runs at once; how often each call ran is kept in the
  *        world, which outlives the process (an unsafe call runs at most once).
- * look:  safe and parallel; answers a little later, from a timer. */
+ * look:  safe and parallel; answers a little later, from a timer. Looking
+ *        at "big" outputs 20000 bytes: past the cap, so into a blob. */
 
 static void count_run(void *ud, pt_rt *rt, const pt_fx *fx)
 {
@@ -230,6 +241,15 @@ static void look_fire(void *ud, pt_rt *rt)
     p->used = false;
     memset(&r, 0, sizeof r);
     pt_rt_tool_output(rt, p->fx, "looking\n", 8);
+    if (p->big) {
+        char chunk[4000];
+        int k;
+        memset(chunk, 'x', sizeof chunk);
+        for (k = 0; k < 5; k++) {
+            chunk[0] = (char)('0' + k);
+            pt_rt_tool_output(rt, p->fx, chunk, sizeof chunk);
+        }
+    }
     r.note = PT_S("looked");
     pt_rt_tool_done(rt, p->fx, &r);
 }
@@ -247,6 +267,7 @@ static void look_run(void *ud, pt_rt *rt, const pt_fx *fx)
     w->pend[i].w = w;
     w->pend[i].fx = fx->id;
     w->pend[i].used = true;
+    w->pend[i].big = find(fx->args, "\"big\"") != NULL;
     w->pend[i].timer = pt_rt_timer(rt, pt_rt_now(rt) + 5, look_fire, &w->pend[i]);
 }
 
@@ -426,7 +447,18 @@ static void outcome(world *w, pt_buf *out)
             }
         } else if (strcmp(v.kind, "tool_result") == 0) {
             /* an unsafe call cut short by a crash says "interrupted" */
+            const char *ref = find(v.raw, "\"blob\":\"sha256:");
             pt_buf_puts(out, v.msg->name);
+            if (ref) { /* the whole output, read back from the blob */
+                char hex[65], back[32];
+                size_t got = 0;
+                uint64_t total = 0;
+                snprintf(hex, sizeof hex, "%.64s", ref + 15);
+                while (w->store->blob_read(w->store, hex, total, back, sizeof back, &got) == 0 && got)
+                    total += got;
+                pt_buf_putz(out, " blob ");
+                pt_buf_u64(out, total);
+            }
         } else {
             pt_buf_puts(out, v.msg->text);
         }
@@ -659,6 +691,10 @@ static const scenario scenarios[] = {
      "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Next.\"}]}]}",
      {"look twice", "then this", NULL}, ABORT_TOOL, 0, TOOLS_AUTO, 0},
+    {"big_output",
+     "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"big\"}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"That was long.\"}]}]}",
+     {"look at it all", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0},
     {"compact",
      "{\"chunk\":40,\"turns\":["
      "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG "\"}]},"
