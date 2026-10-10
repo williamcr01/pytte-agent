@@ -133,19 +133,24 @@ static void mkdirs(const char *path)
         die("cannot create", path);
 }
 
-/* YYYYMMDD-HHMMSS-xxxx: sorts by time. */
+/* YYYYMMDD-HHMMSS-xxxx: sorts by time. The first x is the time within the
+ * second (in 32 ms steps), the other three are random. */
 static void new_session_id(char *out, size_t cap)
 {
-    static const char b32[] = "abcdefghijklmnopqrstuvwxyz234567";
-    unsigned char r[4];
-    time_t now = time(NULL);
+    static const char b32[] = "234567abcdefghijklmnopqrstuvwxyz"; /* in ASCII order */
+    unsigned char r[3];
+    struct timespec ts;
     struct tm tm;
     size_t n;
     int i;
-    gmtime_r(&now, &tm);
+    clock_gettime(CLOCK_REALTIME, &ts);
+    gmtime_r(&ts.tv_sec, &tm);
     n = strftime(out, cap, "%Y%m%d-%H%M%S-", &tm);
     pt_sys_random(NULL, r, sizeof r);
-    for (i = 0; i < 4 && n + 1 < cap; i++)
+    if (n + 5 > cap)
+        return;
+    out[n++] = b32[ts.tv_nsec / 1000000 / 32];
+    for (i = 0; i < 3; i++)
         out[n++] = b32[r[i] & 31];
     out[n] = 0;
 }
