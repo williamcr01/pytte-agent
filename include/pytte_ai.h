@@ -303,6 +303,7 @@ typedef struct pt_faux_response {
 #define PT_FAUX_TURNS 64
 typedef struct pt_faux_state {
     uint32_t seen[PT_FAUX_TURNS];
+    uint32_t compact_seen; /* compaction requests answered */
 } pt_faux_state;
 
 /* The faux "server": answers a request built for the faux API from a script

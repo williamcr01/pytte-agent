@@ -24,21 +24,41 @@ typedef struct entry {
     uint32_t id, epoch;
     ent_kind kind;
     pt_msg msg; /* epoch: the system prompt; notes: role system */
+    pt_str summary, request; /* epoch after compaction: the summary, the request being worked on */
     bool to_model;
     pt_str raw;
 } entry;
 
-typedef enum { TASK_RUN, TASK_TOOL } task_kind;
+typedef enum { TASK_RUN, TASK_TOOL, TASK_COMPACT } task_kind;
 typedef enum { ST_PENDING, ST_RUNNING, ST_WAITING, ST_DONE } task_status;
-/* run: prepare, request, retry, tools; tool: call, approve, execute */
-typedef enum { PH_PREPARE, PH_REQUEST, PH_RETRY, PH_TOOLS, PH_CALL, PH_APPROVE, PH_EXECUTE } task_phase;
+/* run: prepare, request, retry, tools, compact_wait; tool: call, approve,
+ * execute; compact: prepare, request, retry */
+typedef enum {
+    PH_PREPARE, PH_REQUEST, PH_RETRY, PH_TOOLS, PH_CALL, PH_APPROVE, PH_EXECUTE, PH_COMPACT
+} task_phase;
 
 typedef struct run_live run_live;
 typedef struct tool_live tool_live;
 
+/* A request in flight (run.c): the run's, or a compaction's. */
+struct run_live {
+    pt_agent *agent;
+    uint32_t task;
+    bool quiet;  /* a compaction: no stream events, no live file */
+    pt_arena a;  /* request and final message */
+    pt_ai_target target;
+    pt_http_req req;
+    pt_ai_stream *s;
+    uint32_t http_fx;
+    bool http_done, finished;
+    int64_t last_live;
+    bool dirty; /* content arrived since the last snapshot */
+    pt_buf snap;
+};
+
 typedef struct task {
     /* durable: the newest task record */
-    uint32_t id, input, owner; /* owner: the run a tool task belongs to */
+    uint32_t id, input, owner; /* owner: the run a tool or compact task belongs to */
     task_kind kind;
     task_status status;
     task_phase phase;
@@ -52,6 +72,7 @@ typedef struct task {
     pt_str args;        /* tool: arguments a gate rewrote; empty: as called */
     pt_str prompt;      /* tool approve */
     pt_replay replay;   /* tool execute */
+    uint32_t compact;   /* run compact_wait: the compact task */
     bool abort;         /* an abort was requested (section 8.4) */
     pt_str outcome, reason; uint32_t result;           /* done */
     pt_arena a; /* owns the strings above */
@@ -115,7 +136,7 @@ typedef struct queued_fx {
     pt_buf bytes; /* LIVE snapshots */
 } queued_fx;
 
-typedef enum { AFTER_NONE, AFTER_RETRY, AFTER_RUN_DONE } after_kind;
+typedef enum { AFTER_NONE, AFTER_RETRY, AFTER_RUN_DONE, AFTER_COMPACT } after_kind;
 
 struct pt_agent {
     pt_opts o;
@@ -148,6 +169,7 @@ struct pt_agent {
 
     /* requested session writes */
     bool want_create, want_open, want_close, closing, closed;
+    bool want_compact; /* pt_compact: commit a compact task when no run is active */
     pt_session_cfg create;
     pt_identity me;
     pt_str my_token, takeover;
@@ -202,11 +224,15 @@ entry *pt_core_last_entry(pt_agent *a);
  * between these two. */
 void pt_core_entry_begin(pt_agent *a, uint32_t id, const char *kind);
 void pt_core_entry_end(pt_agent *a);
+/* ...in a given epoch (a new epoch's own entry). */
+void pt_core_entry_head(pt_agent *a, uint32_t id, const char *kind, uint32_t epoch);
 
 /* Entry by ID in the current epoch, or NULL. */
 entry *pt_core_entry(pt_agent *a, uint32_t id);
 /* A doc record in the commit being written; value is valid JSON. */
 void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value);
+/* ...or write the value with a->cw, then pt_jw_obj_end(&a->cw). */
+void pt_core_doc_begin(pt_agent *a, pt_str key);
 /* Remember what to tell the host after the commit lands. */
 void pt_core_after(pt_agent *a, after_kind k, const char *outcome, pt_str error, int64_t until);
 /* Queue a cancel of effect fx_id, on behalf of a task. */
@@ -240,6 +266,34 @@ bool pt_run_http_done(pt_agent *a, uint32_t fx, const char *error);
 /* A tool round is done: begin the next request (or end an aborted run). */
 void pt_run_write_tool_error(pt_agent *a, uint32_t id, pt_str call_id, pt_str name, pt_str text);
 void pt_run_write_assistant(pt_agent *a, uint32_t id, const pt_msg *m);
+
+/* Shared with compact.c: the model, its key, the backoff, and requests. */
+bool pt_run_resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar);
+bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred);
+int64_t pt_run_backoff(pt_agent *a, uint32_t attempt, int64_t retry_after_ms);
+/* Send t's request (t->live): the context through t->cutoff, or for a
+ * compact task its summarization request. */
+bool pt_run_start(pt_agent *a, task *t);
+/* The retry sleep of a run or compact task in PH_RETRY. */
+bool pt_run_sleep(pt_agent *a, task *t);
+void pt_run_write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int64_t retry_at);
+/* Record the tokens of a message in the usage doc (in the open commit). */
+void pt_run_add_usage(pt_agent *a, const pt_msg *m, pt_str model);
+
+/* ---- compact.c ---- */
+/* True when the epoch holds an answer from the model, so a summary can
+ * make it smaller (and compaction cannot repeat without progress). */
+bool pt_compact_possible(pt_agent *a);
+/* Write a new compact task into the open commit; returns its ID. */
+uint32_t pt_compact_write(pt_agent *a, uint32_t owner, uint32_t cutoff);
+bool pt_compact_step(pt_agent *a, task *t);
+/* The summarization request of a compact task. */
+bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena *ar);
+/* The request of a compact task finished (t->live->finished). */
+bool pt_compact_finish(pt_agent *a, task *t);
+/* Abort a compaction: done(aborted) into the open commit; returns the
+ * effect to cancel after the commit is queued, or 0. */
+uint32_t pt_compact_abort(pt_agent *a, task *t);
 
 /* ---- task_tool.c ---- */
 bool pt_tool_step(pt_agent *a, task *t);

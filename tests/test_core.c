@@ -350,7 +350,7 @@ static void test_ask(void)
     CHECK(h_reload(&h) == PT_LOAD_OK);
     transcript(h.a, &after);
     CHECK_SAME(pt_buf_str(&after), pt_buf_str(&before));
-    CHECK(h.a->next_id == 8);
+    CHECK(h.a->next_id == 9); /* ...the usage doc took one */
     CHECK(pt_idle(h.a));
     h_free(&h);
     pt_buf_free(&before);

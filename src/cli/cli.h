@@ -50,7 +50,7 @@ typedef struct cli_opts {
     const char *model, *system, *append_system, *script;
     pt_reasoning reasoning;
     pt_perm_mode perm;
-    uint32_t max_tokens, retry_base_ms;
+    uint32_t max_tokens, retry_base_ms, context_window;
     bool no_sync, force, continue_current;
     bool (*stop)(void *ud); /* polled by pt_rt_run (print mode) */
 } cli_opts;

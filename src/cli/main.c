@@ -23,7 +23,9 @@ static const char usage[] =
     "       pytte -c | -r [ID] [PROMPT]   continue this directory's newest session, or ID\n"
     "       pytte -p [options] [PROMPT]   print mode: run until done, print the answer\n"
     "                                     (PROMPT from stdin when it is piped)\n"
-    "       pytte log [ID] [--json]       print a session's transcript\n"
+    "       pytte log [ID] [--json] [--all-epochs]\n"
+    "                                     print a session's transcript (by default\n"
+    "                                     since the last compaction)\n"
     "       pytte approve ID TASK yes|no  answer a tool call waiting for approval,\n"
     "                                     then go on as -p would\n"
     "\n"
@@ -35,6 +37,7 @@ static const char usage[] =
     "  --effort LEVEL          off, minimal, low, medium, high, xhigh, max ($PYTTE_EFFORT)\n"
     "                          starts at medium unless configured otherwise\n"
     "  --max-tokens N          default: the model's maximum that fits the context\n"
+    "  --context-window N      compact as if the model's window were N tokens\n"
     "  --system-prompt TEXT    system prompt of a new session\n"
     "  --append-system-prompt TEXT\n"
     "  --output-format FMT     with -p: text (default), json (one object at the end),\n"
@@ -54,7 +57,7 @@ enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 typedef struct opts {
     cli_opts c;
     const char *cmd_log, *cmd_approve, *id, *prompt, *task, *answer;
-    bool print, cont, resume, json, model_flag, effort_flag, perm_flag;
+    bool print, cont, resume, json, all_epochs, model_flag, effort_flag, perm_flag;
     int out;
 } opts;
 
@@ -95,6 +98,8 @@ static void parse_args(int argc, char **argv, opts *o)
                 o->id = argv[++i];
         } else if (strcmp(a, "--json") == 0) { /* log */
             o->json = true;
+        } else if (strcmp(a, "--all-epochs") == 0) { /* log */
+            o->all_epochs = true;
         } else if (strcmp(a, "--no-sync") == 0) {
             o->c.no_sync = true;
         } else if (strcmp(a, "--force") == 0) {
@@ -125,12 +130,14 @@ static void parse_args(int argc, char **argv, opts *o)
                 o->out = OUT_STREAM;
             else
                 die("unknown output format", v);
-        } else if (TAKES("--max-tokens") || TAKES("--retry-base-ms")) {
+        } else if (TAKES("--max-tokens") || TAKES("--retry-base-ms") || TAKES("--context-window")) {
             uint64_t n;
             if (!pt_str_to_u64(pt_strz(v), &n) || n == 0 || n > UINT32_MAX)
                 die("bad number", v);
             if (strcmp(a, "--max-tokens") == 0)
                 o->c.max_tokens = (uint32_t)n;
+            else if (strcmp(a, "--context-window") == 0)
+                o->c.context_window = (uint32_t)n;
             else
                 o->c.retry_base_ms = (uint32_t)n; /* for tests */
         } else if (strcmp(a, "--") == 0 && v) {
@@ -481,6 +488,8 @@ static void print_entry(const pt_entry_view *v, bool tty)
     uint32_t i;
     if (strcmp(v->kind, "epoch") == 0) {
         printf("%s[epoch %u] %.*s%s\n\n", dim, v->epoch, (int)m->text.n, m->text.p, reset);
+        if (v->summary.n)
+            printf("%s[summary] %.*s%s\n\n", dim, (int)v->summary.n, v->summary.p, reset);
     } else if (strcmp(v->kind, "user") == 0) {
         printf("%s> %.*s%s\n\n", tty ? "\x1b[1m" : "", (int)m->text.n, m->text.p, reset);
     } else if (strcmp(v->kind, "assistant") == 0) {
@@ -536,6 +545,7 @@ static int cmd_log(const opts *o)
         die("cannot read", path);
     memset(&ao, 0, sizeof ao);
     ao.alloc = pt_sys_allocator();
+    ao.all_epochs = o->all_epochs;
     a = pt_new(&ao);
     for (i = 0; i < n; i++) {
         pt_load_result r;

@@ -484,6 +484,46 @@ static void test_approval(void)
     pty_free(&p);
 }
 
+/* A small context window: the session compacts and goes on; /usage and
+ * /compact. */
+static void test_compaction(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/long.json", "--context-window", "500", NULL};
+    pty_start(&p, 24, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "q1\r");
+    CHECK(wait_for(&p, "One. Lorem", 3000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "/compact\r");
+    CHECK(wait_for(&p, "Compacted: the model continues from a summary (ctrl+o shows it)", 3000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "/compact\r");
+    CHECK(wait_for(&p, "nothing to compact yet", 3000));
+    keys(&p, "q2\r");
+    CHECK(wait_for(&p, "Two. Duis", 3000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "q3\r");
+    CHECK(wait_for(&p, "Three. Sed", 3000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "q4\r");
+    CHECK(wait_for(&p, "Four. Nemo", 5000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "q5\r");
+    CHECK(wait_for(&p, "Five. Neque", 5000));
+    CHECK(wait_idle(&p, 3000));
+    if (count(&p, "Compacted: the model") != 2) /* the second time by itself */
+        fprintf(stderr, "%s\n", p.scratch.p);
+    CHECK(count(&p, "Compacted: the model") == 2);
+    keys(&p, "/usage\r");
+    CHECK(wait_for(&p, "faux/faux: ", 3000));
+    CHECK(has(&p, "requests"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+}
+
 /* The slash menu, /model, /effort, /thinking (saved), /status, /help. */
 static void test_commands(void)
 {
@@ -497,10 +537,10 @@ static void test_commands(void)
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
     CHECK(wait_for(&p, "▸ /model     set the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/9", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "enter run · esc close · 1/11", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "▸ /quit", 1000));
-    CHECK(wait_for(&p, "9/9", 1000));
+    CHECK(wait_for(&p, "11/11", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "▸ /model", 1000));
     keys(&p, "th\t");
@@ -738,6 +778,7 @@ int main(void)
     RUN(test_suspend_and_signals);
     RUN(test_interrupt_and_queue);
     RUN(test_approval);
+    RUN(test_compaction);
     RUN(test_resize_while_streaming);
     RUN(test_commands);
     RUN(test_history_pager_draft);

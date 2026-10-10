@@ -1,0 +1,388 @@
+/* The compact task (sections 8.3 and 12.3): a summary of the current epoch
+ * becomes the first user content of a new one.
+ *
+ *   prepare ──► request ──► done: epoch n+1 (and the waiting run → prepare)
+ *      ▲          │
+ *      └── retry ◄┘ (sleep)
+ *
+ * The summarization request is the epoch written out as plain text, so it
+ * needs no tools and fits whatever model summarizes it. Like a run's, it
+ * is built from committed state only and is the same when sent again. */
+#include "core/core.h"
+
+#include <string.h>
+
+#define CUT 2048            /* bytes kept of each tool call's input and result */
+#define SUMMARY_TOKENS 8192 /* at most, for the summary */
+
+static const char instructions[] =
+    "You write the summary that replaces the history of a long coding session, so that the work "
+    "can go on in a fresh context window. Whoever continues sees only your summary, so it must "
+    "stand on its own. Cover:\n"
+    "- the user's goals and constraints, and decisions made with the user;\n"
+    "- files read, created and changed (paths), and what changed in them;\n"
+    "- commands that mattered and what they showed (errors, test results);\n"
+    "- the current state of the work, open problems and the next steps;\n"
+    "- the user's latest request, quoted in full.\n"
+    "Be specific (names, paths, numbers) and concise. Write only the summary.";
+
+static const char ask[] = "\n\nWrite the summary of the session above now.";
+static const char gap[] = "\n\n[... the middle of the session is left out ...]\n\n";
+
+static bool sent_answer(const entry *e)
+{
+    return e->kind == ENT_ASSISTANT && e->msg.stop != PT_STOP_ERROR && e->msg.stop != PT_STOP_ABORTED;
+}
+
+bool pt_compact_possible(pt_agent *a)
+{
+    uint32_t i;
+    for (i = 0; i < a->nentries; i++)
+        if (sent_answer(&a->entries[i]))
+            return true;
+    return false;
+}
+
+uint32_t pt_compact_write(pt_agent *a, uint32_t owner, uint32_t cutoff)
+{
+    task ct;
+    memset(&ct, 0, sizeof ct);
+    ct.id = pt_core_new_id(a);
+    ct.kind = TASK_COMPACT;
+    ct.owner = owner;
+    ct.status = ST_PENDING;
+    ct.phase = PH_PREPARE;
+    ct.attempt = 1;
+    ct.cutoff = cutoff;
+    pt_write_task(&a->cw, &ct);
+    return ct.id;
+}
+
+/* ---- the request ---- */
+
+/* s, or its head and tail around a marker when it is longer than max. */
+static void put_cut(pt_buf *b, pt_str s, size_t max)
+{
+    size_t h = max / 2, t = max / 2;
+    if (s.n <= max) {
+        pt_buf_puts(b, s);
+        return;
+    }
+    while (h && ((unsigned char)s.p[h] & 0xC0) == 0x80) /* whole characters */
+        h--;
+    while (t && ((unsigned char)s.p[s.n - t] & 0xC0) == 0x80)
+        t--;
+    pt_buf_put(b, s.p, h);
+    pt_buf_putz(b, "\n…[");
+    pt_buf_u64(b, s.n - h - t);
+    pt_buf_putz(b, " bytes omitted]…\n");
+    pt_buf_put(b, s.p + s.n - t, t);
+}
+
+static void transcript(pt_agent *a, uint32_t cutoff, pt_buf *b)
+{
+    uint32_t i, k;
+    for (i = 0; i < a->nentries && a->entries[i].id <= cutoff; i++) {
+        const entry *e = &a->entries[i];
+        const pt_msg *m = &e->msg;
+        switch (e->kind) {
+        case ENT_EPOCH:
+            if (e->summary.n) {
+                pt_buf_putz(b, "[summary of the session before]\n");
+                pt_buf_puts(b, e->summary);
+                pt_buf_putz(b, "\n\n");
+            }
+            if (e->request.n) {
+                pt_buf_putz(b, "[user]\n");
+                pt_buf_puts(b, e->request);
+                pt_buf_putz(b, "\n\n");
+            }
+            break;
+        case ENT_USER:
+            pt_buf_putz(b, "[user]\n");
+            pt_buf_puts(b, m->text);
+            pt_buf_putz(b, "\n\n");
+            break;
+        case ENT_ASSISTANT:
+            if (!sent_answer(e))
+                break;
+            pt_buf_putz(b, "[assistant]\n");
+            for (k = 0; k < m->nblocks; k++) {
+                const pt_block *bl = &m->blocks[k];
+                if (bl->kind == PT_BLOCK_TEXT) {
+                    pt_buf_puts(b, bl->text);
+                    pt_buf_putc(b, '\n');
+                } else if (bl->kind == PT_BLOCK_TOOL_CALL) {
+                    pt_buf_putz(b, "[tool call: ");
+                    pt_buf_puts(b, bl->name);
+                    pt_buf_putz(b, "] ");
+                    put_cut(b, bl->args, CUT);
+                    pt_buf_putc(b, '\n');
+                }
+            }
+            pt_buf_putc(b, '\n');
+            break;
+        case ENT_TOOL_RESULT:
+            pt_buf_putz(b, "[tool result: ");
+            pt_buf_puts(b, m->name);
+            pt_buf_putz(b, m->is_error ? ", error]\n" : "]\n");
+            put_cut(b, m->text, CUT);
+            pt_buf_putz(b, "\n\n");
+            break;
+        case ENT_NOTE:
+            if (e->to_model) {
+                pt_buf_putz(b, "[note]\n");
+                pt_buf_puts(b, m->text);
+                pt_buf_putz(b, "\n\n");
+            }
+            break;
+        case ENT_ERROR:
+            break;
+        }
+    }
+}
+
+bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena *ar)
+{
+    pt_ai_target target;
+    pt_msg *msgs = (pt_msg *)pt_arena_zalloc(ar, sizeof(pt_msg) * 2);
+    uint64_t window, budget;
+    pt_buf b;
+    pt_str all;
+    char *p;
+    size_t n, head, tail;
+    if (!msgs || !pt_run_resolve(a, t->model, &target, ar))
+        return false;
+    window = a->o.config.context_window ? a->o.config.context_window : target.model.context_window;
+    /* about 3 bytes per token, leaving room for the summary */
+    budget = window > (uint64_t)t->max_tokens + 2048 ? (window - t->max_tokens - 2048) * 3 : 0;
+    if (budget < 16384)
+        budget = 16384;
+    pt_buf_init(&b, a->al);
+    transcript(a, t->cutoff, &b);
+    all = pt_buf_str(&b);
+    head = all.n;
+    tail = 0;
+    if (all.n > budget) { /* keep the start (the goal) and the most recent work */
+        head = (size_t)(budget / 5);
+        tail = (size_t)(budget - head);
+        while (head && ((unsigned char)all.p[head] & 0xC0) == 0x80)
+            head--;
+        while (tail && ((unsigned char)all.p[all.n - tail] & 0xC0) == 0x80)
+            tail--;
+    }
+    n = head + (tail ? sizeof gap - 1 + tail : 0) + sizeof ask - 1;
+    p = b.oom ? NULL : (char *)pt_arena_alloc(ar, n);
+    if (p) {
+        char *q = p;
+        if (head)
+            memcpy(q, all.p, head);
+        q += head;
+        if (tail) {
+            memcpy(q, gap, sizeof gap - 1);
+            q += sizeof gap - 1;
+            memcpy(q, all.p + all.n - tail, tail);
+            q += tail;
+        }
+        memcpy(q, ask, sizeof ask - 1);
+    }
+    pt_buf_free(&b);
+    if (!p)
+        return false;
+    msgs[0].role = PT_ROLE_SYSTEM;
+    msgs[0].text = PT_S(instructions);
+    msgs[1].role = PT_ROLE_USER;
+    msgs[1].text = (pt_str){p, n};
+    out->msgs = msgs;
+    out->nmsgs = 2;
+    out->tools = NULL;
+    out->ntools = 0;
+    return true;
+}
+
+/* ---- the steps ---- */
+
+/* Pin the model and how long the summary may be. Pure, like a run's. */
+static bool prepare(pt_agent *a, task *t, uint32_t attempt)
+{
+    pt_arena *sa = &a->scratch;
+    const pt_config *c = &a->o.config;
+    pt_ai_target target;
+    pt_credentials cred;
+    task nt = *t;
+    pt_buf ref;
+    bool ok;
+    if (!pt_run_resolve(a, c->model, &target, sa) || !pt_run_credentials(a, target.provider, &cred))
+        return false;
+    pt_buf_init(&ref, a->al);
+    pt_buf_putz(&ref, target.provider->id);
+    pt_buf_putc(&ref, '/');
+    pt_buf_putz(&ref, target.model.id);
+    nt.status = ST_RUNNING;
+    nt.phase = PH_REQUEST;
+    nt.attempt = attempt;
+    nt.model = pt_buf_str(&ref);
+    nt.reasoning = c->reasoning;
+    nt.max_tokens = target.model.max_tokens && target.model.max_tokens < SUMMARY_TOKENS
+                        ? target.model.max_tokens
+                        : SUMMARY_TOKENS;
+    pt_core_commit_begin(a, t->id);
+    pt_write_task(&a->cw, &nt);
+    ok = pt_core_commit_end(a);
+    pt_buf_free(&ref);
+    return ok;
+}
+
+/* The tools array of the current epoch, as it was frozen. */
+static pt_str epoch_tools(pt_agent *a)
+{
+    const pt_json *r = a->nentries ? pt_json_parse(a->entries[0].raw, &a->scratch, NULL) : NULL;
+    const pt_json *tools = pt_json_get(pt_json_get(r, "data"), "tools");
+    return pt_json_is(tools, PT_J_ARR) ? tools->raw : PT_S("[]");
+}
+
+static void end_owner(pt_agent *a, task *run, bool ok, pt_str why)
+{
+    task nt;
+    input *in;
+    if (!run || run->status == ST_DONE || run->phase != PH_COMPACT)
+        return;
+    nt = *run;
+    if (ok) {
+        nt.status = ST_RUNNING;
+        nt.phase = PH_PREPARE;
+        nt.attempt = 1;
+        pt_write_task(&a->cw, &nt);
+        return;
+    }
+    nt.status = ST_DONE;
+    nt.outcome = PT_S("failed");
+    nt.reason = why;
+    nt.result = 0;
+    pt_write_task(&a->cw, &nt);
+    if ((in = pt_core_input(a, run->input))) {
+        input nin = *in;
+        nin.status = IN_FAILED;
+        pt_write_input(&a->cw, &nin);
+    }
+    pt_core_after(a, AFTER_RUN_DONE, "failed", why, 0);
+}
+
+/* The summary arrived (a new epoch), or the request failed. */
+bool pt_compact_finish(pt_agent *a, task *t)
+{
+    run_live *rl = t->live;
+    const pt_msg *m = pt_ai_stream_message(rl->s);
+    const pt_ai_error *e = pt_ai_stream_error(rl->s);
+    task *run = t->owner ? pt_core_task(a, t->owner) : NULL;
+    input *in = run ? pt_core_input(a, run->input) : NULL;
+    task nt = *t;
+    pt_buf summary, why;
+    pt_jw *w = &a->cw;
+    uint32_t i;
+    bool ok;
+    pt_buf_init(&summary, a->al);
+    pt_buf_init(&why, a->al);
+    for (i = 0; i < m->nblocks; i++)
+        if (m->blocks[i].kind == PT_BLOCK_TEXT)
+            pt_buf_puts(&summary, m->blocks[i].text);
+    pt_core_commit_begin(a, t->id);
+    if ((m->stop == PT_STOP_STOP || m->stop == PT_STOP_LENGTH) && summary.n) {
+        uint32_t id = pt_core_new_id(a);
+        pt_core_entry_head(a, id, "epoch", a->cur_epoch + 1);
+        pt_jw_key(w, "n");
+        pt_jw_uint(w, a->cur_epoch + 1);
+        pt_jw_key(w, "system");
+        pt_jw_str(w, a->nentries ? a->entries[0].msg.text : PT_STR_NULL);
+        pt_jw_key(w, "tools");
+        pt_jw_raw(w, epoch_tools(a));
+        pt_jw_key(w, "skills");
+        pt_jw_raw(w, PT_S("[]"));
+        pt_jw_key(w, "summary");
+        pt_jw_str(w, pt_buf_str(&summary));
+        if (in && in->text.n) {
+            pt_jw_key(w, "request");
+            pt_jw_str(w, in->text);
+        }
+        pt_jw_key(w, "compacted");
+        pt_jw_uint(w, t->cutoff);
+        pt_core_entry_end(a);
+        nt.status = ST_DONE;
+        nt.outcome = PT_S("completed");
+        nt.result = id;
+        pt_write_task(w, &nt);
+        end_owner(a, run, true, PT_STR_NULL);
+        if (!run)
+            pt_core_after(a, AFTER_COMPACT, "completed", PT_STR_NULL, 0);
+    } else if (m->stop != PT_STOP_STOP && m->stop != PT_STOP_LENGTH && e->cls == PT_ERR_RETRYABLE) {
+        int64_t until = pt_core_now(a) + pt_run_backoff(a, t->attempt, e->retry_after_ms);
+        pt_run_write_error(a, t->attempt, e, until);
+        nt.phase = PH_RETRY;
+        nt.until = until;
+        pt_core_after(a, AFTER_RETRY, "", e->message, until);
+    } else {
+        pt_buf_putz(&why, "compaction failed: ");
+        if (e->message.n)
+            pt_buf_puts(&why, e->message);
+        else
+            pt_buf_putz(&why, m->stop == PT_STOP_REFUSAL ? "the model refused" : "the summary was empty");
+        if (e->cls != PT_ERR_NONE)
+            pt_run_write_error(a, t->attempt, e, 0);
+        nt.status = ST_DONE;
+        nt.outcome = PT_S("failed");
+        nt.reason = pt_buf_str(&why);
+        pt_write_task(w, &nt);
+        end_owner(a, run, false, pt_buf_str(&why));
+        if (!run)
+            pt_core_after(a, AFTER_COMPACT, "failed", pt_buf_str(&why), 0);
+    }
+    pt_run_add_usage(a, m, t->model);
+    ok = !summary.oom && !why.oom && pt_core_commit_end(a);
+    pt_buf_free(&summary);
+    pt_buf_free(&why);
+    if (!rl->http_done)
+        pt_core_cancel(a, t->id, rl->http_fx);
+    pt_run_free_live(a, t);
+    return ok;
+}
+
+bool pt_compact_step(pt_agent *a, task *t)
+{
+    switch (t->phase) {
+    case PH_PREPARE:
+        return prepare(a, t, t->attempt ? t->attempt : 1);
+    case PH_RETRY:
+        if (t->woke) {
+            t->woke = false;
+            return prepare(a, t, t->attempt + 1);
+        }
+        return pt_run_sleep(a, t);
+    case PH_REQUEST:
+        if (!t->live) {
+            pt_event ev;
+            memset(&ev, 0, sizeof ev);
+            ev.kind = PT_E_COMPACT;
+            ev.task = t->id;
+            ev.outcome = PT_S("started");
+            pt_core_emit(a, &ev);
+            return pt_run_start(a, t);
+        }
+        if (t->live->finished)
+            return pt_compact_finish(a, t);
+        return false;
+    default:
+        return false;
+    }
+}
+
+uint32_t pt_compact_abort(pt_agent *a, task *t)
+{
+    task nt = *t;
+    uint32_t fx = t->live && !t->live->http_done ? t->live->http_fx : t->phase == PH_RETRY ? t->fx : 0;
+    nt.status = ST_DONE;
+    nt.outcome = PT_S("aborted");
+    nt.reason = PT_S("interrupted by the user");
+    nt.result = 0;
+    pt_write_task(&a->cw, &nt);
+    return fx;
+}

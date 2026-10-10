@@ -369,6 +369,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     ao.config.reasoning = o->reasoning;
     ao.config.max_tokens = o->max_tokens;
     ao.config.retry_base_ms = o->retry_base_ms;
+    ao.config.context_window = o->context_window;
     ao.config.no_sync = o->no_sync;
     memset(&rc, 0, sizeof rc);
     rc.store = st;

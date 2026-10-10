@@ -146,7 +146,7 @@ static void world_free(world *w)
     rh_free(&w->http->vt);
 }
 
-enum { ABORT_NONE, ABORT_STREAM, ABORT_RETRY, ABORT_TOOL };
+enum { ABORT_NONE, ABORT_STREAM, ABORT_RETRY, ABORT_TOOL, ABORT_COMPACT };
 enum { TOOLS_NONE, TOOLS_AUTO, TOOLS_ASK };
 
 /* The user interrupts the first prompt's run: after abort_after stream
@@ -158,6 +158,7 @@ struct scenario {
     int abort;
     uint32_t abort_after;
     int tools; /* fake tools, run without asking or approved by the client */
+    uint32_t window; /* context window (tokens), to make it compact */
 };
 
 static task *first_run(world *w)
@@ -185,10 +186,16 @@ static bool w_stop(void *ud)
 {
     world *w = (world *)ud;
     task *t = first_run(w);
+    uint32_t i;
+    if (w->sc->abort == ABORT_COMPACT) /* whichever run waits for a summary */
+        for (i = 0, t = NULL; i < w->agent->ntasks; i++)
+            if (w->agent->tasks[i]->phase == PH_COMPACT && w->agent->tasks[i]->status != ST_DONE)
+                t = w->agent->tasks[i];
     if (!w->aborted && t && t->status != ST_DONE &&
         ((w->sc->abort == ABORT_STREAM && w->streamed >= w->sc->abort_after) ||
          (w->sc->abort == ABORT_RETRY && t->phase == PH_RETRY) ||
-         (w->sc->abort == ABORT_TOOL && t->phase == PH_TOOLS))) {
+         (w->sc->abort == ABORT_TOOL && t->phase == PH_TOOLS) ||
+         (w->sc->abort == ABORT_COMPACT && t->phase == PH_COMPACT))) {
         w->aborted = true;
         CHECK(pt_abort(w->agent));
     }
@@ -311,6 +318,7 @@ static pt_rt_result client(world *w, const scenario *sc)
     o.on_event = w_event;
     o.config.model = PT_S("faux/faux");
     o.config.live_interval_ms = 1;
+    o.config.context_window = sc->window;
     a = pt_new(&o);
     w->sc = sc;
     w->agent = a;
@@ -406,6 +414,15 @@ static void outcome(world *w, pt_buf *out)
                 pt_buf_putc(out, '|');
                 pt_buf_puts(out, v.msg->blocks[j].kind == PT_BLOCK_TOOL_CALL ? v.msg->blocks[j].name
                                                                              : v.msg->blocks[j].text);
+            }
+        } else if (strcmp(v.kind, "epoch") == 0) {
+            pt_entry_view *ev = &v;
+            pt_buf_puts(out, ev->msg->text);
+            if (a->entries[i].summary.n) {
+                pt_buf_putz(out, " / summary: ");
+                pt_buf_puts(out, a->entries[i].summary);
+                pt_buf_putz(out, " / request: ");
+                pt_buf_puts(out, a->entries[i].request);
             }
         } else if (strcmp(v.kind, "tool_result") == 0) {
             /* an unsafe call cut short by a crash says "interrupted" */
@@ -504,6 +521,7 @@ static void check_against(const scenario *sc, world *w, const pt_buf *want, cons
     for (i = 0; i < w->http->n; i++) {
         const char *bi = w->http->bodies[i];
         int64_t ti = field_of(bi, "turn"), mi = field_of(bi, "messages");
+        bool ci = strstr(bi, "\"compact\":true") != NULL;
         uint32_t j;
         t_checks++;
         if (ti == 0 && !known_request(ref, bi)) {
@@ -513,7 +531,10 @@ static void check_against(const scenario *sc, world *w, const pt_buf *want, cons
         }
         for (j = 0; j < i; j++) {
             t_checks++;
-            if (field_of(w->http->bodies[j], "messages") == mi && strcmp(w->http->bodies[j], bi) != 0) {
+            const char *bj = w->http->bodies[j];
+            /* the same point of the same epoch: turn, messages, and whether it is a summary */
+            if (field_of(bj, "messages") == mi && field_of(bj, "turn") == ti &&
+                (strstr(bj, "\"compact\":true") != NULL) == ci && strcmp(bj, bi) != 0) {
                 t_failed++;
                 fprintf(stderr, "%s: crash at commit %u (%s): a history of %lld messages was sent with different bytes:\n%s\n%s\n",
                         sc->name, n, how, (long long)mi, w->http->bodies[j], bi);
@@ -579,40 +600,45 @@ static void exhaustive(const scenario *sc)
     pt_buf_free(&want);
 }
 
+#define LONG                                                                                       \
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut "  \
+    "labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco "     \
+    "laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit."
+
 static const scenario scenarios[] = {
     {"answer",
      "{\"chunk\":7,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Easy.\"},"
      "{\"type\":\"text\",\"text\":\"The answer is 450, since 25 times 18 is 450.\"}]}]}",
-     {"what is 25*18?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
+     {"what is 25*18?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
     {"retry",
      "{\"chunk\":7,\"turns\":[[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"This stream gets cut off somewhere in the middle\"}],"
      "\"cut\":150},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Third time lucky.\"}]}]]}",
-     {"go", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
+     {"go", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
     {"tool_round",
      "{\"chunk\":9,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Let me look.\"},"
      "{\"type\":\"tool_call\",\"name\":\"bash\",\"args\":{\"cmd\":\"ls\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"No tools here, so I will just answer.\"}]}]}",
-     {"list the files", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
+     {"list the files", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
     {"fatal",
      "{\"turns\":[{\"status\":401,\"body\":{\"class\":\"fatal\",\"message\":\"invalid key\"}}]}",
-     {"hello?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
+     {"hello?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
     {"length",
      "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"This is cut by max_tok\"}],"
      "\"stop\":\"length\"}]}",
-     {"write a novel", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
+     {"write a novel", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
     {"two_inputs",
      "{\"chunk\":6,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First answer.\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Second answer.\"}]}]}",
-     {"first question", "second question", NULL}, ABORT_NONE, 0, TOOLS_NONE},
+     {"first question", "second question", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
     {"abort_stream",
      "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Long.\"},"
      "{\"type\":\"text\",\"text\":\"A long answer that the user interrupts somewhere in the middle.\"}]}]}",
-     {"first question", "second question", NULL}, ABORT_STREAM, 6, TOOLS_NONE},
+     {"first question", "second question", NULL}, ABORT_STREAM, 6, TOOLS_NONE, 0},
     {"abort_retry",
      "{\"turns\":[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}}]}",
-     {"go", NULL, NULL}, ABORT_RETRY, 0, TOOLS_NONE},
+     {"go", NULL, NULL}, ABORT_RETRY, 0, TOOLS_NONE, 0},
     {"tools",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Count, then look.\"},"
      "{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}},"
@@ -622,17 +648,39 @@ static const scenario scenarios[] = {
      "{\"type\":\"tool_call\",\"name\":\"nope\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Counted twice and looked.\"}]}]}",
-     {"count and look", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO},
+     {"count and look", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0},
     {"approve",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}},"
      "{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Approved.\"}]}]}",
-     {"count, if I may", "and again", NULL}, ABORT_NONE, 0, TOOLS_ASK},
+     {"count, if I may", "and again", NULL}, ABORT_NONE, 0, TOOLS_ASK, 0},
     {"abort_tool",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}},"
      "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Next.\"}]}]}",
-     {"look twice", "then this", NULL}, ABORT_TOOL, 0, TOOLS_AUTO},
+     {"look twice", "then this", NULL}, ABORT_TOOL, 0, TOOLS_AUTO, 0},
+    {"compact",
+     "{\"chunk\":40,\"turns\":["
+     "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG "\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Second. " LONG "\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Third. " LONG "\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Fourth, after a summary.\"}]}],"
+     "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"Three questions so far.\"}]}}",
+     {"first question", "second question", "third question"}, ABORT_NONE, 0, TOOLS_NONE, 300},
+    {"overflow",
+     "{\"chunk\":40,\"turns\":["
+     "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG LONG LONG "\"}]},"
+     "{\"context_limit\":900,\"content\":[{\"type\":\"text\",\"text\":\"After the summary.\"}]}],"
+     "\"compact\":[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"busy\"}},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"One short answer.\"}]}]}",
+     {"first", "second", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
+    {"abort_compact",
+     "{\"chunk\":40,\"turns\":["
+     "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG "\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Second. " LONG "\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Third.\"}]}],"
+     "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"Never used.\"}]}}",
+     {"one", "two", "three"}, ABORT_COMPACT, 0, TOOLS_NONE, 300},
 };
 
 /* Another writer appends to the log behind the owner's back (shared

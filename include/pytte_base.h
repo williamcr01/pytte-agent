@@ -157,6 +157,7 @@ void pt_jw_obj_end(pt_jw *w);
 void pt_jw_arr(pt_jw *w);
 void pt_jw_arr_end(pt_jw *w);
 void pt_jw_key(pt_jw *w, const char *k);
+void pt_jw_keys(pt_jw *w, pt_str k); /* a key that need not end with NUL */
 void pt_jw_str(pt_jw *w, pt_str s);
 void pt_jw_strz(pt_jw *w, const char *z);
 void pt_jw_int(pt_jw *w, int64_t v);

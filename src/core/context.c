@@ -3,6 +3,8 @@
  * bytes as the original (prompt caching, preserved thinking). */
 #include "core/core.h"
 
+#include <string.h>
+
 static bool sent(const entry *e)
 {
     switch (e->kind) {
@@ -44,10 +46,37 @@ static uint32_t add_results(pt_agent *a, uint32_t i, uint32_t cutoff, pt_msg *ms
     return n;
 }
 
+/* After a compaction, the summary opens the epoch as user content (section
+ * 12.3), followed by the request that was being worked on. */
+static const char intro[] =
+    "This session was compacted to fit the context window. A summary of the conversation so far:\n\n";
+static const char working[] = "\n\nThe user's message being worked on when the session was compacted:\n\n";
+
+static bool summary_msg(const entry *e, pt_msg *m, pt_arena *ar)
+{
+    size_t n = sizeof intro - 1 + e->summary.n + (e->request.n ? sizeof working - 1 + e->request.n : 0);
+    char *p = (char *)pt_arena_alloc(ar, n ? n : 1), *q = p;
+    if (!p)
+        return false;
+    memcpy(q, intro, sizeof intro - 1);
+    q += sizeof intro - 1;
+    memcpy(q, e->summary.p, e->summary.n);
+    q += e->summary.n;
+    if (e->request.n) {
+        memcpy(q, working, sizeof working - 1);
+        q += sizeof working - 1;
+        memcpy(q, e->request.p, e->request.n);
+    }
+    memset(m, 0, sizeof *m);
+    m->role = PT_ROLE_USER;
+    m->text = (pt_str){p, n};
+    return true;
+}
+
 bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena *ar)
 {
     uint32_t i, n = 0;
-    pt_msg *msgs = (pt_msg *)pt_arena_alloc(ar, sizeof(pt_msg) * (a->nentries ? a->nentries : 1));
+    pt_msg *msgs = (pt_msg *)pt_arena_alloc(ar, sizeof(pt_msg) * (a->nentries + 1));
     if (!msgs)
         return false;
     for (i = 0; i < a->nentries && a->entries[i].id <= cutoff; i++) {
@@ -55,6 +84,8 @@ bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena 
         if (e->kind == ENT_TOOL_RESULT || !sent(e))
             continue; /* results are placed after their calls */
         msgs[n++] = e->msg;
+        if (e->kind == ENT_EPOCH && e->summary.n && !summary_msg(e, &msgs[n++], ar))
+            return false;
         if (e->kind == ENT_ASSISTANT)
             n = add_results(a, i, cutoff, msgs, n);
     }

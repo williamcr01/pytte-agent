@@ -4,7 +4,9 @@
  *      ▲          │  │
  *      │          │  └──► retry (sleep) ──► prepare, attempt + 1
  *      │          ▼
- *      └──── tools (waiting on one tool task per call, task_tool.c)
+ *      ├──── tools (waiting on one tool task per call, task_tool.c)
+ *      └──── compact_wait (waiting on a compact task, compact.c): when the
+ *            context is over budget, or the server says it is too long
  *
  * prepare is pure; it pins the request's parameters in one commit.
  * request sends exactly what the pinned checkpoint describes, so a request
@@ -12,20 +14,6 @@
 #include "core/core.h"
 
 #include <string.h>
-
-struct run_live {
-    pt_agent *agent;
-    uint32_t task;
-    pt_arena a; /* request and final message */
-    pt_ai_target target;
-    pt_http_req req;
-    pt_ai_stream *s;
-    uint32_t http_fx;
-    bool http_done, finished;
-    int64_t last_live;
-    bool dirty; /* content arrived since the last snapshot */
-    pt_buf snap;
-};
 
 void pt_run_free_live(pt_agent *a, task *t)
 {
@@ -39,7 +27,7 @@ void pt_run_free_live(pt_agent *a, task *t)
     t->live = NULL;
 }
 
-static bool resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
+bool pt_run_resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
 {
     const char *why;
     if (!ref.n) /* none configured: keep the session's model */
@@ -57,7 +45,7 @@ static bool resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
 
 /* The provider's API key; a missing one stops the agent without a commit,
  * so the run can continue once it is set (or with another model). */
-static bool credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
+bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
 {
     pt_buf m;
     memset(cred, 0, sizeof *cred);
@@ -77,6 +65,50 @@ static bool credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
 
 /* ---- prepare ---- */
 
+/* Tokens the context through cutoff takes (section 12.1): what the newest
+ * answer's request and output took, and a quarter of a token per byte of
+ * what came after it. */
+static uint64_t estimate(pt_agent *a, uint32_t cutoff)
+{
+    uint64_t bytes = 0, tokens = 0;
+    uint32_t i = a->nentries;
+    while (i-- > 0) {
+        const entry *e = &a->entries[i];
+        const pt_usage *u = &e->msg.usage;
+        if (e->id > cutoff)
+            continue;
+        if (e->kind == ENT_ASSISTANT && e->msg.stop != PT_STOP_ERROR && e->msg.stop != PT_STOP_ABORTED &&
+            (u->input || u->output)) {
+            tokens = u->input + u->cache_read + u->cache_write + u->output;
+            break;
+        }
+        bytes += e->raw.n;
+    }
+    return tokens + bytes / 4;
+}
+
+/* Over budget: wait for a summary of the epoch instead of sending it. */
+static bool over_budget(pt_agent *a, const pt_ai_target *target, uint32_t cutoff)
+{
+    const pt_config *c = &a->o.config;
+    uint64_t window = c->context_window ? c->context_window : target->model.context_window, reserve;
+    if (!window)
+        return false;
+    reserve = c->compact_reserve ? c->compact_reserve : window / 4 < 16384 ? window / 4 : 16384;
+    return estimate(a, cutoff) + reserve > window && pt_compact_possible(a);
+}
+
+static bool start_compaction(pt_agent *a, task *t, uint32_t cutoff)
+{
+    task nt = *t;
+    pt_core_commit_begin(a, t->id);
+    nt.compact = pt_compact_write(a, t->id, cutoff);
+    nt.status = ST_WAITING;
+    nt.phase = PH_COMPACT;
+    pt_write_task(&a->cw, &nt);
+    return pt_core_commit_end(a);
+}
+
 static bool prepare(pt_agent *a, task *t, uint32_t attempt)
 {
     pt_arena *sa = &a->scratch;
@@ -88,9 +120,11 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     task nt = *t;
     pt_buf ref;
     bool ok;
-    if (!resolve(a, c->model, &target, sa) || !credentials(a, target.provider, &cred))
+    if (!pt_run_resolve(a, c->model, &target, sa) || !pt_run_credentials(a, target.provider, &cred))
         return false;
     nt.cutoff = last ? last->id : 0;
+    if (over_budget(a, &target, nt.cutoff))
+        return start_compaction(a, t, nt.cutoff);
     if (!pt_core_context(a, nt.cutoff, &ctx, sa)) {
         pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
         return false;
@@ -143,6 +177,10 @@ static void on_ai(void *ud, const pt_ai_event *ev)
 {
     run_live *rl = (run_live *)ud;
     pt_event e;
+    if (rl->quiet) {
+        rl->finished = rl->finished || ev->kind == PT_EV_DONE || ev->kind == PT_EV_ERROR;
+        return;
+    }
     memset(&e, 0, sizeof e);
     e.kind = PT_E_STREAM;
     e.task = rl->task;
@@ -154,7 +192,7 @@ static void on_ai(void *ud, const pt_ai_event *ev)
         snapshot(rl, ev->msg, false);
 }
 
-static bool start_request(pt_agent *a, task *t)
+bool pt_run_start(pt_agent *a, task *t)
 {
     run_live *rl = (run_live *)a->al.fn(a->al.ud, NULL, 0, sizeof *rl);
     pt_credentials cred;
@@ -168,18 +206,20 @@ static bool start_request(pt_agent *a, task *t)
     memset(rl, 0, sizeof *rl);
     rl->agent = a;
     rl->task = t->id;
+    rl->quiet = t->kind == TASK_COMPACT;
     pt_arena_init(&rl->a, a->al, 4096);
     pt_buf_init(&rl->snap, a->al);
     t->live = rl;
-    if (!resolve(a, t->model, &rl->target, &rl->a))
+    if (!pt_run_resolve(a, t->model, &rl->target, &rl->a))
         goto fail;
     memset(&cred, 0, sizeof cred);
-    if (!credentials(a, rl->target.provider, &cred))
+    if (!pt_run_credentials(a, rl->target.provider, &cred))
         goto fail;
     memset(&opts, 0, sizeof opts);
     opts.max_tokens = t->max_tokens;
     opts.reasoning = t->reasoning;
-    if (!pt_core_context(a, t->cutoff, &ctx, &rl->a) ||
+    if (!(t->kind == TASK_COMPACT ? pt_compact_context(a, t, &ctx, &rl->a)
+                                  : pt_core_context(a, t->cutoff, &ctx, &rl->a)) ||
         !pt_ai_build(&rl->target, &ctx, &opts, &cred, &rl->req, &rl->a)) {
         pt_core_fail(a, PT_FATAL_OOM, "could not build the request", PT_STR_NULL);
         goto fail;
@@ -242,7 +282,7 @@ bool pt_run_http_done(pt_agent *a, uint32_t fx, const char *error)
 
 /* ---- the outcome ---- */
 
-static int64_t backoff(pt_agent *a, uint32_t attempt, int64_t retry_after_ms)
+int64_t pt_run_backoff(pt_agent *a, uint32_t attempt, int64_t retry_after_ms)
 {
     const pt_config *c = &a->o.config;
     int64_t base = c->retry_base_ms ? c->retry_base_ms : 1000;
@@ -260,6 +300,52 @@ static int64_t backoff(pt_agent *a, uint32_t attempt, int64_t retry_after_ms)
     return d * 3 / 4 + (int64_t)(r % (uint32_t)(d / 2 + 1)); /* ±25% jitter */
 }
 
+/* The usage doc: token totals per model, {"provider/model":{"input":..,
+ * "output":..,"cache_read":..,"cache_write":..,"requests":..}}. Replaced
+ * whole, like every doc; small, since it has a member per model used. */
+void pt_run_add_usage(pt_agent *a, const pt_msg *m, pt_str model)
+{
+    static const char *const keys[] = {"input", "output", "cache_read", "cache_write", "requests"};
+    const pt_usage *u = &m->usage;
+    const pt_json *old, *c;
+    pt_jw *w = &a->cw;
+    uint64_t add[5];
+    bool found = false;
+    unsigned k;
+    if (!model.n || (!u->input && !u->output))
+        return;
+    add[0] = u->input;
+    add[1] = u->output;
+    add[2] = u->cache_read;
+    add[3] = u->cache_write;
+    add[4] = 1;
+    old = pt_json_parse(pt_doc(a, PT_S("usage")), &a->scratch, NULL);
+    pt_core_doc_begin(a, PT_S("usage"));
+    pt_jw_obj(w);
+    for (c = pt_json_is(old, PT_J_OBJ) ? old->child : NULL; c; c = c->next) {
+        bool mine = pt_str_eq(c->key, model);
+        found = found || mine;
+        pt_jw_keys(w, c->key);
+        pt_jw_obj(w);
+        for (k = 0; k < 5; k++) {
+            pt_jw_key(w, keys[k]);
+            pt_jw_uint(w, (uint64_t)pt_json_geti(c, keys[k], 0) + (mine ? add[k] : 0));
+        }
+        pt_jw_obj_end(w);
+    }
+    if (!found) {
+        pt_jw_keys(w, model);
+        pt_jw_obj(w);
+        for (k = 0; k < 5; k++) {
+            pt_jw_key(w, keys[k]);
+            pt_jw_uint(w, add[k]);
+        }
+        pt_jw_obj_end(w);
+    }
+    pt_jw_obj_end(w);
+    pt_jw_obj_end(w);
+}
+
 void pt_run_write_assistant(pt_agent *a, uint32_t id, const pt_msg *m)
 {
     pt_core_entry_begin(a, id, "assistant");
@@ -268,7 +354,7 @@ void pt_run_write_assistant(pt_agent *a, uint32_t id, const pt_msg *m)
     pt_core_entry_end(a);
 }
 
-static void write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int64_t retry_at)
+void pt_run_write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int64_t retry_at)
 {
     pt_jw *w = &a->cw;
     pt_core_entry_begin(a, pt_core_new_id(a), "error");
@@ -367,14 +453,22 @@ static bool classify(pt_agent *a, task *t)
         if (m->nblocks) /* keep what arrived, for the record; never sent again */
             pt_run_write_assistant(a, pt_core_new_id(a), m);
         if (e->cls == PT_ERR_RETRYABLE) {
-            int64_t until = pt_core_now(a) + backoff(a, t->attempt, e->retry_after_ms);
-            write_error(a, t->attempt, e, until);
+            int64_t until = pt_core_now(a) + pt_run_backoff(a, t->attempt, e->retry_after_ms);
+            pt_run_write_error(a, t->attempt, e, until);
             nt.phase = PH_RETRY;
             nt.until = until;
             pt_core_after(a, AFTER_RETRY, "", e->message, until);
+        } else if (e->cls == PT_ERR_OVERFLOW && pt_compact_possible(a)) {
+            /* Too long after all: summarize, then send again. Once the
+             * epoch is new there is nothing to summarize, so a second
+             * overflow fails the run. */
+            entry *last = pt_core_last_entry(a);
+            pt_run_write_error(a, t->attempt, e, 0);
+            nt.compact = pt_compact_write(a, t->id, last ? last->id : 0);
+            nt.status = ST_WAITING;
+            nt.phase = PH_COMPACT;
         } else {
-            /* Fatal, or an overflow (compaction comes in M4). */
-            write_error(a, t->attempt, e, 0);
+            pt_run_write_error(a, t->attempt, e, 0);
             nt.status = ST_DONE;
             nt.outcome = PT_S("failed");
             nt.reason = e->message;
@@ -411,6 +505,7 @@ static bool classify(pt_agent *a, task *t)
     pt_write_task(&a->cw, &nt);
     if (in && input_changed)
         pt_write_input(&a->cw, &nin);
+    pt_run_add_usage(a, m, t->model);
     ok = pt_core_commit_end(a);
     if (!rl->http_done) /* the stream ended on its final event before the transfer did */
         pt_core_cancel(a, t->id, rl->http_fx);
@@ -463,10 +558,13 @@ static bool end_aborted(pt_agent *a, task *t)
 {
     input *in = pt_core_input(a, t->input), nin;
     task nt = *t;
-    uint32_t sleeping = t->phase == PH_RETRY ? t->fx : 0;
+    uint32_t sleeping = t->phase == PH_RETRY ? t->fx : 0, compacting = 0;
+    task *ct = t->phase == PH_COMPACT ? pt_core_task(a, t->compact) : NULL;
     pt_msg m;
     bool ok;
     pt_core_commit_begin(a, t->id);
+    if (ct)
+        compacting = pt_compact_abort(a, ct);
     if (t->live) {
         m = *pt_ai_stream_message(t->live->s);
         if (m.nblocks) {
@@ -498,6 +596,8 @@ static bool end_aborted(pt_agent *a, task *t)
     }
     if (sleeping)
         pt_core_cancel(a, t->id, sleeping);
+    if (compacting)
+        pt_core_cancel(a, ct->id, compacting);
     t->woke = false;
     return ok;
 }
@@ -511,6 +611,16 @@ bool pt_run_abort(pt_agent *a, task *t)
     task nt = *t;
     uint32_t i;
     bool ok;
+    if (t->kind == TASK_COMPACT) { /* one the user asked for: it just ends */
+        uint32_t fx;
+        pt_core_commit_begin(a, t->id);
+        fx = pt_compact_abort(a, t);
+        pt_core_after(a, AFTER_COMPACT, "failed", PT_S("interrupted by the user"), 0);
+        ok = pt_core_commit_end(a);
+        if (fx)
+            pt_core_cancel(a, t->id, fx);
+        return ok;
+    }
     if (t->live && t->live->finished)
         return false;
     if (t->phase != PH_TOOLS || !has_tools(a, t))
@@ -541,6 +651,18 @@ static bool tools_done(pt_agent *a, const task *t)
     return true;
 }
 
+bool pt_run_sleep(pt_agent *a, task *t)
+{
+    pt_fx fx;
+    memset(&fx, 0, sizeof fx);
+    fx.kind = PT_FX_SLEEP;
+    fx.id = pt_core_new_fx(a);
+    fx.task = t->id;
+    fx.until = t->until;
+    t->fx = fx.id;
+    return pt_core_queue(a, &fx, PT_STR_NULL);
+}
+
 bool pt_run_step(pt_agent *a, task *t)
 {
     switch (t->phase) {
@@ -550,16 +672,8 @@ bool pt_run_step(pt_agent *a, task *t)
         if (t->woke) {
             t->woke = false;
             return prepare(a, t, t->attempt + 1);
-        } else {
-            pt_fx fx;
-            memset(&fx, 0, sizeof fx);
-            fx.kind = PT_FX_SLEEP;
-            fx.id = pt_core_new_fx(a);
-            fx.task = t->id;
-            fx.until = t->until;
-            t->fx = fx.id;
-            return pt_core_queue(a, &fx, PT_STR_NULL);
         }
+        return pt_run_sleep(a, t);
     case PH_TOOLS:
         if (!tools_done(a, t))
             return false;
@@ -570,7 +684,7 @@ bool pt_run_step(pt_agent *a, task *t)
         if (t->rescued.n)
             return commit_rescued(a, t);
         if (!t->live)
-            return start_request(a, t);
+            return pt_run_start(a, t);
         if (t->live->finished)
             return classify(a, t);
         if (t->live->dirty) /* the trailing snapshot, once its time has come */

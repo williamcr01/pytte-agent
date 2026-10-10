@@ -72,7 +72,8 @@ typedef enum {
     PT_E_FATAL,     /* error: the agent stopped (see pt_fatal) */
     PT_E_TOOL_START,  /* name, args, call_id: a tool starts running */
     PT_E_TOOL_OUTPUT, /* data: output of a running tool */
-    PT_E_ASK          /* name, args, prompt: a tool call waits for pt_approve */
+    PT_E_ASK,         /* name, args, prompt: a tool call waits for pt_approve */
+    PT_E_COMPACT      /* outcome: "started", "completed", "failed" (error): compaction */
 } pt_event_kind;
 
 typedef struct pt_event {
@@ -102,6 +103,8 @@ typedef struct pt_config {
     uint32_t live_interval_ms; /* live file snapshots at most this often; 0: 250 */
     bool no_sync;              /* skip fsync: survives process crashes, not power loss */
     bool serial_tools;         /* run a round's tools one at a time even when all may run together */
+    uint32_t context_window;   /* 0: the model's */
+    uint32_t compact_reserve;  /* compact when fewer tokens are left; 0: 16384 (a quarter of small windows) */
 } pt_config;
 
 typedef struct pt_opts {
@@ -115,6 +118,8 @@ typedef struct pt_opts {
     void *ud; /* passed to all of the above */
     const pt_ai_catalog *catalog; /* NULL: the built-in one */
     pt_config config;
+    bool all_epochs; /* keep the entries of every epoch, not just the current one
+                      * (for reading a log: such an agent must not run) */
 } pt_opts;
 
 pt_agent *pt_new(const pt_opts *o);
@@ -193,6 +198,10 @@ bool pt_abort(pt_agent *a);
  * committed, so it survives restarts. False when the task is not waiting. */
 bool pt_approve(pt_agent *a, uint32_t task, bool yes, pt_str reason);
 
+/* Compact now (section 12.3): summarize the current epoch into a new one.
+ * False when a run is active or nothing in this epoch came from the model. */
+bool pt_compact(pt_agent *a);
+
 /* ---- the loop ---------------------------------------------------------------------- */
 
 /* The next effect to start: 1 = *out is set, 0 = nothing right now. */
@@ -244,6 +253,7 @@ typedef struct pt_entry_view {
     const char *kind;  /* epoch, user, assistant, tool_result, note, error */
     const pt_msg *msg; /* NULL for error entries */
     pt_str raw;        /* the record */
+    pt_str summary;    /* epoch after a compaction: what the model continues from */
 } pt_entry_view;
 
 /* Tool calls waiting for pt_approve, in task order; returns how many

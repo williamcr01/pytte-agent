@@ -7,8 +7,9 @@
 
 static const char *const task_status_names[] = {"pending", "running", "waiting", "done"};
 static const char *const phase_names[] = {"prepare", "request", "retry", "tools",
-                                          "call", "approve", "execute"};
-#define NPHASES 7
+                                          "call", "approve", "execute", "compact_wait"};
+#define NPHASES 8
+static const char *const kind_names[] = {"run", "tool", "compact"};
 static const char *const input_status_names[] = {"queued", "placed", "done", "failed", "aborted"};
 static const char *const ent_names[] = {"epoch", "user", "assistant", "tool_result", "note", "error"};
 
@@ -61,11 +62,18 @@ static void write_state(pt_jw *w, const task *t)
         }
         return;
     }
+    if (t->phase == PH_COMPACT) {
+        pt_jw_key(w, "compact");
+        pt_jw_uint(w, t->compact);
+        return;
+    }
     pt_jw_key(w, "attempt");
     pt_jw_uint(w, t->attempt);
-    if (t->phase == PH_REQUEST) {
+    if (t->phase == PH_REQUEST || t->kind == TASK_COMPACT) { /* a compaction's cutoff is fixed */
         pt_jw_key(w, "cutoff");
         pt_jw_uint(w, t->cutoff);
+    }
+    if (t->phase == PH_REQUEST) {
         pt_jw_key(w, "params");
         pt_jw_obj(w);
         pt_jw_key(w, "model");
@@ -99,8 +107,8 @@ void pt_write_task(pt_jw *w, const task *t)
     pt_jw_key(w, "id");
     pt_jw_uint(w, t->id);
     pt_jw_key(w, "kind");
-    pt_jw_strz(w, t->kind == TASK_TOOL ? "tool" : "run");
-    if (t->kind == TASK_TOOL) {
+    pt_jw_strz(w, kind_names[t->kind]);
+    if (t->owner) {
         pt_jw_key(w, "owner");
         pt_jw_uint(w, t->owner);
     }
@@ -172,14 +180,10 @@ void pt_write_input(pt_jw *w, const input *in)
 static bool read_task(const pt_json *r, task *t, pt_arena *ar)
 {
     const pt_json *st = pt_json_get(r, "state"), *out = pt_json_get(r, "outcome");
-    pt_str kind = pt_json_gets(r, "kind", ar);
     unsigned v;
-    if (pt_str_eqz(kind, "run"))
-        t->kind = TASK_RUN;
-    else if (pt_str_eqz(kind, "tool"))
-        t->kind = TASK_TOOL;
-    else
+    if (!lookup(pt_json_gets(r, "kind", ar), kind_names, 3, &v))
         return false;
+    t->kind = (task_kind)v;
     if (!lookup(pt_json_gets(r, "status", ar), task_status_names, 4, &v))
         return false;
     t->status = (task_status)v;
@@ -197,8 +201,12 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
     if (!lookup(pt_json_gets(st, "phase", ar), phase_names, NPHASES, &v))
         return false;
     t->phase = (task_phase)v;
-    if ((t->kind == TASK_TOOL) != (t->phase >= PH_CALL))
+    if (t->kind == TASK_TOOL ? t->phase < PH_CALL || t->phase > PH_EXECUTE
+        : t->kind == TASK_COMPACT ? t->phase > PH_RETRY
+                                  : t->phase >= PH_CALL && t->phase != PH_COMPACT)
         return false;
+    if (t->phase == PH_COMPACT)
+        return (t->compact = getid(st, "compact")) != 0;
     t->attempt = getid(st, "attempt");
     if (t->kind == TASK_TOOL) {
         const pt_json *args = pt_json_get(st, "args");
@@ -209,10 +217,12 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
         t->replay = pt_str_eqz(pt_json_gets(st, "replay", ar), "safe") ? PT_REPLAY_SAFE : PT_REPLAY_UNSAFE;
         return t->entry > 0 && (t->phase != PH_EXECUTE || t->attempt > 0);
     }
+    t->cutoff = getid(st, "cutoff");
+    if (t->kind == TASK_COMPACT && !t->cutoff)
+        return false;
     if (t->phase == PH_REQUEST) {
         const pt_json *p = pt_json_get(st, "params");
         int64_t mt = pt_json_geti(p, "max_tokens", 0);
-        t->cutoff = getid(st, "cutoff");
         t->model = pt_json_gets(p, "model", ar);
         if (!pt_reasoning_parse(pt_json_gets(p, "reasoning", ar), &t->reasoning))
             t->reasoning = PT_REASON_DEFAULT;
@@ -269,7 +279,7 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
     nt.id = id;
     if (nt.status != ST_DONE && nt.phase == PH_REQUEST && !pt_str_eq(nt.model, a->last_model))
         a->last_model = pt_arena_dup(&a->perm, nt.model);
-    if (nt.status == ST_DONE && nt.kind == TASK_TOOL) {
+    if (nt.status == ST_DONE && nt.kind != TASK_RUN) { /* only runs are looked back at */
         if (t)
             drop_task(a, t);
         return true;
@@ -467,8 +477,10 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
         return true; /* insert-only: never replaced */
     if (k == ENT_EPOCH) {
         /* A new epoch: older entries leave memory (they stay in the log). */
-        a->nentries = 0;
-        pt_arena_reset(ea);
+        if (!a->o.all_epochs) {
+            a->nentries = 0;
+            pt_arena_reset(ea);
+        }
         a->cur_epoch = getid(d, "n");
     }
     if (!pt_core_grow(a, (void **)&a->entries, &a->ecap, a->nentries + 1, sizeof(entry))) {
@@ -485,6 +497,8 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
     case ENT_EPOCH:
         e->msg.role = PT_ROLE_SYSTEM;
         e->msg.text = pt_arena_dup(ea, pt_json_gets(d, "system", sa));
+        e->summary = pt_arena_dup(ea, pt_json_gets(d, "summary", sa));
+        e->request = pt_arena_dup(ea, pt_json_gets(d, "request", sa));
         if (!apply_tools(a, pt_json_get(d, "tools")))
             return false;
         break;

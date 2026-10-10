@@ -617,10 +617,15 @@ void pt_jw_arr_end(pt_jw *w) { close_container(w, ']'); }
 
 void pt_jw_key(pt_jw *w, const char *k)
 {
+    pt_jw_keys(w, pt_strz(k));
+}
+
+void pt_jw_keys(pt_jw *w, pt_str k)
+{
     if (w->comma[w->depth])
         pt_buf_putc(w->b, ',');
     w->comma[w->depth] = 1;
-    pt_json_quote(w->b, pt_strz(k));
+    pt_json_quote(w->b, k);
     pt_buf_putc(w->b, ':');
     w->after_key = true;
 }

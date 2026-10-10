@@ -17,21 +17,72 @@
  *      [{"status": 529}, {"content": [...]}]]}
  * Turn n answers the request that has n assistant messages in its context.
  * A turn that is a list answers its first request with the first response,
- * the next (a retry) with the second, and so on; the last one repeats. */
+ * the next (a retry) with the second, and so on; the last one repeats.
+ *
+ * "context_limit": N (in the script or a turn) answers requests longer than
+ * N bytes with a 400 "prompt is too long", like a server would.
+ *
+ * Compaction: a request without tools whose only user message is a
+ * transcript ("[assistant]" sections, section 12.3) gets the script's
+ * "compact" response (a turn; default: a short summary). Its text starts
+ * with "[faux:N]", N being the turn the session had reached, and a context
+ * that holds that marker counts its turns from N. */
 #include "ai.h"
 
+#include <string.h>
+
 /* ---- API ---- */
+
+/* The turn of a compacted session's summary: "[faux:N]". */
+static uint32_t marker(pt_str s)
+{
+    static const char m[] = "[faux:";
+    uint32_t n = 0;
+    size_t i, k;
+    for (i = 0; i + sizeof m - 1 <= s.n; i++)
+        if (memcmp(s.p + i, m, sizeof m - 1) == 0) {
+            uint32_t v = 0;
+            for (k = i + sizeof m - 1; k < s.n && s.p[k] >= '0' && s.p[k] <= '9' && v < 100000; k++)
+                v = v * 10 + (uint32_t)(s.p[k] - '0');
+            if (k < s.n && s.p[k] == ']')
+                n = v;
+        }
+    return n;
+}
+
+/* "[assistant]" sections of a transcript. */
+static uint32_t sections(pt_str s)
+{
+    static const char m[] = "[assistant]\n";
+    uint32_t n = 0;
+    size_t i;
+    for (i = 0; i + sizeof m - 1 <= s.n; i++)
+        if ((i == 0 || s.p[i - 1] == '\n') && memcmp(s.p + i, m, sizeof m - 1) == 0)
+            n++;
+    return n;
+}
 
 static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_opts *o,
                   const pt_credentials *cred, pt_http_req *out, pt_arena *a)
 {
     pt_buf b;
     pt_jw w;
-    uint32_t i, turn = 0;
+    uint32_t i, turn = 0, base = 0, users = 0, heads = 0;
+    bool compact;
     (void)cred;
-    for (i = 0; i < ctx->nmsgs; i++)
-        if (ctx->msgs[i].role == PT_ROLE_ASSISTANT)
+    for (i = 0; i < ctx->nmsgs; i++) {
+        const pt_msg *m = &ctx->msgs[i];
+        if (m->role == PT_ROLE_ASSISTANT)
             turn++;
+        if (m->role == PT_ROLE_USER) {
+            uint32_t k = marker(m->text);
+            base = k ? k : base;
+            heads += sections(m->text);
+            users++;
+        }
+    }
+    compact = !ctx->ntools && !turn && users == 1 && heads;
+    turn = base + (compact ? heads : turn);
     pt_buf_init(&b, a->al);
     pt_jw_init(&w, &b);
     pt_jw_obj(&w);
@@ -39,6 +90,10 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     pt_jw_strz(&w, t->model.id);
     pt_jw_key(&w, "turn");
     pt_jw_uint(&w, turn);
+    if (compact) {
+        pt_jw_key(&w, "compact");
+        pt_jw_bool(&w, true);
+    }
     pt_jw_key(&w, "messages");
     pt_jw_uint(&w, ctx->nmsgs);
     pt_jw_key(&w, "tools");
@@ -196,6 +251,7 @@ bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_state *st, pt_f
     pt_json *req = pt_json_parse(request_body, a, NULL);
     const pt_json *turns, *turn, *content, *c, *body, *usage;
     int64_t n = pt_json_geti(req, "turn", 0), status;
+    bool compact = pt_json_truthy(pt_json_get(req, "compact"));
     pt_buf b, tmp;
     pt_jw w;
     uint64_t out_bytes = 0, ncalls = 0, i = 0;
@@ -209,18 +265,28 @@ bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_state *st, pt_f
     if (!root || !req)
         return false;
     turns = pt_json_get(root, "turns");
-    turn = n >= 0 ? pt_json_at(turns, (uint32_t)n) : NULL;
+    turn = compact ? pt_json_get(root, "compact") : n >= 0 ? pt_json_at(turns, (uint32_t)n) : NULL;
     if (pt_json_is(turn, PT_J_ARR)) {
-        uint32_t seen = st && n < PT_FAUX_TURNS ? st->seen[n] : 0;
+        uint32_t seen = !st ? 0 : compact ? st->compact_seen : n < PT_FAUX_TURNS ? st->seen[n] : 0;
         turn = pt_json_at(turn, seen < turn->len ? seen : turn->len - 1);
     }
-    if (st && n >= 0 && n < PT_FAUX_TURNS)
+    if (st && compact)
+        st->compact_seen++;
+    else if (st && n >= 0 && n < PT_FAUX_TURNS)
         st->seen[n]++;
     out->chunk = (uint32_t)pt_json_geti(turn, "chunk", pt_json_geti(root, "chunk", 0));
     out->delay_ms = (uint32_t)pt_json_geti(turn, "delay_ms", pt_json_geti(root, "delay_ms", 0));
     out->cut = pt_json_geti(turn, "cut", -1);
 
     status = pt_json_geti(turn, "status", 200);
+    {
+        int64_t limit = pt_json_geti(turn, "context_limit", pt_json_geti(root, "context_limit", 0));
+        if (limit > 0 && (int64_t)request_body.n > limit) {
+            out->status = 400;
+            out->body = PT_S("{\"class\":\"overflow\",\"message\":\"prompt is too long\"}");
+            return true;
+        }
+    }
     if (status != 200) {
         out->status = (int)status;
         body = pt_json_get(turn, "body");
@@ -242,10 +308,20 @@ bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_state *st, pt_f
     sse(&b, "start", &tmp);
 
     content = pt_json_get(turn, "content");
-    if (!turn) { /* past the end of the script */
+    if (!turn) { /* past the end of the script, or a compaction it has no answer for */
         pt_buf_putz(&tmp, "{\"type\":\"text\"}");
         sse(&b, "block", &tmp);
-        deltas(&b, &tmp, PT_S("(the faux script has no more turns)"));
+        if (compact) {
+            pt_buf mk;
+            pt_buf_init(&mk, a->al);
+            pt_buf_putz(&mk, "[faux:");
+            pt_buf_i64(&mk, n);
+            pt_buf_putz(&mk, "] The user and the assistant talked; this is the faux summary.");
+            deltas(&b, &tmp, pt_buf_str(&mk));
+            pt_buf_free(&mk);
+        } else {
+            deltas(&b, &tmp, PT_S("(the faux script has no more turns)"));
+        }
         pt_buf_putz(&tmp, "{}");
         sse(&b, "end", &tmp);
     }
@@ -275,6 +351,16 @@ bool pt_faux_respond(pt_str script, pt_str request_body, pt_faux_state *st, pt_f
             ncalls++;
         } else {
             payload = pt_json_gets(c, "text", a);
+            if (compact && pt_str_eqz(type, "text") && !out_bytes) { /* the marker goes first */
+                pt_buf mk;
+                pt_buf_init(&mk, a->al);
+                pt_buf_putz(&mk, "[faux:");
+                pt_buf_i64(&mk, n);
+                pt_buf_putz(&mk, "] ");
+                pt_buf_puts(&mk, payload);
+                payload = pt_arena_dup(a, pt_buf_str(&mk));
+                pt_buf_free(&mk);
+            }
         }
         pt_jw_obj_end(&w);
         sse(&b, "block", &tmp);

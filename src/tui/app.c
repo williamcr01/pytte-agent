@@ -19,7 +19,7 @@
 #include "cli/cli.h"
 
 enum { TH_COLLAPSED, TH_FULL, TH_HIDDEN };
-enum { PH_WAIT, PH_THINK, PH_WRITE, PH_RETRY, PH_TOOL };
+enum { PH_WAIT, PH_THINK, PH_WRITE, PH_RETRY, PH_TOOL, PH_COMPACT };
 enum { LIVE_NONE, LIVE_TEXT, LIVE_THINK };
 enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
 
@@ -48,6 +48,8 @@ static const struct {
     {"new", "", "start a new session"},
     {"resume", " [id]", "open another session from this directory"},
     {"status", "", "session, model, context and terminal"},
+    {"compact", "", "summarize the conversation to free the context"},
+    {"usage", "", "tokens used in this session, per model"},
     {"thinking", " [mode]", "how thinking is shown: collapsed, full, hidden"},
     {"settings", "", "user settings (saved)"},
     {"help", "", "commands and keys"},
@@ -132,6 +134,7 @@ typedef struct app {
     pt_arena ar;
     /* the display model */
     uint32_t seen;   /* entries already shown */
+    uint32_t shown_epoch;
     pt_buf live;     /* the unfinished source line of the streaming block */
     int live_kind, live_col;
     tui_md md;
@@ -385,7 +388,15 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
 {
     const pt_msg *m = v->msg;
     uint32_t i;
-    if (strcmp(v->kind, "user") == 0) {
+    if (strcmp(v->kind, "epoch") == 0 && v->epoch > 1) {
+        char line[120];
+        out_blank(out);
+        snprintf(line, sizeof line, "%s Compacted: the model continues from a summary%s", a->sy->think,
+                 full ? ":" : " (ctrl+o shows it)");
+        out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
+        if (full)
+            out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->summary, 0);
+    } else if (strcmp(v->kind, "user") == 0) {
         out_blank(out);
         out_rail(a, out, a->sy->rail, TUI_DIM, TUI_BOLD, m->text, 0);
     } else if (strcmp(v->kind, "assistant") == 0) {
@@ -527,8 +538,12 @@ static void on_entries(app *a)
 {
     uint32_t n = pt_entry_count(a->s.a), i;
     pt_entry_view v;
-    if (n < a->seen) /* a new epoch */
-        a->seen = 0;
+    if (n < a->seen || (n && a->seen && pt_entry_at(a->s.a, 0, &v) && v.epoch != a->shown_epoch)) {
+        a->seen = 0; /* a new epoch */
+        a->ctx_used = 0;
+    }
+    if (n && pt_entry_at(a->s.a, 0, &v))
+        a->shown_epoch = v.epoch;
     for (i = a->seen; i < n && pt_entry_at(a->s.a, i, &v); i++) {
         if (strcmp(v.kind, "user") == 0) /* answers a key: no frame wait */
             a->urgent = true;
@@ -569,6 +584,15 @@ static void on_event(void *ud, const pt_event *ev)
         break;
     case PT_E_COMMITTED:
         on_entries(a);
+        break;
+    case PT_E_COMPACT:
+        if (pt_str_eqz(ev->outcome, "started"))
+            a->phase = PH_COMPACT;
+        else if (pt_str_eqz(ev->outcome, "failed")) {
+            snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
+                     ev->error.p);
+            out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(line), 2);
+        }
         break;
     case PT_E_TOOL_START:
         a->phase = PH_TOOL;
@@ -780,7 +804,10 @@ static void row(app *a, pt_str styled)
 static void spinner_row(app *a, int64_t now)
 {
     char line[400];
-    const char *what = a->phase == PH_THINK ? "Thinking" : a->phase == PH_WRITE ? "Writing" : "Waiting";
+    const char *what = a->phase == PH_THINK     ? "Thinking"
+                       : a->phase == PH_WRITE   ? "Writing"
+                       : a->phase == PH_COMPACT ? "Compacting"
+                                                : "Waiting";
     char running[80];
     int64_t frame = now / SPIN_MS;
     char el[32];
@@ -1365,6 +1392,7 @@ static void set_config(app *a)
     c.reasoning = a->o.reasoning;
     c.max_tokens = a->o.max_tokens;
     c.retry_base_ms = a->o.retry_base_ms;
+    c.context_window = a->o.context_window;
     c.no_sync = a->o.no_sync;
     if (a->open)
         pt_set_config(a->s.a, &c);
@@ -1575,6 +1603,38 @@ static void cmd_status(app *a)
     out_z(a, TUI_DIM, line);
 }
 
+/* The usage doc: tokens per model, and what they cost where prices are known. */
+static void cmd_usage(app *a)
+{
+    const pt_json *u, *c;
+    char line[600], in[16], out[16], cache[16];
+    pt_arena_reset(&a->ar);
+    u = a->open ? pt_json_parse(pt_doc(a->s.a, PT_S("usage")), &a->ar, NULL) : NULL;
+    if (!pt_json_is(u, PT_J_OBJ) || !u->len) {
+        out_z(a, TUI_DIM, "no tokens used yet");
+        return;
+    }
+    for (c = u->child; c; c = c->next) {
+        uint64_t ti = (uint64_t)pt_json_geti(c, "input", 0), to = (uint64_t)pt_json_geti(c, "output", 0);
+        uint64_t cr = (uint64_t)pt_json_geti(c, "cache_read", 0), cw = (uint64_t)pt_json_geti(c, "cache_write", 0);
+        pt_ai_target t;
+        const char *why;
+        int n;
+        tokens_short(in, sizeof in, ti + cr + cw);
+        tokens_short(out, sizeof out, to);
+        tokens_short(cache, sizeof cache, cr);
+        n = snprintf(line, sizeof line, "%.*s: %s in (%s from cache) · %s out · %lld requests", (int)c->key.n,
+                     c->key.p, in, cache, out, (long long)pt_json_geti(c, "requests", 0));
+        if (pt_ai_resolve(pt_ai_builtin_catalog(), c->key, &t, &a->ar, &why) && t.known && t.model.cost.input) {
+            const pt_cost *k = &t.model.cost; /* micro-dollars per million tokens */
+            double usd = ((double)ti * (double)k->input + (double)to * (double)k->output +
+                          (double)cr * (double)k->cache_read + (double)cw * (double)k->cache_write) / 1e12;
+            snprintf(line + n, sizeof line - (size_t)n, " · $%.2f", usd);
+        }
+        out_z(a, TUI_DIM, line);
+    }
+}
+
 static void cmd_help(app *a)
 {
     size_t i;
@@ -1678,6 +1738,11 @@ static void run_command(app *a, pt_str line)
         switch_session(a, v);
     } else if (pt_str_eqz(cmd, "status")) {
         cmd_status(a);
+    } else if (pt_str_eqz(cmd, "compact")) {
+        if (!a->open || !pt_compact(a->s.a))
+            out_z(a, TUI_DIM, "nothing to compact yet");
+    } else if (pt_str_eqz(cmd, "usage")) {
+        cmd_usage(a);
     } else if (pt_str_eqz(cmd, "thinking")) {
         if (arg.n) {
             if (!valid_setting(CFG_THINKING, v)) {

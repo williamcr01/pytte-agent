@@ -120,7 +120,7 @@ entry *pt_core_entry(pt_agent *a, uint32_t id)
     return lo < a->nentries && a->entries[lo].id == id ? &a->entries[lo] : NULL;
 }
 
-void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value)
+void pt_core_doc_begin(pt_agent *a, pt_str key)
 {
     pt_jw *w = &a->cw;
     uint32_t i, id = 0;
@@ -135,8 +135,13 @@ void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value)
     pt_jw_key(w, "key");
     pt_jw_str(w, key);
     pt_jw_key(w, "value");
-    pt_jw_raw(w, value);
-    pt_jw_obj_end(w);
+}
+
+void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value)
+{
+    pt_core_doc_begin(a, key);
+    pt_jw_raw(&a->cw, value);
+    pt_jw_obj_end(&a->cw);
 }
 
 void pt_core_after(pt_agent *a, after_kind k, const char *outcome, pt_str error, int64_t until)
@@ -285,7 +290,7 @@ static void commit_landed(pt_agent *a, const char *error)
         pt_core_live_del(a, a->after_live_del);
     if (a->after != AFTER_NONE) {
         memset(&ev, 0, sizeof ev);
-        ev.kind = a->after == AFTER_RETRY ? PT_E_RETRY : PT_E_RUN_DONE;
+        ev.kind = a->after == AFTER_RETRY ? PT_E_RETRY : a->after == AFTER_COMPACT ? PT_E_COMPACT : PT_E_RUN_DONE;
         ev.task = a->commit_task;
         ev.outcome = a->after_outcome;
         ev.error = a->after_error;
@@ -298,7 +303,7 @@ static void commit_landed(pt_agent *a, const char *error)
 
 /* ---- session writes ---- */
 
-static void write_entry_head(pt_agent *a, uint32_t id, const char *kind, uint32_t epoch)
+void pt_core_entry_head(pt_agent *a, uint32_t id, const char *kind, uint32_t epoch)
 {
     pt_jw *w = &a->cw;
     pt_jw_obj(w);
@@ -316,7 +321,7 @@ static void write_entry_head(pt_agent *a, uint32_t id, const char *kind, uint32_
 
 void pt_core_entry_begin(pt_agent *a, uint32_t id, const char *kind)
 {
-    write_entry_head(a, id, kind, a->cur_epoch);
+    pt_core_entry_head(a, id, kind, a->cur_epoch);
 }
 
 void pt_core_entry_end(pt_agent *a)
@@ -349,7 +354,7 @@ static void build_create(pt_agent *a)
     pt_jw_key(w, "forked_from");
     pt_jw_null(w);
     pt_jw_obj_end(w);
-    write_entry_head(a, pt_core_new_id(a), "epoch", 1);
+    pt_core_entry_head(a, pt_core_new_id(a), "epoch", 1);
     pt_jw_key(w, "n");
     pt_jw_uint(w, 1);
     pt_jw_key(w, "system");
@@ -564,6 +569,16 @@ static bool step(pt_agent *a)
         build_submit(a);
         return true;
     }
+    if (a->want_compact) {
+        a->want_compact = false;
+        if (!active_run(a) && pt_compact_possible(a)) {
+            entry *last = pt_core_last_entry(a);
+            pt_core_commit_begin(a, 0);
+            pt_compact_write(a, 0, last ? last->id : 0);
+            pt_core_commit_end(a);
+            return true;
+        }
+    }
     if (!active_run(a) && (q = first_queued(a))) {
         build_place(a, q);
         return true;
@@ -583,7 +598,7 @@ static bool step(pt_agent *a)
                 blocked = t->owner;
             if (!t->fx && pt_tool_step(a, t))
                 return true;
-        } else if (!t->fx && pt_run_step(a, t)) {
+        } else if (!t->fx && (t->kind == TASK_COMPACT ? pt_compact_step(a, t) : pt_run_step(a, t))) {
             return true;
         }
         if (a->fatal || a->commit_out)
@@ -629,7 +644,7 @@ bool pt_idle(const pt_agent *a)
 {
     uint32_t i;
     if (a->fatal || a->commit_out || a->qlen || a->want_create || a->want_open || a->want_close ||
-        a->nsubs || !a->loaded)
+        a->nsubs || a->want_compact || !a->loaded)
         return false;
     if (a->closing)
         return a->closed;
@@ -924,11 +939,21 @@ bool pt_submit(pt_agent *a, const pt_input *in)
     return !a->subs_a.oom;
 }
 
+bool pt_compact(pt_agent *a)
+{
+    if (a->fatal || active_run(a) || a->want_compact || !pt_compact_possible(a))
+        return false;
+    a->want_compact = true;
+    a->idle_sent = false;
+    return true;
+}
+
 bool pt_abort(pt_agent *a)
 {
     uint32_t i;
     for (i = 0; i < a->ntasks; i++)
-        if (a->tasks[i]->status != ST_DONE && a->tasks[i]->kind == TASK_RUN) {
+        if (a->tasks[i]->status != ST_DONE &&
+            (a->tasks[i]->kind == TASK_RUN || (a->tasks[i]->kind == TASK_COMPACT && !a->tasks[i]->owner))) {
             a->abort_run = a->tasks[i]->id;
             a->idle_sent = false;
             return true;
@@ -969,5 +994,6 @@ bool pt_entry_at(const pt_agent *a, uint32_t i, pt_entry_view *out)
     out->kind = names[e->kind];
     out->msg = e->kind == ENT_ERROR ? NULL : &e->msg;
     out->raw = e->raw;
+    out->summary = e->summary;
     return true;
 }
