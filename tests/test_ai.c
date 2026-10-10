@@ -113,9 +113,9 @@ static void test_resolve(void)
     CHECK(t.known);
     CHECK(strcmp(t.model.id, "claude-opus-5-5") == 0);
     CHECK(t.compat.mid_conversation_system == PT_YES && t.compat.fallbacks == PT_YES);
-    t = target("openrouter/anthropic/claude-sonnet-4.5");
+    t = target("openrouter/acme/unlisted-1");
     CHECK(!t.known);
-    CHECK(strcmp(t.model.id, "anthropic/claude-sonnet-4.5") == 0);
+    CHECK(strcmp(t.model.id, "acme/unlisted-1") == 0);
     CHECK(strcmp(pt_ai_api_id(t.api), "openai-completions") == 0);
     CHECK(t.compat.reasoning_param == PT_RPARAM_OPENROUTER);
     CHECK(t.compat.system_role == PT_SYSROLE_SYSTEM); /* from the API defaults */
@@ -259,7 +259,7 @@ static void test_openai_request(void)
     CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
     CHECK_STR(jget(body_of(&r), "reasoning_effort"), "low");
 
-    t = target("openrouter/anthropic/claude-sonnet-4.5");
+    t = target("openrouter/acme/unlisted-1");
     o.reasoning = PT_REASON_HIGH;
     CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
     b = body_of(&r);

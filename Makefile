@@ -23,7 +23,7 @@ CLI_SRC  := src/cli/pytte_ai.c
 LIB_OBJ  := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
 HOST_OBJ := $(SYS_SRC:%.c=$(BUILD)/obj/%.o) $(CURL_SRC:%.c=$(BUILD)/obj/%.o) $(CLI_SRC:%.c=$(BUILD)/obj/%.o)
 
-.PHONY: all test portable fuzz clean fixtures-update
+.PHONY: all test portable fuzz clean fixtures-update models
 all: $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a
 
 $(BUILD)/obj/%.o: %.c
@@ -52,6 +52,10 @@ test: $(TESTS) $(BUILD)/pytte-ai
 # Regenerate the expected results of the stream fixtures (review the diff!).
 fixtures-update: $(BUILD)/test/test_fixtures
 	PT_UPDATE_FIXTURES=1 ./$(BUILD)/test/test_fixtures
+
+# Refresh the model catalog from models.dev and OpenRouter (network).
+models:
+	python3 scripts/gen_models.py
 
 # The portable parts must build warning-free as strict C99 with gcc and clang,
 # and must not use stdio or malloc.

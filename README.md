@@ -17,6 +17,7 @@ make            # build/pytte-ai and build/libpytte-ai.a
 make test       # unit, fixture and CLI tests, with ASan and UBSan
 make portable   # the core builds as strict C99 with gcc and clang, no stdio
 make fuzz       # libFuzzer targets in build/fuzz/ (clang)
+make models     # refresh the model catalog (network, needs python3)
 ```
 
 ## pytte-ai
@@ -46,6 +47,8 @@ src/ai/                APIs (anthropic-messages, openai-responses for OpenAI,
                        servers, faux), providers and models as data,
                        cross-provider transforms
 src/drv/               host drivers: libc, curl HTTP, faux HTTP
+src/ai/models.gen.inc  the model catalog, generated from models.dev and
+                       OpenRouter by scripts/gen_models.py
 src/cli/pytte_ai.c     the pytte-ai CLI
 tests/fixtures/        response streams per provider, with golden results
 tests/faux/            faux provider scripts

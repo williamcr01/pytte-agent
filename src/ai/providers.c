@@ -59,36 +59,10 @@ static const pt_provider providers[] = {
     },
 };
 
-/* Context window, max output, reasoning, images; prices where known, in
- * micro-dollars per million tokens (input, output, cache read, cache write). */
+/* The models come from scripts/gen_models.py (make models). A model that is
+ * not listed still works, with its provider's defaults. */
 static const pt_model models[] = {
-    {"anthropic", "claude-opus-5-5", "Claude Opus 5.5", NULL, 1000000, 128000, true, true,
-     {4000000, 20000000, 200000, 5000000},
-     {.mid_conversation_system = PT_YES, .fallbacks = PT_YES}},
-    {"anthropic", "claude-opus-5", "Claude Opus 5", NULL, 1000000, 128000, true, true,
-     {5000000, 25000000, 500000, 6250000},
-     {.mid_conversation_system = PT_YES, .fallbacks = PT_YES}},
-    {"anthropic", "claude-fable-5-1", "Claude Fable 5.1", NULL, 1000000, 128000, true, true,
-     {10000000, 50000000, 250000, 12500000},
-     {.mid_conversation_system = PT_YES}},
-    {"anthropic", "claude-sonnet-5-5", "Claude Sonnet 5.5", NULL, 1000000, 128000, true, true,
-     {0, 0, 0, 0}, {.mid_conversation_system = PT_YES}},
-    {"anthropic", "claude-sonnet-5", "Claude Sonnet 5", NULL, 1000000, 128000, true, true,
-     {0, 0, 0, 0}, {0}},
-    {"anthropic", "claude-haiku-5-5", "Claude Haiku 5.5", NULL, 1000000, 128000, true, true,
-     {0, 0, 0, 0}, {0}},
-    {"anthropic", "claude-opus-4-8", "Claude Opus 4.8", NULL, 1000000, 128000, true, true,
-     {5000000, 25000000, 500000, 6250000},
-     {.mid_conversation_system = PT_YES}},
-    {"anthropic", "claude-haiku-4-5", "Claude Haiku 4.5", NULL, 200000, 64000, false, true,
-     {0, 0, 0, 0}, {0}},
-
-    {"openai", "gpt-6-luna", "GPT-6 Luna", NULL, 1050000, 128000, true, true, {0, 0, 0, 0}, {0}},
-    {"openai", "gpt-5", "GPT-5", NULL, 400000, 128000, true, true, {0, 0, 0, 0}, {0}},
-    {"openai", "gpt-5-mini", "GPT-5 mini", NULL, 400000, 128000, true, true, {0, 0, 0, 0}, {0}},
-    {"openai", "gpt-4.1", "GPT-4.1", NULL, 1047576, 32768, false, true, {0, 0, 0, 0}, {0}},
-    {"openai", "gpt-4o-mini", "GPT-4o mini", NULL, 128000, 16384, false, true, {0, 0, 0, 0}, {0}},
-
+#include "models.gen.inc"
     {"faux", "faux", "Faux", NULL, 100000, 4096, true, false, {0, 0, 0, 0}, {0}},
 };
 
