@@ -108,7 +108,8 @@ static void watchdog(int rd, int out)
     if (!clean) { /* the parent died without restoring */
         if (kitty)
             put_all(out, "\x1b[<u", 4);
-        put_all(out, "\x1b[?2004l\x1b[?2026l\x1b[?25h\x1b[0m\r\n", 28);
+        /* the cursor is in the input box: clear it and the rest of the band */
+        put_all(out, "\x1b[?2004l\x1b[?2026l\x1b[?25h\x1b[0m\r\x1b[J", 30);
     }
     _exit(0);
 }

@@ -265,15 +265,16 @@ static void test_chat(void)
     pty p;
     const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     pty_start(&p, 24, 80, args);
-    CHECK(wait_for(&p, "session ", 3000));
+    CHECK(wait_for(&p, "/help for commands", 3000));
     CHECK(p.v->kitty == 1); /* the query was answered: flags pushed */
     CHECK(p.v->paste);
     keys(&p, "hi there");
-    CHECK(wait_for(&p, "❯ hi there", 2000));
+    CHECK(wait_for(&p, "┃ hi there", 2000));
     keys(&p, "\r");
     CHECK(wait_for(&p, "Hello from the faux provider! Nothing here touched the network.", 5000));
     CHECK(wait_for(&p, "✻ thought", 2000));
     CHECK(wait_idle(&p, 3000));
+    CHECK(wait_for(&p, "\nfaux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
     CHECK(finish(&p, 3000) == 0);
     CHECK(has(&p, "┃ hi there"));
@@ -291,7 +292,7 @@ static void test_kill9(void)
     size_t n;
     char *log;
     pty_start(&p, 24, 80, args);
-    CHECK(wait_for(&p, "session ", 3000));
+    CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "list the files\r");
     CHECK(wait_for(&p, "No tools are available", 5000));
     kill(p.pid, SIGKILL);
@@ -323,13 +324,13 @@ static void test_suspend_and_signals(void)
     struct winsize ws;
     int i;
     pty_start(&p, 24, 80, args);
-    CHECK(wait_for(&p, "session ", 3000));
+    CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "draft text");
-    CHECK(wait_for(&p, "❯ draft text", 2000));
+    CHECK(wait_for(&p, "┃ draft text", 2000));
     keys(&p, "\x1b[122;5u"); /* Ctrl-Z */
     CHECK(wait_for(&p, "[stopped]", 2000));
     CHECK(p.v->kitty == 0 && !p.v->paste); /* restored while stopped */
-    CHECK(wait_for(&p, "❯ draft text", 3000)); /* continued: drawn again */
+    CHECK(wait_for(&p, "┃ draft text", 3000)); /* continued: drawn again */
     pump(&p, 100);
     CHECK(p.v->kitty == 1 && p.v->paste);
     /* a resize storm */
@@ -366,7 +367,7 @@ static void test_interrupt_and_queue(void)
     pty p;
     const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/slow.json", NULL};
     pty_start(&p, 24, 80, args);
-    CHECK(wait_for(&p, "session ", 3000));
+    CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "list the files\r");
     CHECK(wait_for(&p, "Let me look at the files first.\n", 5000));
     keys(&p, "and then?\r");
@@ -398,11 +399,17 @@ static void test_commands(void)
     size_t n;
     char *cfg;
     pty_start(&p, 24, 80, args);
-    CHECK(wait_for(&p, "session ", 3000));
+    CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "/");
     CHECK(wait_for(&p, "▸ /model     set the model", 1000)); /* descriptions in a column */
+    CHECK(wait_for(&p, "enter run · esc close · 1/9", 1000)); /* the keys, and where you are */
+    keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
+    CHECK(wait_for(&p, "▸ /quit", 1000));
+    CHECK(wait_for(&p, "9/9", 1000));
+    keys(&p, "\x1b[B");
+    CHECK(wait_for(&p, "▸ /model", 1000));
     keys(&p, "th\t");
-    CHECK(wait_for(&p, "❯ /thinking ", 1000));
+    CHECK(wait_for(&p, "┃ /thinking ", 1000));
     CHECK(wait_for(&p, "collapsed", 1000));
     keys(&p, "full\r");
     CHECK(wait_for(&p, "thinking full", 1000));
@@ -412,7 +419,7 @@ static void test_commands(void)
     free(cfg);
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "effort high", 1000));
-    CHECK(wait_for(&p, "faux · high · ", 1000));
+    CHECK(wait_for(&p, "faux · high", 1000));
     keys(&p, "/model nosuch/provider\r");
     CHECK(wait_for(&p, "nosuch/provider: ", 1000));
     /* a model is always named: the menu lists no bare providers */
@@ -452,17 +459,17 @@ static void test_history_pager_draft(void)
     const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
     pty_start(&p, 24, 80, args);
-    CHECK(wait_for(&p, "session ", 3000));
+    CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "first question\r");
     CHECK(wait_idle(&p, 5000));
     keys(&p, "\x1b[A");
-    CHECK(wait_for(&p, "❯ first question", 1000));
+    CHECK(wait_for(&p, "┃ first question", 1000));
     keys(&p, "\x03"); /* Ctrl-C clears it */
     keys(&p, "/settings pager cat\r");
     CHECK(wait_for(&p, "pager cat (user)", 1000));
     keys(&p, "\x0f"); /* Ctrl-O: the thinking in full, through cat */
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 2000));
-    CHECK(wait_for(&p, "❯ ", 1000));
+    CHECK(wait_for(&p, "┃ ", 1000));
     keys(&p, "unsent words");
     pump(&p, 1300); /* saved at most once a second */
     kill(p.pid, SIGTERM);
@@ -470,7 +477,7 @@ static void test_history_pager_draft(void)
     modes_restored(&p);
     pty_free(&p);
     pty_start(&p, 24, 80, again);
-    CHECK(wait_for(&p, "❯ unsent words", 3000));
+    CHECK(wait_for(&p, "┃ unsent words", 3000));
     keys(&p, "\x03\x03");
     pump(&p, 100);
     keys(&p, "\x03");
@@ -484,7 +491,7 @@ static void test_sigterm(void)
     pty p;
     const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
     pty_start(&p, 24, 80, args);
-    CHECK(wait_for(&p, "session ", 3000));
+    CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "hello\r");
     CHECK(wait_for(&p, "Nothing here to", 5000));
     kill(p.pid, SIGTERM); /* mid-stream: what was shown stays */
