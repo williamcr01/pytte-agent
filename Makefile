@@ -21,14 +21,15 @@ DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/dr
 RT_SRC   := src/rt/rt.c
 SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
+TUI_SRC  := $(wildcard src/tui/*.c)
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
 LIB_OBJ  := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
 obj       = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
 PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) src/cli/pytte_ai.c)
-PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) src/cli/main.c)
+PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) src/cli/main.c)
 
-.PHONY: all test crash portable fuzz clean fixtures-update models
+.PHONY: all test crash portable fuzz clean fixtures-update models width
 all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a
 
 $(BUILD)/obj/%.o: %.c
@@ -52,9 +53,9 @@ TEST_CC     ?= $(CC)
 TEST_CFLAGS := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TESTS       := $(patsubst tests/%.c,$(BUILD)/test/%,$(wildcard tests/test_*.c))
 
-$(BUILD)/test/%: tests/%.c tests/t.h $(LIB_SRC) $(SYS_SRC) $(wildcard include/*.h src/*/*.h)
+$(BUILD)/test/%: tests/%.c tests/t.h $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(wildcard include/*.h src/*/*.h src/*/*.inc)
 	@mkdir -p $(dir $@)
-	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) -o $@
+	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) -o $@
 
 test: $(TESTS) $(BUILD)/pytte-ai $(BUILD)/pytte
 	@for t in $(TESTS); do ./$$t || exit 1; done
@@ -72,6 +73,10 @@ fixtures-update: $(BUILD)/test/test_fixtures
 # Refresh the model catalog from models.dev and OpenRouter (network).
 models:
 	python3 scripts/gen_models.py
+
+# Regenerate the TUI's display-width table from the Unicode data (network).
+width:
+	python3 scripts/gen_width.py
 
 # The portable parts must build warning-free as strict C99 with gcc and clang,
 # and must not use stdio or malloc.
