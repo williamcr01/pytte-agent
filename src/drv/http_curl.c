@@ -135,15 +135,29 @@ static void cancel(pt_http_driver *vd, void *h)
     unlink_xfer((curl_drv *)vd, (xfer *)h);
 }
 
-static int pump(pt_http_driver *vd, int timeout_ms)
+static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     curl_drv *d = (curl_drv *)vd;
+    struct curl_waitfd w[8];
     int running = 0, left;
+    unsigned i;
     CURLMsg *msg;
+    if (nfds > 8)
+        nfds = 8;
+    for (i = 0; i < nfds; i++) {
+        w[i].fd = fds[i].fd;
+        w[i].events = CURL_WAIT_POLLIN;
+        w[i].revents = 0;
+        fds[i].ready = false;
+    }
     if (curl_multi_perform(d->m, &running) != CURLM_OK)
         return -1;
-    if (running && curl_multi_poll(d->m, NULL, 0, timeout_ms, NULL) != CURLM_OK)
+    /* With no transfers, curl_multi_poll (7.66+) still waits on the extra
+     * fds and the timeout. */
+    if ((running || nfds) && curl_multi_poll(d->m, nfds ? w : NULL, nfds, timeout_ms, NULL) != CURLM_OK)
         return -1;
+    for (i = 0; i < nfds; i++)
+        fds[i].ready = (w[i].revents & CURL_WAIT_POLLIN) != 0;
     if (curl_multi_perform(d->m, &running) != CURLM_OK)
         return -1;
     while ((msg = curl_multi_info_read(d->m, &left))) {

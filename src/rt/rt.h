@@ -36,10 +36,18 @@ typedef enum {
     PT_RT_IDLE,    /* nothing left to do */
     PT_RT_STOPPED, /* cfg.stop said so */
     PT_RT_FATAL,   /* see pt_fatal / pt_error */
-    PT_RT_STUCK    /* nothing outstanding, yet not idle: a bug */
+    PT_RT_STUCK,   /* nothing outstanding, yet not idle: a bug */
+    PT_RT_BUSY     /* pt_rt_step: work is outstanding */
 } pt_rt_result;
 
+/* Until idle, fatal or stopped. */
 pt_rt_result pt_rt_run(pt_rt *rt);
+/* One bounded step, for hosts that wait on more than the agent (a TUI):
+ * start what the agent hands out, then wait up to timeout_ms (-1: no
+ * limit) for HTTP progress, the next sleeper or one of fds (marked
+ * ready), and start what that produced. Waits on fds even when idle or
+ * fatal; cfg.stop is not consulted. */
+pt_rt_result pt_rt_step(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds);
 /* Clean exit: drop outstanding requests and commit the close claim.
  * Pending work stays pending for the next owner. */
 bool pt_rt_close(pt_rt *rt);

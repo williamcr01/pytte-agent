@@ -15,6 +15,15 @@ const char *pt_sys_env(void *ud, const char *name);
 /* Whole file, NUL-terminated, malloc'd. NULL on error (errno set). */
 char *pt_sys_read_file(const char *path, size_t *n);
 bool pt_sys_write_file(const char *path, const void *p, size_t n);
+/* Extra file descriptors to wake on while waiting (stdin, a signal pipe):
+ * ready is set when fd can be read without blocking. */
+typedef struct pt_waitfd {
+    int fd;
+    bool ready;
+} pt_waitfd;
+/* poll() for readability: wait up to timeout_ms (-1: forever) for one of
+ * fds. Returns how many are ready, or -1 (errno set; EINTR is 0). */
+int pt_sys_wait(pt_waitfd *fds, unsigned n, int timeout_ms);
 /* Random bytes from the OS. ud is unused (fits pt_opts.random). */
 void pt_sys_random(void *ud, void *out, size_t n);
 /* Hostname, boot ID (empty when unknown) and pid, for claim records. */
@@ -36,9 +45,10 @@ typedef struct pt_http_driver pt_http_driver;
 struct pt_http_driver {
     void *(*start)(pt_http_driver *d, const pt_http_req *req, const pt_http_sink *sink);
     void (*cancel)(pt_http_driver *d, void *handle);
-    /* Wait up to timeout_ms for progress; returns the number of active
-     * requests, or -1 on a driver failure. */
-    int (*pump)(pt_http_driver *d, int timeout_ms);
+    /* Wait up to timeout_ms for progress or for one of fds to become
+     * readable (marked ready; it waits on fds even with no requests).
+     * Returns the number of active requests, or -1 on a driver failure. */
+    int (*pump)(pt_http_driver *d, int timeout_ms, pt_waitfd *fds, unsigned nfds);
     void (*free)(pt_http_driver *d);
 };
 

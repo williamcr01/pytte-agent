@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "rt/rt.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -244,6 +245,11 @@ static void handle(pt_rt *rt, const pt_fx *fx)
                 drop_req(rt, i);
                 break;
             }
+        for (i = 0; i < rt->nsleeps; i++)
+            if (rt->sleeps[i].fx == fx->cancel) {
+                rt->sleeps[i] = rt->sleeps[--rt->nsleeps];
+                break;
+            }
         break;
     }
 }
@@ -284,41 +290,75 @@ static int64_t next_wake(const pt_rt *rt)
     return t;
 }
 
-pt_rt_result pt_rt_run(pt_rt *rt)
+static void drain(pt_rt *rt)
 {
     pt_fx fx;
+    while (pt_poll(rt->a, &fx))
+        handle(rt, &fx);
+}
+
+static void http_failed(pt_rt *rt)
+{
+    uint32_t i;
+    for (i = 0; i < rt->nreqs; i++)
+        if (!rt->reqs[i]->done) {
+            rt->reqs[i]->done = true;
+            rt->c.http->cancel(rt->c.http, rt->reqs[i]->h);
+            pt_fx_done(rt->a, rt->reqs[i]->fx, "HTTP driver failure");
+        }
+}
+
+/* Wait once: for a due sleeper, HTTP progress, one of fds, or timeout_ms. */
+static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
+{
+    int64_t now = rt->c.now(rt->c.clock_ud), until, wait = timeout_ms;
+    if (wake(rt, now))
+        return;
+    until = next_wake(rt);
+    if (until != INT64_MAX && (wait < 0 || until - now < wait))
+        wait = until - now;
+    if (wait > INT32_MAX)
+        wait = INT32_MAX;
+    if (rt->nreqs || nfds) {
+        if (rt->c.http->pump(rt->c.http, (int)wait, fds, nfds) < 0)
+            http_failed(rt);
+        sweep(rt);
+    } else if (rt->nsleeps && wait > 0) {
+        rt->c.sleep(rt->c.clock_ud, (uint32_t)wait);
+    }
+    wake(rt, rt->c.now(rt->c.clock_ud));
+}
+
+static pt_rt_result status(pt_rt *rt)
+{
+    if (pt_fatal(rt->a))
+        return PT_RT_FATAL;
+    if (pt_idle(rt->a))
+        return PT_RT_IDLE;
+    if (!rt->nreqs && !rt->nsleeps)
+        return PT_RT_STUCK;
+    return PT_RT_BUSY;
+}
+
+pt_rt_result pt_rt_step(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
+{
+    drain(rt);
+    wait_once(rt, timeout_ms, fds, nfds);
+    drain(rt);
+    return status(rt);
+}
+
+pt_rt_result pt_rt_run(pt_rt *rt)
+{
     for (;;) {
-        int64_t now, until;
-        while (pt_poll(rt->a, &fx))
-            handle(rt, &fx);
-        if (pt_fatal(rt->a))
-            return PT_RT_FATAL;
-        if (pt_idle(rt->a))
-            return PT_RT_IDLE;
+        pt_rt_result r;
+        drain(rt);
+        r = status(rt);
+        if (r != PT_RT_BUSY)
+            return r;
         if (rt->c.stop && rt->c.stop(rt->c.stop_ud))
             return PT_RT_STOPPED;
-        now = rt->c.now(rt->c.clock_ud);
-        if (wake(rt, now))
-            continue;
-        until = next_wake(rt);
-        if (rt->nreqs) {
-            int64_t wait = until == INT64_MAX ? 100 : until - now;
-            if (rt->c.http->pump(rt->c.http, wait < 100 ? (int)wait : 100) < 0) {
-                uint32_t i;
-                for (i = 0; i < rt->nreqs; i++)
-                    if (!rt->reqs[i]->done) {
-                        rt->reqs[i]->done = true;
-                        rt->c.http->cancel(rt->c.http, rt->reqs[i]->h);
-                        pt_fx_done(rt->a, rt->reqs[i]->fx, "HTTP driver failure");
-                    }
-            }
-            sweep(rt);
-        } else if (rt->nsleeps) {
-            int64_t wait = until - now;
-            rt->c.sleep(rt->c.clock_ud, (uint32_t)(wait < 100 ? wait : 100));
-        } else {
-            return PT_RT_STUCK;
-        }
+        wait_once(rt, 100, NULL, 0);
     }
 }
 

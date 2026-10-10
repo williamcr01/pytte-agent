@@ -239,17 +239,20 @@ static void r_cancel(pt_http_driver *vd, void *h)
     free(r);
 }
 
-static int r_pump(pt_http_driver *vd, int timeout_ms)
+static int r_pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     router *d = (router *)vd;
     int n = 0, m;
-    if (d->faux && (m = d->faux->pump(d->faux, timeout_ms)) > 0)
+    if (d->faux && (m = d->faux->pump(d->faux, d->curl ? 0 : timeout_ms, d->curl ? NULL : fds,
+                                      d->curl ? 0 : nfds)) > 0)
         n += m;
     if (d->curl) {
-        m = d->curl->pump(d->curl, n ? 0 : timeout_ms);
+        m = d->curl->pump(d->curl, n ? 0 : timeout_ms, fds, nfds);
         if (m < 0)
             return -1;
         n += m;
+    } else if (!d->faux && nfds) {
+        pt_sys_wait(fds, nfds, timeout_ms);
     }
     return n;
 }
@@ -500,6 +503,7 @@ static int run(session *s, pt_http_driver *http)
                 s->id);
         break;
     case PT_RT_STUCK:
+    case PT_RT_BUSY: /* not returned by pt_rt_run */
         fprintf(stderr, "pytte: internal error: the agent is stuck\n");
         rc = 20;
         break;

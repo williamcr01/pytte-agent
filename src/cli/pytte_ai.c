@@ -608,7 +608,7 @@ int main(int argc, char **argv)
                 pt_ai_stream_abort(c.s, now());
                 break;
             }
-            if (http->pump(http, 100) < 0)
+            if (http->pump(http, 100, NULL, 0) < 0)
                 pt_ai_stream_end(c.s, "HTTP driver failure", now());
         }
         /* The stream can finish (on the final event) before the transfer

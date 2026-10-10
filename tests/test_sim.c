@@ -16,6 +16,18 @@
 #include "core/core.h"
 #include "rt/rt.h"
 
+#include <unistd.h>
+
+static bool use_step; /* drive clients with pt_rt_step instead of pt_rt_run */
+
+static pt_rt_result run_stepped(pt_rt *rt)
+{
+    pt_rt_result r;
+    while ((r = pt_rt_step(rt, 100, NULL, 0)) == PT_RT_BUSY)
+        ;
+    return r;
+}
+
 typedef struct rec_http { /* the faux server, remembering what it was asked */
     pt_http_driver vt;
     pt_http_driver *inner;
@@ -42,10 +54,10 @@ static void rh_cancel(pt_http_driver *d, void *h)
     r->inner->cancel(r->inner, h);
 }
 
-static int rh_pump(pt_http_driver *d, int timeout_ms)
+static int rh_pump(pt_http_driver *d, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     rec_http *r = (rec_http *)d;
-    return r->inner->pump(r->inner, timeout_ms);
+    return r->inner->pump(r->inner, timeout_ms, fds, nfds);
 }
 
 static void rh_free(pt_http_driver *d)
@@ -172,7 +184,7 @@ static pt_rt_result client(world *w, const scenario *sc)
         in.req = pt_strz(req);
         CHECK(pt_submit(a, &in));
     }
-    res = pt_rt_run(rt);
+    res = use_step ? run_stepped(rt) : pt_rt_run(rt);
     if (res == PT_RT_IDLE && !pt_rt_close(rt))
         res = PT_RT_FATAL; /* the close commit failed: also a crash */
     snprintf(w->err, sizeof w->err, "%s", pt_error(a));
@@ -485,6 +497,79 @@ static void test_another_writer(void)
     pt_buf_free(&want);
 }
 
+/* pt_rt_step reaches the same end as pt_rt_run, and wakes on extra fds. */
+static void test_step(void)
+{
+    size_t i;
+    for (i = 0; i < sizeof scenarios / sizeof *scenarios; i++) {
+        const scenario *sc = &scenarios[i];
+        world ref, w;
+        pt_buf want, got;
+        uint32_t clients = 0;
+        pt_buf_init(&want, T_AL);
+        pt_buf_init(&got, T_AL);
+        world_init(&ref, sc->script, 1);
+        CHECK(converge(&ref, sc, &clients));
+        outcome(&ref, &want);
+        world_init(&w, sc->script, 1);
+        use_step = true;
+        clients = 0;
+        CHECK(converge(&w, sc, &clients));
+        use_step = false;
+        outcome(&w, &got);
+        CHECK(pt_str_eq(pt_buf_str(&got), pt_buf_str(&want)));
+        world_free(&ref);
+        world_free(&w);
+        pt_buf_free(&want);
+        pt_buf_free(&got);
+    }
+    {
+        world w;
+        pt_opts o;
+        pt_rt_cfg rc;
+        pt_agent *a;
+        pt_rt *rt;
+        pt_session_cfg c;
+        pt_identity me;
+        pt_waitfd fd;
+        int p[2];
+        char ch;
+        CHECK(pipe(p) == 0);
+        world_init(&w, "{\"turns\":[]}", 1);
+        memset(&o, 0, sizeof o);
+        o.alloc = T_AL;
+        o.now_ms = w_now;
+        o.ud = &w;
+        a = pt_new(&o);
+        memset(&rc, 0, sizeof rc);
+        rc.store = w.store;
+        rc.http = &w.http->vt;
+        rc.now = w_now;
+        rc.sleep = w_sleep;
+        rc.clock_ud = &w;
+        rt = pt_rt_new(&rc, a);
+        memset(&c, 0, sizeof c);
+        memset(&me, 0, sizeof me);
+        me.host = PT_S("sim");
+        CHECK(pt_create(a, &c));
+        CHECK(pt_open(a, &me, false));
+        fd.fd = p[0];
+        CHECK(pt_rt_step(rt, 0, &fd, 1) == PT_RT_IDLE);
+        CHECK(!fd.ready);
+        CHECK(write(p[1], "x", 1) == 1);
+        CHECK(pt_rt_step(rt, 5000, &fd, 1) == PT_RT_IDLE); /* returns at once */
+        CHECK(fd.ready);
+        CHECK(read(p[0], &ch, 1) == 1);
+        CHECK(pt_rt_step(rt, 10, &fd, 1) == PT_RT_IDLE);
+        CHECK(!fd.ready);
+        pt_rt_free(rt);
+        pt_free(a);
+        world_free(&w);
+        close(p[0]);
+        close(p[1]);
+    }
+}
+
 static void test_scenarios(void)
 {
     size_t i;
@@ -496,5 +581,6 @@ int main(void)
 {
     RUN(test_scenarios);
     RUN(test_another_writer);
+    RUN(test_step);
     return t_done("test_sim");
 }

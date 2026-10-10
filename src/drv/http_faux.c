@@ -77,14 +77,19 @@ static void cancel(pt_http_driver *vd, void *h)
     unlink_fx((faux_drv *)vd, (fx *)h);
 }
 
-/* Each pump delivers one chunk of every active response. */
-static int pump(pt_http_driver *vd, int timeout_ms)
+/* Each pump delivers one chunk of every active response. With nothing to
+ * deliver it waits on fds (and only then on the timeout). */
+static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     faux_drv *d = (faux_drv *)vd;
     fx *x = d->list, *next;
     int active = 0;
-    (void)timeout_ms;
-    if (x && x->delay_ms)
+    if (nfds) {
+        int t = timeout_ms;
+        if (x && (t < 0 || (int)x->delay_ms < t))
+            t = (int)x->delay_ms;
+        pt_sys_wait(fds, nfds, t);
+    } else if (x && x->delay_ms)
         pt_sys_sleep_ms(x->delay_ms);
     for (; x; x = next) {
         size_t step;

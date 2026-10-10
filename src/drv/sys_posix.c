@@ -2,6 +2,7 @@
 #include "drv/drv.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,6 +26,27 @@ pt_allocator pt_sys_allocator(void)
     al.fn = libc_alloc;
     al.ud = NULL;
     return al;
+}
+
+int pt_sys_wait(pt_waitfd *fds, unsigned n, int timeout_ms)
+{
+    struct pollfd p[8];
+    unsigned i;
+    int r;
+    if (n > 8)
+        n = 8;
+    for (i = 0; i < n; i++) {
+        p[i].fd = fds[i].fd;
+        p[i].events = POLLIN;
+        p[i].revents = 0;
+        fds[i].ready = false;
+    }
+    r = poll(p, n, timeout_ms);
+    if (r < 0)
+        return errno == EINTR ? 0 : -1;
+    for (i = 0; i < n; i++)
+        fds[i].ready = (p[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+    return r;
 }
 
 int64_t pt_sys_now_ms(void)
