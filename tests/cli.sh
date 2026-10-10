@@ -119,11 +119,17 @@ check "ls shows the owner running" [ $? -eq 0 ]
 kill -INT $owner
 wait $owner
 check "Ctrl-C detaches with 130" [ $? -eq 130 ]
+"$pytte" ls | head -1 | grep -q "closed .* list$"
+check "...and ls shows it closed, with its run unfinished" [ $? -eq 0 ]
 out=$("$pytte" -p -c --script tests/faux/slow.json </dev/null 2>/dev/null)
 case $out in *"plenty of time to kill the process"*) ok=0 ;; *) ok=1 ;; esac
 check "...and the detached session resumes to the end" [ $ok -eq 0 ]
-"$pytte" ls | head -1 | grep -q "closed .* list$"
-check "...and ls shows it closed" [ $? -eq 0 ]
+"$pytte" ls | head -1 | grep -q "idle .* list$"
+check "...and ls shows it idle" [ $? -eq 0 ]
+PYTTE_PERMISSION_MODE=ask "$pytte" -p -m faux/faux --script tests/faux/tools.json "may I" >/dev/null 2>&1
+check "a tool call waiting for approval exits with 3" [ $? -eq 3 ]
+"$pytte" ls | head -1 | grep -q "waiting .* may I$"
+check "...and ls shows it waiting" [ $? -eq 0 ]
 (
     XDG_STATE_HOME=$(mktemp -d)
     "$pytte" -p -m faux/faux --script tests/faux/slow.json "doomed" >/dev/null 2>&1 &

@@ -386,6 +386,23 @@ static void build_create(pt_agent *a)
     pt_core_commit_end(a);
 }
 
+/* What a closing owner leaves behind, for `pytte ls` (which reads only
+ * the log's tail): idle (nothing to do), waiting (a tool call waits for
+ * approval) or busy (a run that the next owner continues). */
+static const char *close_state(pt_agent *a)
+{
+    uint32_t i;
+    if (pt_asks(a, NULL, 0))
+        return "waiting";
+    for (i = 0; i < a->ntasks; i++)
+        if (a->tasks[i]->status != ST_DONE)
+            return "busy";
+    for (i = 0; i < a->ninputs; i++)
+        if (a->inputs[i]->status == IN_QUEUED && a->inputs[i]->kind == INK_USER)
+            return "busy";
+    return "idle";
+}
+
 static void write_claim(pt_agent *a, const char *event)
 {
     pt_jw *w = &a->cw;
@@ -413,6 +430,8 @@ static void write_claim(pt_agent *a, const char *event)
     if (*event == 'c') {
         pt_jw_key(w, "closed");
         pt_jw_int(w, pt_core_now(a));
+        pt_jw_key(w, "state");
+        pt_jw_strz(w, close_state(a));
     }
     pt_jw_key(w, "pytte");
     pt_jw_strz(w, PT_VERSION);

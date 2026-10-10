@@ -114,8 +114,10 @@ the earlier epochs. `/compact` compacts now. `--context-window N` pretends
 the window is N tokens, which is handy for trying it. Token usage per model
 is recorded with each answer; `/usage` shows it with an estimated cost.
 
-`pytte ls` shows each session as running (with the owner's pid), closed,
-or crashed (its owner died without closing it; `pytte -r ID` recovers it).
+`pytte ls` shows each session as running (with the owner's pid), idle,
+waiting (a tool call needs approval), closed (detached with a run
+unfinished; resuming continues it) or crashed (its owner died without
+closing it; `pytte -r ID` recovers it).
 
 Recovery after a crash follows each tool's replay policy. `read` and
 `write` run again. A `bash` or `edit` call that was cut off is not repeated;

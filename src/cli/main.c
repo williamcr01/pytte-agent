@@ -692,7 +692,9 @@ static bool ls_tail(void *ud, pt_str line)
     return true;
 }
 
-/* closed: closed by its owner. running: an open claim of a live process on
+/* From the last claim. Closed by its owner: idle (nothing left to do),
+ * waiting (for a tool call's approval) or closed (a run is unfinished;
+ * resuming continues it). running: an open claim of a live process on
  * this machine (the lock is left alone: taking it, even shared, could
  * refuse an owner starting that moment). crashed: an open claim of a
  * process that is gone. */
@@ -709,7 +711,10 @@ static void ls_status(const ls_row *r, char *out, size_t cap)
     }
     event = pt_json_gets(r->claim, "event", ar);
     if (pt_str_eqz(event, "close")) {
-        snprintf(out, cap, "closed");
+        pt_str state = pt_json_gets(r->claim, "state", ar);
+        snprintf(out, cap, "%s", pt_str_eqz(state, "idle")      ? "idle"
+                                 : pt_str_eqz(state, "waiting") ? "waiting"
+                                                                : "closed");
         return;
     }
     pt_sys_identity(host, sizeof host, boot, sizeof boot, &me);
