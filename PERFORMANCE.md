@@ -123,6 +123,32 @@ blocks. The separate 60-fixture profile peaks at 132,083 bytes and also ends wit
 zero live blocks. Profiling used optimized debug builds without sanitizers;
 none of its instrumented timings are used above.
 
+## Reading long logs
+
+Measured on 2026-10-11 (commit `ece1569` against `fbe56f4`), same machine and
+`-O2 -g` builds. Recovery (`pytte -p -c`) and `pytte log` used to read the
+whole log into one buffer before parsing; they now read 64 KB chunks and
+carry only a line that spans two chunks. Workload: one offline session of
+300 `bash` calls that each print 48,894 bytes (`seq 1 10000`), so each
+result keeps 16 KB in the log and the rest in a blob. The log is 8,411,728
+bytes in a single epoch. The table shows medians of 7 runs per command,
+alternating builds, and two rounds:
+
+| Command | Peak RSS before | Peak RSS after | Wall time before | Wall time after |
+| --- | ---: | ---: | ---: | ---: |
+| `pytte log` | 25.9 MB | 17.7 MB | 150–155 ms | 140–144 ms |
+| `pytte log --json` | 25.9 MB | 17.7 MB | 145–148 ms | 136–139 ms |
+| `pytte -p -c` (recover, then close) | 26.0 MB | 18.0 MB | 162 ms | 157–171 ms |
+
+The saving is the size of the log. The rest is the current epoch's entries,
+which the agent keeps in memory. Wall time stays within run-to-run noise.
+`pytte ls` reads at most 64 KB from the head and 64 KB from the tail of each
+log, whatever its size. The workload script (300 turns of
+`{"type":"tool_call","name":"bash","args":{"command":"seq 1 10000"}}` and a
+final text turn) runs with `PYTTE_PERMISSION_MODE=auto pytte -p -m faux/faux
+--context-window 100000000 --script many.json go`. Peak RSS is `ru_maxrss`
+from `wait4`, measured with stdin, stdout and stderr on `/dev/null`.
+
 ## Reproduction and verification
 
 ```sh
