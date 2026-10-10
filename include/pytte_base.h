@@ -44,6 +44,19 @@ bool pt_str_to_u64(pt_str s, uint64_t *out);
  * CRC-32 (IEEE). Start with crc = 0; pass the previous result to continue. */
 uint32_t pt_crc32(uint32_t crc, const void *p, size_t n);
 
+/* ---- SHA-256 ----------------------------------------------------------------- */
+typedef struct pt_sha256 {
+    uint32_t h[8];
+    uint64_t n;
+    unsigned char buf[64];
+} pt_sha256;
+
+void pt_sha256_init(pt_sha256 *s);
+void pt_sha256_update(pt_sha256 *s, const void *p, size_t n);
+void pt_sha256_final(pt_sha256 *s, unsigned char out[32]);
+/* Lowercase hex of n bytes into out (2n chars, no NUL). */
+void pt_hex(char *out, const void *p, size_t n);
+
 /* ---- arena ---------------------------------------------------------------
  * Grows in chunks from the allocator, frees everything at once. After a
  * failed allocation `oom` stays set, so callers may check once at the end. */
@@ -153,6 +166,14 @@ void pt_jw_null(pt_jw *w);
 void pt_jw_raw(pt_jw *w, pt_str json); /* already valid JSON, written as is */
 /* Quoted, escaped string. Invalid UTF-8 becomes U+FFFD. */
 void pt_json_quote(pt_buf *b, pt_str s);
+
+/* ---- JSON Schema (a subset) ------------------------------------------------
+ * type, properties, required, additionalProperties (false or a schema),
+ * enum, items, minimum/maximum (integers), minLength/maxLength; other
+ * keywords are ignored. False with "$.path: what is wrong" in err. Decoded
+ * strings are allocated in a. */
+bool pt_schema_check(const pt_json *schema, const pt_json *value, pt_arena *a, char *err, size_t cap);
+const char *pt_json_type_name(const pt_json *v);
 
 /* ---- SSE ------------------------------------------------------------------
  * Incremental server-sent events parser. Feed any byte chunks; complete

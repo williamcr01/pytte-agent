@@ -220,6 +220,76 @@ static void test_sse(void)
     }
 }
 
+static void sha_hex(const char *in, size_t n, size_t split, char out[65])
+{
+    pt_sha256 s;
+    unsigned char d[32];
+    pt_sha256_init(&s);
+    pt_sha256_update(&s, in, split);
+    pt_sha256_update(&s, in + split, n - split);
+    pt_sha256_final(&s, d);
+    pt_hex(out, d, 32);
+    out[64] = 0;
+}
+
+static void test_sha256(void)
+{
+    char h[65], big[1000];
+    size_t i;
+    sha_hex("", 0, 0, h);
+    CHECK(strcmp(h, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0);
+    sha_hex("abc", 3, 1, h);
+    CHECK(strcmp(h, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad") == 0);
+    sha_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56, 55, h);
+    CHECK(strcmp(h, "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1") == 0);
+    memset(big, 'a', sizeof big);
+    for (i = 0; i <= sizeof big; i += 37) { /* any split gives the same digest */
+        char h2[65];
+        sha_hex(big, sizeof big, i, h2);
+        if (i == 0)
+            memcpy(h, h2, sizeof h);
+        CHECK(strcmp(h, h2) == 0);
+    }
+    CHECK(strcmp(h, "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3") == 0);
+}
+
+static bool schema_ok(const char *schema, const char *value, const char *want_err)
+{
+    pt_arena a;
+    char err[200];
+    bool ok;
+    pt_arena_init(&a, T_AL, 0);
+    ok = pt_schema_check(pt_json_parse(pt_strz(schema), &a, NULL), pt_json_parse(pt_strz(value), &a, NULL),
+                         &a, err, sizeof err);
+    if (want_err && strcmp(err, want_err) != 0) {
+        fprintf(stderr, "schema error: \"%s\", want \"%s\"\n", err, want_err);
+        ok = !ok;
+    }
+    pt_arena_free(&a);
+    return ok;
+}
+
+static void test_schema(void)
+{
+    const char *s = "{\"type\":\"object\",\"properties\":{\"cmd\":{\"type\":\"string\",\"minLength\":1},"
+                    "\"timeout\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":600},"
+                    "\"mode\":{\"enum\":[\"a\",\"b\"]},\"tags\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}},"
+                    "\"required\":[\"cmd\"],\"additionalProperties\":false}";
+    CHECK(schema_ok(s, "{\"cmd\":\"ls\"}", ""));
+    CHECK(schema_ok(s, "{\"cmd\":\"ls\",\"timeout\":5,\"mode\":\"b\",\"tags\":[\"x\"]}", ""));
+    CHECK(!schema_ok(s, "{}", "$: missing required property cmd"));
+    CHECK(!schema_ok(s, "[]", "$: expected object, got array"));
+    CHECK(!schema_ok(s, "{\"cmd\":1}", "$.cmd: expected string, got number"));
+    CHECK(!schema_ok(s, "{\"cmd\":\"\"}", "$.cmd: too short"));
+    CHECK(!schema_ok(s, "{\"cmd\":\"x\",\"timeout\":0}", "$.timeout: must be at least 1"));
+    CHECK(!schema_ok(s, "{\"cmd\":\"x\",\"timeout\":1.5}", "$.timeout: expected integer, got number"));
+    CHECK(!schema_ok(s, "{\"cmd\":\"x\",\"mode\":\"c\"}", "$.mode: must be one of [\"a\",\"b\"]"));
+    CHECK(!schema_ok(s, "{\"cmd\":\"x\",\"tags\":[\"y\",2]}", "$.tags[1]: expected string, got number"));
+    CHECK(!schema_ok(s, "{\"cmd\":\"x\",\"other\":2}", "$: unknown property other"));
+    CHECK(schema_ok("{\"type\":[\"string\",\"null\"]}", "null", ""));
+    CHECK(schema_ok("true", "{\"anything\":1}", ""));
+}
+
 int main(void)
 {
     RUN(test_arena);
@@ -229,5 +299,7 @@ int main(void)
     RUN(test_json_invalid);
     RUN(test_json_write);
     RUN(test_sse);
+    RUN(test_sha256);
+    RUN(test_schema);
     return t_done("test_base");
 }
