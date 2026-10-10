@@ -255,4 +255,50 @@ void tui_hist_load(tui_input *in, pt_str file, uint32_t max);
 /* The line to append to the file for an entry. */
 void tui_hist_line(pt_buf *out, pt_str entry);
 
+/* ---- term.c: the terminal (16.2.10) ---- */
+
+typedef struct tui_term tui_term;
+
+enum { /* signals, as tui_term_signals reports them */
+    TS_WINCH = 1,
+    TS_TSTP = 2, /* from outside (kill -TSTP); Ctrl-Z arrives as a key */
+    TS_CONT = 4,
+    TS_QUIT = 8, /* SIGINT, SIGTERM, SIGQUIT from outside */
+    TS_HUP = 16
+};
+
+/* Start the watchdog: before the store is opened, before curl, before
+ * anything else holds a file (it must not inherit the session's lock).
+ * Then install the signal handlers. NULL when stdin or stdout is not a
+ * terminal. */
+tui_term *tui_term_new(void);
+/* Raw mode, bracketed paste, and the startup queries: cursor position,
+ * kitty keyboard (when kitty is true) and DA1. */
+bool tui_term_start(tui_term *t, bool kitty);
+/* After the replies (or the timeout): push the kitty flags. */
+void tui_term_kitty(tui_term *t, bool push);
+/* The terminal fds to wait on: stdin and the signal pipe. */
+int tui_term_in(const tui_term *t);
+int tui_term_sigfd(const tui_term *t);
+/* Signals since the last call (TS_ bits); the most recent one in *last. */
+int tui_term_signals(tui_term *t, int *last);
+/* Read what stdin has (after a wait said it is ready). Returns the bytes,
+ * 0 at end of file (the terminal is gone), -1 for nothing. */
+long tui_term_read(tui_term *t, char *buf, size_t cap);
+/* Write everything; returns the milliseconds it took (for pacing). Does
+ * nothing once the terminal is gone. */
+int tui_term_write(tui_term *t, pt_str bytes);
+void tui_term_size(tui_term *t, int *rows, int *cols);
+/* The terminal hung up: skip every write from now on. */
+void tui_term_gone(tui_term *t);
+/* Back to the saved state (pop kitty, paste off, cursor on, termios);
+ * resume undoes it. For Ctrl-Z and the pager. */
+void tui_term_suspend(tui_term *t);
+void tui_term_resume(tui_term *t);
+/* Stop this process (SIGTSTP with the default action), between suspend
+ * and resume. */
+void tui_term_stop_self(void);
+/* Restore, tell the watchdog the exit is clean, and free. */
+void tui_term_free(tui_term *t);
+
 #endif

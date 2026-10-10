@@ -2,6 +2,7 @@
  * box. The screen tests are in test_screen.c. */
 #include "t.h"
 
+#include "cli/cli.h"
 #include "tui/tui.h"
 
 static pt_buf tb; /* scratch */
@@ -478,6 +479,37 @@ static void test_input(void)
     pt_buf_free(&f);
 }
 
+/* Settings written back to the user file: one key changes (19.4). */
+static pt_str set(const char *src, const char *key, const char *value, bool *ok)
+{
+    char err[200];
+    pt_buf_reset(&tb);
+    *ok = cli_json_set(pt_strz(src), key, pt_strz(value), &tb, err, sizeof err);
+    return pt_buf_str(&tb);
+}
+
+static void test_config_set(void)
+{
+    bool ok;
+    CHECK_STR(set("{\n  \"model\": \"x\",\n  \"tui\": {\"thinking\": \"collapsed\"}\n}\n", "tui.thinking", "\"full\"", &ok),
+              "{\n  \"model\": \"x\",\n  \"tui\": {\"thinking\": \"full\"}\n}\n");
+    CHECK(ok);
+    CHECK_STR(set("{\"model\": \"x\"}", "tui.pager", "\"less\"", &ok), "{\"model\": \"x\", \"tui\": {\"pager\": \"less\"}}");
+    CHECK(ok);
+    CHECK_STR(set("{ \"tui\": {} }", "tui.symbols", "\"ascii\"", &ok), "{ \"tui\": {\"symbols\": \"ascii\"} }");
+    CHECK(ok);
+    CHECK_STR(set("{\"tui\": {\"a\": 1}}", "tui.b", "2", &ok), "{\"tui\": {\"a\": 1, \"b\": 2}}");
+    CHECK(ok);
+    CHECK_STR(set("", "model", "\"m\"", &ok), "{\"model\": \"m\"}\n");
+    CHECK(ok);
+    set("{\"model\": \"x\",}", "model", "\"y\"", &ok); /* does not parse: never written */
+    CHECK(!ok);
+    set("[1]", "model", "\"y\"", &ok);
+    CHECK(!ok);
+    set("{\"tui\": 3}", "tui.pager", "\"y\"", &ok);
+    CHECK(!ok);
+}
+
 int main(void)
 {
     pt_buf_init(&tb, T_AL);
@@ -491,6 +523,7 @@ int main(void)
     RUN(test_keys_esc_wait);
     RUN(test_md);
     RUN(test_input);
+    RUN(test_config_set);
     pt_buf_free(&tb);
     return t_done("test_tui");
 }

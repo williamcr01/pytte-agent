@@ -1,57 +1,66 @@
-/* pytte: the durable agent CLI.
+/* pytte: the durable agent CLI (section 16.1).
  *
- *   pytte ask [options] [PROMPT]     new session, run until done
- *   pytte resume [ID] [options]      recover a session and continue it
- *   pytte log [ID] [--json]          print a session's transcript
+ *   pytte ["PROMPT"]            the TUI in a new session
+ *   pytte -c / -r [ID]          the TUI on this directory's newest session / on ID
+ *   pytte -p "PROMPT"           one-shot: run until idle and print the answer
+ *   pytte log [ID] [--json]     print a session's transcript
  *
- * Sessions live in $XDG_STATE_HOME/pytte/sessions/<id>/ (by default
- * ~/.local/state/pytte/sessions). Kill the process at any point and
- * `pytte resume` continues from its last commit. */
+ * Kill the process at any point and `pytte -c` continues from its last
+ * commit. */
 #define _POSIX_C_SOURCE 200809L
-#include <dirent.h>
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <time.h>
 #include <unistd.h>
 
-#include "rt/rt.h"
+#include "cli/cli.h"
 
 static const char usage[] =
-    "usage: pytte ask [options] [PROMPT]   start a session (PROMPT from stdin if omitted)\n"
-    "       pytte resume [ID] [options]    continue a session (default: the newest)\n"
-    "       pytte log [ID] [--json]        print a session's transcript\n"
+    "usage: pytte [options] [PROMPT]      the TUI in a new session\n"
+    "       pytte -c | -r [ID] [PROMPT]   continue this directory's newest session, or ID\n"
+    "       pytte -p [options] [PROMPT]   print mode: run until done, print the answer\n"
+    "                                     (PROMPT from stdin when it is piped)\n"
+    "       pytte log [ID] [--json]       print a session's transcript\n"
     "\n"
-    "  --model REF         provider or provider/model-id (default: $PYTTE_MODEL; else the\n"
-    "                      session's last model, or anthropic for a new one)\n"
-    "  --reasoning LEVEL   off, minimal, low, medium, high, xhigh, max\n"
-    "  --max-tokens N      default: the model's maximum that fits the context\n"
-    "  --system TEXT       system prompt of a new session\n"
-    "  --script FILE       faux provider script (default: $PYTTE_FAUX_SCRIPT)\n"
-    "  --json              print each commit as a JSON line instead of the answer\n"
-    "  --no-sync           do not fsync commits (survives crashes, not power loss)\n"
-    "  --force             take over a session another host left open\n"
+    "  -c, --continue          the newest session started in this directory\n"
+    "  -r, --resume [ID]       that session, or pick from this directory's\n"
+    "  -p, --print             no TUI (also when stdin or stdout is not a terminal)\n"
+    "  -m, --model REF         provider or provider/model-id (default: $PYTTE_MODEL, the\n"
+    "                          config file; else the session's last, or anthropic)\n"
+    "  --effort LEVEL          off, minimal, low, medium, high, xhigh, max ($PYTTE_EFFORT)\n"
+    "  --max-tokens N          default: the model's maximum that fits the context\n"
+    "  --system-prompt TEXT    system prompt of a new session\n"
+    "  --append-system-prompt TEXT\n"
+    "  --output-format FMT     with -p: text (default), json (one object at the end),\n"
+    "                          stream-json (every commit as a JSON line)\n"
+    "  --script FILE           faux provider script (default: $PYTTE_FAUX_SCRIPT)\n"
+    "  --no-sync               do not fsync commits (survives crashes, not power loss)\n"
+    "  --force                 take over a session another host left open\n"
     "\n"
     "Exit codes: 0 done, 1 usage or setup, 10 the run failed, 20 storage error,\n"
     "130 interrupted (the session stays resumable).\n";
 
-static const char default_system[] =
-    "You are pytte, a small coding agent running in a terminal. Be concise.";
+enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 
 typedef struct opts {
-    const char *cmd, *arg, *model, *system, *script;
-    pt_reasoning reasoning;
-    uint32_t max_tokens, retry_base_ms;
-    bool json, no_sync, force;
+    cli_opts c;
+    const char *cmd_log, *id, *prompt;
+    bool print, cont, resume, json, model_flag, effort_flag;
+    int out;
 } opts;
 
 static void die(const char *msg, const char *arg)
 {
     fprintf(stderr, "pytte: %s%s%s\n", msg, arg ? ": " : "", arg ? arg : "");
     exit(1);
+}
+
+/* YYYYMMDD-HHMMSS-xxxx */
+static bool looks_like_id(const char *s)
+{
+    return strlen(s) == 20 && s[8] == '-' && s[15] == '-' && s[0] >= '0' && s[0] <= '9';
 }
 
 static void parse_args(int argc, char **argv, opts *o)
@@ -62,237 +71,105 @@ static void parse_args(int argc, char **argv, opts *o)
         const char *a = argv[i];
         const char *v = i + 1 < argc ? argv[i + 1] : NULL;
 #define TAKES(name) (strcmp(a, name) == 0 && (v || (die("missing value for", name), 0)) && ++i)
-        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0 || strcmp(a, "help") == 0) {
+        if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
             fputs(usage, stdout);
             exit(0);
-        } else if (strcmp(a, "--json") == 0) {
+        } else if (strcmp(a, "--version") == 0) {
+            puts("pytte " PT_VERSION);
+            exit(0);
+        } else if (strcmp(a, "-p") == 0 || strcmp(a, "--print") == 0) {
+            o->print = true;
+        } else if (strcmp(a, "-c") == 0 || strcmp(a, "--continue") == 0) {
+            o->cont = true;
+        } else if (strcmp(a, "-r") == 0 || strcmp(a, "--resume") == 0) {
+            o->resume = true;
+            if (v && looks_like_id(v))
+                o->id = argv[++i];
+        } else if (strcmp(a, "--json") == 0) { /* log */
             o->json = true;
         } else if (strcmp(a, "--no-sync") == 0) {
-            o->no_sync = true;
+            o->c.no_sync = true;
         } else if (strcmp(a, "--force") == 0) {
-            o->force = true;
-        } else if (TAKES("--model")) {
-            o->model = v;
-        } else if (TAKES("--system")) {
-            o->system = v;
+            o->c.force = true;
+        } else if (TAKES("-m") || TAKES("--model")) {
+            o->c.model = v;
+            o->model_flag = true;
+        } else if (TAKES("--system-prompt")) {
+            o->c.system = v;
+        } else if (TAKES("--append-system-prompt")) {
+            o->c.append_system = v;
         } else if (TAKES("--script")) {
-            o->script = v;
-        } else if (TAKES("--reasoning")) {
-            if (!pt_reasoning_parse(pt_strz(v), &o->reasoning))
-                die("unknown reasoning level", v);
+            o->c.script = v;
+        } else if (TAKES("--effort")) {
+            if (!pt_reasoning_parse(pt_strz(v), &o->c.reasoning))
+                die("unknown effort level", v);
+            o->effort_flag = true;
+        } else if (TAKES("--output-format")) {
+            if (strcmp(v, "text") == 0)
+                o->out = OUT_TEXT;
+            else if (strcmp(v, "json") == 0)
+                o->out = OUT_JSON;
+            else if (strcmp(v, "stream-json") == 0)
+                o->out = OUT_STREAM;
+            else
+                die("unknown output format", v);
         } else if (TAKES("--max-tokens") || TAKES("--retry-base-ms")) {
             uint64_t n;
             if (!pt_str_to_u64(pt_strz(v), &n) || n == 0 || n > UINT32_MAX)
                 die("bad number", v);
             if (strcmp(a, "--max-tokens") == 0)
-                o->max_tokens = (uint32_t)n;
+                o->c.max_tokens = (uint32_t)n;
             else
-                o->retry_base_ms = (uint32_t)n; /* for tests */
+                o->c.retry_base_ms = (uint32_t)n; /* for tests */
+        } else if (strcmp(a, "--") == 0 && v) {
+            o->prompt = argv[++i];
         } else if (a[0] == '-' && a[1]) {
             die("unknown option", a);
-        } else if (!o->cmd) {
-            o->cmd = a;
-        } else if (!o->arg) {
-            o->arg = a;
+        } else if (i == 1 && strcmp(a, "log") == 0) {
+            o->cmd_log = a;
+        } else if (o->cmd_log && !o->id) {
+            o->id = a;
+        } else if (!o->prompt) {
+            o->prompt = a;
         } else {
             die("too many arguments", a);
         }
 #undef TAKES
     }
-    if (!o->model && getenv("PYTTE_MODEL") && *getenv("PYTTE_MODEL"))
-        o->model = getenv("PYTTE_MODEL");
-    if (!o->model && o->cmd && strcmp(o->cmd, "ask") == 0)
-        o->model = "anthropic";
-    if (!o->script)
-        o->script = getenv("PYTTE_FAUX_SCRIPT");
+    if (!o->c.script)
+        o->c.script = getenv("PYTTE_FAUX_SCRIPT");
 }
 
-/* ---- sessions on disk ---- */
-
-static void sessions_dir(char *out, size_t cap)
+/* Model and effort: a flag, else the environment; the config files only
+ * set the defaults of new sessions (an existing one keeps its last). */
+static void apply_config(opts *o, cli_config *cfg, bool create)
 {
-    const char *st = getenv("XDG_STATE_HOME"), *home = getenv("HOME");
-    if (st && *st)
-        snprintf(out, cap, "%s/pytte/sessions", st);
-    else
-        snprintf(out, cap, "%s/.local/state/pytte/sessions", home ? home : ".");
-}
-
-static void mkdirs(const char *path)
-{
-    char tmp[4096];
-    char *p;
-    snprintf(tmp, sizeof tmp, "%s", path);
-    for (p = tmp + 1; *p; p++)
-        if (*p == '/') {
-            *p = 0;
-            mkdir(tmp, 0700);
-            *p = '/';
-        }
-    if (mkdir(tmp, 0700) != 0 && errno != EEXIST)
-        die("cannot create", path);
-}
-
-/* YYYYMMDD-HHMMSS-xxxx: sorts by time. The first x is the time within the
- * second (in 32 ms steps), the other three are random. */
-static void new_session_id(char *out, size_t cap)
-{
-    static const char b32[] = "234567abcdefghijklmnopqrstuvwxyz"; /* in ASCII order */
-    unsigned char r[3];
-    struct timespec ts;
-    struct tm tm;
-    size_t n;
-    int i;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    gmtime_r(&ts.tv_sec, &tm);
-    n = strftime(out, cap, "%Y%m%d-%H%M%S-", &tm);
-    pt_sys_random(NULL, r, sizeof r);
-    if (n + 5 > cap)
-        return;
-    out[n++] = b32[ts.tv_nsec / 1000000 / 32];
-    for (i = 0; i < 3; i++)
-        out[n++] = b32[r[i] & 31];
-    out[n] = 0;
-}
-
-static bool newest_session(const char *root, char *out, size_t cap)
-{
-    DIR *d = opendir(root);
-    struct dirent *e;
-    out[0] = 0;
-    if (!d)
-        return false;
-    while ((e = readdir(d)))
-        if (e->d_name[0] != '.' && strlen(e->d_name) == 20 && strcmp(e->d_name, out) > 0)
-            snprintf(out, cap, "%s", e->d_name);
-    closedir(d);
-    return out[0] != 0;
-}
-
-/* ---- HTTP: faux:// to the faux driver, everything else to curl ---- */
-
-typedef struct route {
-    pt_http_driver *d;
-    void *h;
-    pt_http_sink sink;
-} route;
-
-typedef struct router {
-    pt_http_driver vt;
-    pt_http_driver *curl, *faux;
-} router;
-
-static void r_head(void *ud, int status, pt_str retry_after)
-{
-    route *r = (route *)ud;
-    if (r->sink.head)
-        r->sink.head(r->sink.ud, status, retry_after);
-}
-
-static void r_body(void *ud, const char *p, size_t n)
-{
-    route *r = (route *)ud;
-    if (r->sink.body)
-        r->sink.body(r->sink.ud, p, n);
-}
-
-static void r_done(void *ud, const char *error)
-{
-    route *r = (route *)ud;
-    if (r->sink.done)
-        r->sink.done(r->sink.ud, error);
-    free(r);
-}
-
-static void *r_start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sink *sink)
-{
-    router *d = (router *)vd;
-    route *r;
-    pt_http_sink mine;
-    bool faux = strncmp(req->url, "faux:", 5) == 0;
-    if (faux && !d->faux)
-        return NULL; /* no script */
-    if (!faux && !d->curl && !(d->curl = pt_http_curl_new()))
-        return NULL;
-    r = (route *)calloc(1, sizeof *r);
-    if (!r)
-        return NULL;
-    r->d = faux ? d->faux : d->curl;
-    r->sink = *sink;
-    mine.ud = r;
-    mine.head = r_head;
-    mine.body = r_body;
-    mine.done = r_done;
-    r->h = r->d->start(r->d, req, &mine);
-    if (!r->h) {
-        free(r);
-        return NULL;
+    bool env_or_new;
+    env_or_new = create || strcmp(cfg->src[CFG_MODEL], "env") == 0;
+    if (o->model_flag)
+        cli_config_set(cfg, CFG_MODEL, o->c.model, "flag");
+    else if (cfg->val[CFG_MODEL][0] && env_or_new)
+        o->c.model = cfg->val[CFG_MODEL];
+    else if (create)
+        o->c.model = "anthropic";
+    env_or_new = create || strcmp(cfg->src[CFG_REASONING], "env") == 0;
+    if (o->effort_flag) {
+        cli_config_set(cfg, CFG_REASONING, pt_reasoning_name(o->c.reasoning), "flag");
+    } else if (cfg->val[CFG_REASONING][0] && env_or_new) {
+        if (!pt_reasoning_parse(pt_strz(cfg->val[CFG_REASONING]), &o->c.reasoning))
+            fprintf(stderr, "pytte: unknown effort level %s (from %s); ignored\n",
+                    cfg->val[CFG_REASONING], cfg->src[CFG_REASONING]);
     }
-    return r;
 }
 
-static void r_cancel(pt_http_driver *vd, void *h)
-{
-    route *r = (route *)h;
-    (void)vd;
-    r->d->cancel(r->d, r->h);
-    free(r);
-}
-
-static int r_pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfds)
-{
-    router *d = (router *)vd;
-    int n = 0, m;
-    if (d->faux && (m = d->faux->pump(d->faux, d->curl ? 0 : timeout_ms, d->curl ? NULL : fds,
-                                      d->curl ? 0 : nfds)) > 0)
-        n += m;
-    if (d->curl) {
-        m = d->curl->pump(d->curl, n ? 0 : timeout_ms, fds, nfds);
-        if (m < 0)
-            return -1;
-        n += m;
-    } else if (!d->faux && nfds) {
-        pt_sys_wait(fds, nfds, timeout_ms);
-    }
-    return n;
-}
-
-static void r_free(pt_http_driver *vd)
-{
-    router *d = (router *)vd;
-    if (d->curl)
-        d->curl->free(d->curl);
-    if (d->faux)
-        d->faux->free(d->faux);
-    free(d);
-}
-
-static pt_http_driver *router_new(const char *script)
-{
-    router *d = (router *)calloc(1, sizeof *d);
-    if (!d)
-        die("out of memory", NULL);
-    if (script) {
-        size_t n;
-        char *src = pt_sys_read_file(script, &n);
-        if (!src)
-            die("cannot read script", script);
-        d->faux = pt_http_faux_new((pt_str){src, n});
-        free(src);
-    }
-    d->vt.start = r_start;
-    d->vt.cancel = r_cancel;
-    d->vt.pump = r_pump;
-    d->vt.free = r_free;
-    return &d->vt;
-}
-
-/* ---- display ---- */
+/* ---- print mode ---- */
 
 typedef struct ui {
-    bool json, tty_err;
+    int out;
+    bool tty_err;
     bool text_nl, any_text, thinking_out;
     int runs_failed, runs_done;
+    pt_buf result, error; /* for --output-format json */
 } ui;
 
 static volatile sig_atomic_t interrupted;
@@ -361,14 +238,26 @@ static void on_stream(ui *u, const pt_ai_event *ev)
 static void on_event(void *ud, const pt_event *ev)
 {
     ui *u = (ui *)ud;
-    if (u->json) {
+    if (ev->kind == PT_E_RUN_DONE) {
+        bool ok = pt_str_eqz(ev->outcome, "completed");
+        ok ? u->runs_done++ : u->runs_failed++;
+        pt_buf_reset(&u->error);
+        if (!ok)
+            pt_buf_puts(&u->error, ev->error);
+    }
+    if (u->out == OUT_JSON) {
+        if (ev->kind == PT_E_STREAM && ev->ai->kind == PT_EV_START)
+            pt_buf_reset(&u->result);
+        if (ev->kind == PT_E_STREAM && ev->ai->kind == PT_EV_TEXT_DELTA)
+            pt_buf_puts(&u->result, ev->ai->delta);
+        return;
+    }
+    if (u->out == OUT_STREAM) {
         if (ev->kind == PT_E_COMMITTED) {
             fwrite(ev->line.p, 1, ev->line.n, stdout);
             fputc('\n', stdout);
             fflush(stdout);
         }
-        if (ev->kind == PT_E_RUN_DONE)
-            pt_str_eqz(ev->outcome, "completed") ? u->runs_done++ : u->runs_failed++;
         return;
     }
     switch (ev->kind) {
@@ -383,208 +272,129 @@ static void on_event(void *ud, const pt_event *ev)
         break;
     }
     case PT_E_RUN_DONE:
-        if (pt_str_eqz(ev->outcome, "completed")) {
-            u->runs_done++;
-        } else {
-            u->runs_failed++;
+        if (!pt_str_eqz(ev->outcome, "completed"))
             fprintf(stderr, "%serror:%s %.*s\n", u->tty_err ? "\x1b[31m" : "", u->tty_err ? "\x1b[0m" : "",
                     (int)ev->error.n, ev->error.p);
-        }
         break;
     default:
         break;
     }
 }
 
-/* ---- running a session ---- */
-
-static int64_t sys_now(void *ud)
+static void print_json(const ui *u, const char *id, const char *status)
 {
-    (void)ud;
-    return pt_sys_now_ms();
-}
-
-static bool credentials(void *ud, const pt_provider *p, pt_credentials *out)
-{
-    const char *which;
-    (void)ud;
-    return pt_ai_find_key(p, pt_sys_env, NULL, out, &which);
-}
-
-typedef struct session {
-    char id[64], dir[4200];
-    pt_agent *a;
-    pt_rt *rt;
-    ui u;
-} session;
-
-static void start(session *s, const opts *o, bool create)
-{
-    char root[4096], err[600];
-    pt_opts ao;
-    pt_rt_cfg rc;
-    pt_store *st;
-    sessions_dir(root, sizeof root);
-    if (create) {
-        mkdirs(root);
-        new_session_id(s->id, sizeof s->id);
-    } else if (o->arg) {
-        snprintf(s->id, sizeof s->id, "%s", o->arg);
-    } else if (!newest_session(root, s->id, sizeof s->id)) {
-        die("no sessions in", root);
+    pt_buf b;
+    pt_jw w;
+    pt_buf_init(&b, pt_sys_allocator());
+    pt_jw_init(&w, &b);
+    pt_jw_obj(&w);
+    pt_jw_key(&w, "session");
+    pt_jw_strz(&w, id);
+    pt_jw_key(&w, "status");
+    pt_jw_strz(&w, status);
+    pt_jw_key(&w, "result");
+    pt_jw_str(&w, pt_buf_str(&u->result));
+    if (u->error.n) {
+        pt_jw_key(&w, "error");
+        pt_jw_str(&w, pt_buf_str(&u->error));
     }
-    snprintf(s->dir, sizeof s->dir, "%s/%s", root, s->id);
-    st = pt_store_posix_open(s->dir, create, err, sizeof err);
-    if (!st) {
-        fprintf(stderr, "pytte: %s\n", err);
-        exit(1);
-    }
-    memset(&s->u, 0, sizeof s->u);
-    s->u.json = o->json;
-    s->u.tty_err = isatty(STDERR_FILENO);
-    s->u.text_nl = true;
-    memset(&ao, 0, sizeof ao);
-    ao.alloc = pt_sys_allocator();
-    ao.now_ms = sys_now;
-    ao.random = pt_sys_random;
-    ao.credentials = credentials;
-    ao.on_event = on_event;
-    ao.ud = &s->u;
-    ao.config.model = o->model ? pt_strz(o->model) : PT_STR_NULL;
-    ao.config.reasoning = o->reasoning;
-    ao.config.max_tokens = o->max_tokens;
-    ao.config.retry_base_ms = o->retry_base_ms;
-    ao.config.no_sync = o->no_sync;
-    s->a = pt_new(&ao);
-    memset(&rc, 0, sizeof rc);
-    rc.store = st;
-    rc.http = router_new(o->script);
-    rc.stop = should_stop;
-    s->rt = s->a ? pt_rt_new(&rc, s->a) : NULL;
-    if (!s->rt)
-        die("out of memory", NULL);
+    pt_jw_obj_end(&w);
+    pt_buf_putc(&b, '\n');
+    fwrite(b.p, 1, b.n, stdout);
+    pt_buf_free(&b);
 }
 
-static void finish_http(session *s, pt_http_driver *http)
+static pt_str read_stdin(pt_buf *b)
 {
-    pt_rt_free(s->rt);
-    pt_free(s->a);
-    http->free(http);
+    char tmp[4096];
+    size_t got;
+    while ((got = fread(tmp, 1, sizeof tmp, stdin)) > 0)
+        pt_buf_put(b, tmp, got);
+    return pt_str_trim(pt_buf_str(b));
 }
 
 /* Run until idle; returns the exit code. */
-static int run(session *s, pt_http_driver *http)
+static int print_mode(opts *o, const char *id, cli_config *cfg)
 {
-    pt_rt_result r;
-    int rc = 0;
+    cli_session s;
+    ui u;
+    pt_buf in_buf;
+    pt_str prompt = PT_STR_NULL;
+    char err[700];
+    const char *status = "completed";
+    int rc;
+    memset(&u, 0, sizeof u);
+    u.out = o->out;
+    u.tty_err = isatty(STDERR_FILENO);
+    u.text_nl = true;
+    pt_buf_init(&u.result, pt_sys_allocator());
+    pt_buf_init(&u.error, pt_sys_allocator());
+    pt_buf_init(&in_buf, pt_sys_allocator());
+    if (o->prompt)
+        prompt = pt_strz(o->prompt);
+    else if (!isatty(STDIN_FILENO))
+        prompt = read_stdin(&in_buf);
+    if (!id && !prompt.n)
+        die("no prompt (give one as an argument or on stdin)", NULL);
+    apply_config(o, cfg, id == NULL);
+    o->c.stop = should_stop;
+    if ((rc = cli_session_open(&s, &o->c, id, on_event, &u, err, sizeof err)) != 0) {
+        fprintf(stderr, "pytte: %s\n", err);
+        return rc;
+    }
+    if (prompt.n) {
+        pt_input in;
+        memset(&in, 0, sizeof in);
+        in.text = prompt;
+        if (!pt_submit(s.a, &in))
+            die(pt_error(s.a), NULL);
+    }
+    if (o->out == OUT_TEXT)
+        fprintf(stderr, "%ssession %s%s\n", u.tty_err ? "\x1b[2m" : "", s.id, u.tty_err ? "\x1b[0m" : "");
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    r = pt_rt_run(s->rt);
-    end_text(&s->u);
-    switch (r) {
+    switch (pt_rt_run(s.rt)) {
     case PT_RT_IDLE:
-        pt_rt_close(s->rt);
-        rc = s->u.runs_failed ? 10 : 0;
+        end_text(&u);
+        cli_session_close(&s);
+        rc = u.runs_failed ? 10 : 0;
+        status = u.runs_failed ? "failed" : "completed";
         break;
     case PT_RT_STOPPED:
-        pt_rt_close(s->rt);
-        fprintf(stderr, "pytte: detached; continue with: pytte resume %s\n", s->id);
+        end_text(&u);
+        cli_session_close(&s);
+        fprintf(stderr, "pytte: detached; continue with: pytte -c\n");
         rc = 130;
+        status = "detached";
         break;
     case PT_RT_FATAL:
-        fprintf(stderr, "pytte: %s\n", pt_error(s->a));
-        if (pt_fatal(s->a) == PT_FATAL_CONFIG) {
-            pt_rt_close(s->rt); /* nothing is broken: a clean exit */
+        end_text(&u);
+        fprintf(stderr, "pytte: %s\n", pt_error(s.a));
+        pt_buf_reset(&u.error);
+        pt_buf_putz(&u.error, pt_error(s.a));
+        if (pt_fatal(s.a) == PT_FATAL_CONFIG) {
+            cli_session_close(&s); /* nothing is broken: a clean exit */
             rc = 1;
         } else {
+            cli_session_free(&s);
             rc = 20;
         }
-        fprintf(stderr, "pytte: the session is safe up to its last commit; continue with: pytte resume %s\n",
-                s->id);
+        status = "error";
+        fprintf(stderr, "pytte: the session is safe up to its last commit; continue with: pytte -r %s\n", s.id);
         break;
-    case PT_RT_STUCK:
-    case PT_RT_BUSY: /* not returned by pt_rt_run */
+    default: /* STUCK; BUSY is not returned by pt_rt_run */
         fprintf(stderr, "pytte: internal error: the agent is stuck\n");
+        cli_session_free(&s);
         rc = 20;
+        status = "error";
         break;
     }
-    finish_http(s, http);
+    if (o->out == OUT_JSON)
+        print_json(&u, s.id, status);
+    pt_buf_free(&u.result);
+    pt_buf_free(&u.error);
+    pt_buf_free(&in_buf);
     return rc;
-}
-
-static pt_str read_stdin(void)
-{
-    pt_buf b;
-    char tmp[4096];
-    size_t got;
-    pt_buf_init(&b, pt_sys_allocator());
-    while ((got = fread(tmp, 1, sizeof tmp, stdin)) > 0)
-        pt_buf_put(&b, tmp, got);
-    return pt_str_trim(pt_buf_str(&b)); /* lives for the run */
-}
-
-static void identity(pt_identity *me, char *host, size_t hcap, char *boot, size_t bcap)
-{
-    memset(me, 0, sizeof *me);
-    pt_sys_identity(host, hcap, boot, bcap, &me->pid);
-    me->host = pt_strz(host);
-    me->boot = pt_strz(boot);
-}
-
-static int cmd_ask(const opts *o)
-{
-    session s;
-    pt_session_cfg c;
-    pt_identity me;
-    pt_input in;
-    char host[256], boot[64], cwd[4096];
-    pt_str prompt;
-    if (o->arg)
-        prompt = pt_strz(o->arg);
-    else if (!isatty(STDIN_FILENO))
-        prompt = read_stdin();
-    else
-        die("no prompt (give one as an argument or on stdin)", NULL);
-    if (!prompt.n)
-        die("empty prompt", NULL);
-    start(&s, o, true);
-    identity(&me, host, sizeof host, boot, sizeof boot);
-    memset(&c, 0, sizeof c);
-    c.cwd = pt_strz(getcwd(cwd, sizeof cwd) ? cwd : ".");
-    c.host = me.host;
-    c.system = pt_strz(o->system ? o->system : default_system);
-    memset(&in, 0, sizeof in);
-    in.text = prompt;
-    in.req = PT_S("ask");
-    if (!pt_create(s.a, &c) || !pt_open(s.a, &me, false) || !pt_submit(s.a, &in))
-        die(pt_error(s.a), NULL);
-    if (!o->json)
-        fprintf(stderr, "%ssession %s%s\n", s.u.tty_err ? "\x1b[2m" : "", s.id, s.u.tty_err ? "\x1b[0m" : "");
-    return run(&s, pt_rt_http(s.rt));
-}
-
-static int cmd_resume(const opts *o)
-{
-    session s;
-    pt_identity me;
-    char host[256], boot[64], err[600];
-    start(&s, o, false);
-    if (!pt_rt_recover(s.rt, err, sizeof err)) {
-        pt_http_driver *http = pt_rt_http(s.rt);
-        fprintf(stderr, "pytte: session %s: %s\n", s.id, err);
-        finish_http(&s, http);
-        return 20;
-    }
-    identity(&me, host, sizeof host, boot, sizeof boot);
-    if (!pt_open(s.a, &me, o->force)) {
-        pt_http_driver *http = pt_rt_http(s.rt);
-        fprintf(stderr, "pytte: session %s: %s\n", s.id, pt_error(s.a));
-        finish_http(&s, http);
-        return 1;
-    }
-    if (!o->json)
-        fprintf(stderr, "%sresuming %s%s\n", s.u.tty_err ? "\x1b[2m" : "", s.id, s.u.tty_err ? "\x1b[0m" : "");
-    return run(&s, pt_rt_http(s.rt));
 }
 
 /* ---- log: read only; works while another process owns the session ---- */
@@ -640,10 +450,10 @@ static int cmd_log(const opts *o)
     pt_agent *a;
     pt_entry_view v;
     bool tty = isatty(STDOUT_FILENO);
-    sessions_dir(root, sizeof root);
-    if (o->arg)
-        snprintf(id, sizeof id, "%s", o->arg);
-    else if (!newest_session(root, id, sizeof id))
+    cli_sessions_dir(root, sizeof root);
+    if (o->id)
+        snprintf(id, sizeof id, "%s", o->id);
+    else if (!cli_sessions_list(NULL, &id, 1))
         die("no sessions in", root);
     snprintf(path, sizeof path, "%s/%s/log.jsonl", root, id);
     src = pt_sys_read_file(path, &n);
@@ -678,20 +488,55 @@ static int cmd_log(const opts *o)
     return 0;
 }
 
+/* -r without an ID, in a terminal: pick from this directory's sessions. */
+static bool pick_session(char *out, size_t cap)
+{
+    char ids[20][64], cwd[4096], line[64];
+    uint32_t n, i;
+    unsigned long k;
+    if (!getcwd(cwd, sizeof cwd) || !(n = cli_sessions_list(cwd, ids, 20)))
+        return false;
+    for (i = 0; i < n; i++)
+        fprintf(stderr, "%3u  %s\n", i + 1, ids[i]);
+    fprintf(stderr, "session [1]: ");
+    if (!fgets(line, sizeof line, stdin))
+        return false;
+    k = line[0] == '\n' ? 1 : strtoul(line, NULL, 10);
+    if (k < 1 || k > n)
+        die("no such session", NULL);
+    snprintf(out, cap, "%s", ids[k - 1]);
+    return true;
+}
+
 int main(int argc, char **argv)
 {
     opts o;
+    cli_config cfg;
+    char warn[600], picked[64], cwd[4096];
+    const char *term = getenv("TERM");
+    bool tty;
     parse_args(argc, argv, &o);
-    if (!o.cmd) {
-        fputs(usage, stderr);
-        return 1;
-    }
-    if (strcmp(o.cmd, "ask") == 0)
-        return cmd_ask(&o);
-    if (strcmp(o.cmd, "resume") == 0)
-        return cmd_resume(&o);
-    if (strcmp(o.cmd, "log") == 0)
+    if (o.cmd_log)
         return cmd_log(&o);
-    die("unknown command", o.cmd);
-    return 1;
+    cli_config_load(&cfg, warn, sizeof warn);
+    if (warn[0])
+        fprintf(stderr, "pytte: %s\n", warn);
+    tty = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+    if (o.cont) {
+        if (!getcwd(cwd, sizeof cwd) || !cli_sessions_list(cwd, &picked, 1))
+            die("no session to continue in this directory", NULL);
+        o.id = picked;
+    } else if (o.resume && !o.id) {
+        if (o.print || !tty)
+            die("--resume needs a session ID here", NULL);
+        if (!pick_session(picked, sizeof picked))
+            die("no sessions in this directory", NULL);
+        o.id = picked;
+    }
+    if (o.print || !tty)
+        return print_mode(&o, o.id, &cfg);
+    if (term && strcmp(term, "dumb") == 0)
+        die("TERM=dumb is not supported yet; use -p", NULL);
+    apply_config(&o, &cfg, o.id == NULL);
+    return tui_run(&o.c, &cfg, o.id, o.prompt);
 }

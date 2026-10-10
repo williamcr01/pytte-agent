@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Real-process crash test (section 22.3): kill -9 `pytte ask` and every
-# `pytte resume` at random moments until one finishes on its own, then check
+# Real-process crash test (section 22.3): kill -9 `pytte -p` and every
+# `pytte -p -c` at random moments until one finishes on its own, then check
 # that the session ended exactly as an uninterrupted one would.
 #
 #   tests/crash.sh [BIN] [ROUNDS]
@@ -29,16 +29,16 @@ run_and_kill() {
 for round in $(seq "$rounds"); do
     export XDG_STATE_HOME
     XDG_STATE_HOME=$(mktemp -d)
-    run_and_kill "$bin" ask --model faux --script "$script" "list the files"
+    run_and_kill "$bin" -p -m faux --script "$script" "list the files"
     status=$?
     for attempt in $(seq 40); do
         [ "$status" -eq 0 ] && break
         if ! "$bin" log >/dev/null 2>&1 || [ -z "$("$bin" log --json)" ]; then
             # killed before the first commit: the session never existed
             rm -rf "$XDG_STATE_HOME/pytte"
-            run_and_kill "$bin" ask --model faux --script "$script" "list the files"
+            run_and_kill "$bin" -p -m faux --script "$script" "list the files"
         else
-            run_and_kill "$bin" resume --script "$script"
+            run_and_kill "$bin" -p -c --script "$script"
         fi
         status=$?
     done

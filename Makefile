@@ -21,13 +21,16 @@ DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/dr
 RT_SRC   := src/rt/rt.c
 SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
-TUI_SRC  := $(wildcard src/tui/*.c)
+# The TUI's parts; app.c (the loop) only goes into pytte.
+TUI_SRC  := $(filter-out src/tui/app.c,$(wildcard src/tui/*.c))
+CLI_SRC  := src/cli/config.c
+APP_SRC  := src/tui/app.c src/cli/session.c src/cli/main.c
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
 LIB_OBJ  := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
 obj       = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
 PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) src/cli/pytte_ai.c)
-PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) src/cli/main.c)
+PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) $(CLI_SRC) $(APP_SRC))
 
 .PHONY: all test crash screen portable fuzz clean fixtures-update models width
 all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a
@@ -53,9 +56,9 @@ TEST_CC     ?= $(CC)
 TEST_CFLAGS := -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
 TESTS       := $(patsubst tests/%.c,$(BUILD)/test/%,$(wildcard tests/test_*.c))
 
-$(BUILD)/test/%: tests/%.c tests/t.h tests/vt.c $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(wildcard include/*.h src/*/*.h src/*/*.inc)
+$(BUILD)/test/%: tests/%.c tests/t.h tests/vt.c $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(CLI_SRC) $(wildcard include/*.h src/*/*.h src/*/*.inc)
 	@mkdir -p $(dir $@)
-	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) -o $@
+	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $< $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(CLI_SRC) -o $@
 
 test: $(TESTS) $(BUILD)/pytte-ai $(BUILD)/pytte
 	@for t in $(TESTS); do ./$$t || exit 1; done
