@@ -19,6 +19,9 @@
 #include <sys/time.h>
 #include <termios.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 #include "drv/drv.h"
 
@@ -74,6 +77,9 @@ static void watchdog(int rd, int out)
     char buf[64];
     bool kitty = false, clean = false;
     long max = sysconf(_SC_OPEN_MAX), fd;
+#ifdef __linux__
+    prctl(PR_SET_NAME, "pytte-watchdog"); /* so killall pytte spares it */
+#endif
     signal(SIGINT, SIG_IGN);
     signal(SIGQUIT, SIG_IGN);
     signal(SIGTSTP, SIG_IGN);
@@ -102,7 +108,7 @@ static void watchdog(int rd, int out)
     if (!clean) { /* the parent died without restoring */
         if (kitty)
             put_all(out, "\x1b[<u", 4);
-        put_all(out, "\x1b[?2026l\x1b[?25h\x1b[0m\r\n", 20);
+        put_all(out, "\x1b[?2004l\x1b[?2026l\x1b[?25h\x1b[0m\r\n", 28);
     }
     _exit(0);
 }

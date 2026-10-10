@@ -297,6 +297,7 @@ static void test_kill9(void)
     kill(p.pid, SIGKILL);
     CHECK(finish(&p, 3000) == 137);
     CHECK(p.v->kitty == 0); /* the watchdog popped the flags */
+    CHECK(!p.v->paste);
     modes_restored(&p);
     pty_free(&p);
     /* the transcript is the same after pytte -c, with the partial marked */
