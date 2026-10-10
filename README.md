@@ -4,21 +4,46 @@ A tiny, durable, embeddable coding agent in C. The goal is an agent that can
 run on almost anything (a laptop, a router, a microcontroller, a browser) and
 survive being killed at any point.
 
-Status: **M0, providers.** The AI layer (`libpytte-ai`) talks to Anthropic,
-OpenAI and OpenRouter, and `pytte-ai` is a small CLI on top of it. The
-durable agent comes next.
+Status: **M1, durable chat.** The AI layer (`libpytte-ai`) talks to
+Anthropic, OpenAI and OpenRouter. The core (`libpytte`) commits every step to
+a session log before it happens, so `pytte ask` survives `kill -9` at any
+point and `pytte resume` carries on. Tools come next (M2).
 
 ## Build
 
 Needs a C99 compiler, make, and libcurl with headers.
 
 ```sh
-make            # build/pytte-ai and build/libpytte-ai.a
-make test       # unit, fixture and CLI tests, with ASan and UBSan
+make            # build/pytte, build/pytte-ai and the libraries
+make test       # unit, fixture, crash-simulation and CLI tests, with ASan and UBSan
+make crash      # kill -9 pytte at random moments, 100 rounds
 make portable   # the core builds as strict C99 with gcc and clang, no stdio
 make fuzz       # libFuzzer targets in build/fuzz/ (clang)
 make models     # refresh the model catalog (network, needs python3)
 ```
+
+## pytte
+
+```sh
+export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, OPENROUTER_API_KEY
+
+build/pytte ask "what is 25*18?"                 # new session (model: anthropic)
+build/pytte ask --model openai/gpt-5 --reasoning high "hello"
+build/pytte resume                               # continue the newest session
+build/pytte log                                  # its transcript (--json: records)
+build/pytte ask --model faux --script tests/faux/slow.json "anything"   # offline
+```
+
+Sessions live in `$XDG_STATE_HOME/pytte/sessions/<id>/` (by default
+`~/.local/state/pytte`). `log.jsonl` is the whole truth: one commit per line,
+readable with `jq`. Kill the process at any point (or press Ctrl-C to detach)
+and `pytte resume` continues from the last commit: a half-streamed answer is
+kept as an aborted entry and the request is sent again. Exit codes: 0 done,
+1 setup (such as a missing key), 10 the run failed, 20 storage error, 130
+detached.
+
+There are no tools yet: when a model calls one, the call gets an error
+result and the run goes on.
 
 ## pytte-ai
 
@@ -39,19 +64,26 @@ Text goes to stdout; thinking, tool calls and a usage summary go to stderr.
 ## Layout
 
 ```
-include/pytte_base.h   arena, strings, buffers, JSON, SSE
+include/pytte_base.h   arena, strings, buffers, JSON, SSE, CRC-32
 include/pytte_ai.h     the AI layer: messages, providers, models, streams
+include/pytte.h        the core: a sans-I/O durable task interpreter
 src/base/              portable C99: no stdio, no malloc, no floating point
 src/ai/                APIs (anthropic-messages, openai-responses for OpenAI,
                        openai-completions for OpenRouter and other compatible
                        servers, faux), providers and models as data,
                        cross-provider transforms
-src/drv/               host drivers: libc, curl HTTP, faux HTTP
+src/core/              the core: commit lines, state, scheduler, the run task
+src/rt/                the runtime: the host loop over stores, HTTP and timers
+src/drv/               host drivers: libc, curl HTTP, faux HTTP, posix and
+                       memory session stores
 src/ai/models.gen.inc  the model catalog, generated from models.dev and
                        OpenRouter by scripts/gen_models.py
+src/cli/main.c         the pytte CLI
 src/cli/pytte_ai.c     the pytte-ai CLI
 tests/fixtures/        response streams per provider, with golden results
 tests/faux/            faux provider scripts
+tests/test_sim.c       crash simulation: every scenario killed at every commit
+tests/crash.sh         the same with real processes and kill -9
 ```
 
 ## Fixtures
