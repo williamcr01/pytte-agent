@@ -114,12 +114,32 @@ sleep 0.2
 err=$("$pytte" -p -c --script tests/faux/slow.json </dev/null 2>&1 >/dev/null)
 case $err in *"in use by"*"pid $owner"*) ok=0 ;; *) ok=1 ;; esac
 check "a second process is refused, naming the owner" [ $ok -eq 0 ]
+"$pytte" ls | grep -q "running (pid $owner) .* list$"
+check "ls shows the owner running" [ $? -eq 0 ]
 kill -INT $owner
 wait $owner
 check "Ctrl-C detaches with 130" [ $? -eq 130 ]
 out=$("$pytte" -p -c --script tests/faux/slow.json </dev/null 2>/dev/null)
 case $out in *"plenty of time to kill the process"*) ok=0 ;; *) ok=1 ;; esac
 check "...and the detached session resumes to the end" [ $ok -eq 0 ]
+"$pytte" ls | head -1 | grep -q "closed .* list$"
+check "...and ls shows it closed" [ $? -eq 0 ]
+(
+    XDG_STATE_HOME=$(mktemp -d)
+    "$pytte" -p -m faux/faux --script tests/faux/slow.json "doomed" >/dev/null 2>&1 &
+    victim=$!
+    for i in $(seq 50); do
+        "$pytte" ls 2>/dev/null | grep -q running && break
+        sleep 0.1
+    done
+    kill -9 $victim
+    wait $victim 2>/dev/null
+    "$pytte" ls | grep -q "crashed .* doomed$"
+    status=$?
+    rm -rf "$XDG_STATE_HOME"
+    exit $status
+)
+check "ls shows a killed owner as crashed" [ $? -eq 0 ]
 
 if command -v jq >/dev/null; then
     "$pytte" -p -m faux/faux --script tests/faux/hello.json --output-format stream-json hi >"$XDG_STATE_HOME/out" 2>/dev/null

@@ -5,15 +5,18 @@
  *   pytte -p "PROMPT"           one-shot: run until idle and print the answer
  *   pytte log [ID] [--json]     print a session's transcript
  *   pytte approve ID TASK yes|no   answer a tool call waiting for approval
+ *   pytte ls                    list sessions with their status
  *
  * Kill the process at any point and `pytte -c` continues from its last
  * commit. */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "cli/cli.h"
@@ -28,6 +31,8 @@ static const char usage[] =
     "                                     since the last compaction)\n"
     "       pytte approve ID TASK yes|no  answer a tool call waiting for approval,\n"
     "                                     then go on as -p would\n"
+    "       pytte ls                      list sessions, newest first: status, directory\n"
+    "                                     and first prompt\n"
     "\n"
     "  -c, --continue          the newest session started in this directory\n"
     "  -r, --resume [ID]       that session, or pick from this directory's\n"
@@ -56,7 +61,7 @@ enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 
 typedef struct opts {
     cli_opts c;
-    const char *cmd_log, *cmd_approve, *id, *prompt, *task, *answer;
+    const char *cmd_log, *cmd_approve, *cmd_ls, *id, *prompt, *task, *answer;
     bool print, cont, resume, json, all_epochs, model_flag, effort_flag, perm_flag;
     int out;
 } opts;
@@ -146,6 +151,8 @@ static void parse_args(int argc, char **argv, opts *o)
             die("unknown option", a);
         } else if (i == 1 && strcmp(a, "log") == 0) {
             o->cmd_log = a;
+        } else if (i == 1 && strcmp(a, "ls") == 0) {
+            o->cmd_ls = a;
         } else if (i == 1 && strcmp(a, "approve") == 0) {
             o->cmd_approve = a;
         } else if ((o->cmd_log || o->cmd_approve) && !o->id) {
@@ -156,6 +163,8 @@ static void parse_args(int argc, char **argv, opts *o)
             if (strcmp(a, "yes") != 0 && strcmp(a, "no") != 0)
                 die("answer yes or no", a);
             o->answer = a;
+        } else if (o->cmd_ls) {
+            die("ls takes no arguments", a);
         } else if (!o->prompt) {
             o->prompt = a;
         } else {
@@ -525,42 +534,91 @@ static void print_entry(const pt_entry_view *v, bool tty)
     }
 }
 
+#define LOG_CHUNK 65536
+
+/* Load a log into a, a chunk at a time: memory for one chunk and the
+ * longest line. 0, or 20 with the message printed. */
+static int load_log(pt_agent *a, const char *id, const char *path)
+{
+    char *chunk = (char *)malloc(LOG_CHUNK);
+    pt_buf line; /* a line that spans chunks */
+    int fd = open(path, O_RDONLY | O_CLOEXEC), code = 0;
+    struct stat st;
+    uint64_t off = 0;
+    bool torn = false;
+    if (!chunk || fd < 0 || fstat(fd, &st) != 0) {
+        fprintf(stderr, "pytte: cannot read %s: %s\n", path, chunk ? strerror(errno) : "out of memory");
+        free(chunk);
+        if (fd >= 0)
+            close(fd);
+        return 20;
+    }
+    pt_buf_init(&line, pt_sys_allocator());
+    while (!torn && !code) {
+        ssize_t got = read(fd, chunk, LOG_CHUNK);
+        size_t i, from = 0;
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        for (i = 0; i < (size_t)got; i++) {
+            pt_load_result r;
+            pt_str l;
+            if (chunk[i] != '\n')
+                continue;
+            if (line.n) {
+                pt_buf_put(&line, chunk + from, i - from);
+                l = pt_buf_str(&line);
+            } else {
+                l = (pt_str){chunk + from, i - from};
+            }
+            r = line.oom ? PT_LOAD_CORRUPT : pt_load_line(a, l, true, off + i + 1 >= (uint64_t)st.st_size);
+            pt_buf_reset(&line);
+            from = i + 1;
+            if (r == PT_LOAD_CORRUPT) {
+                fprintf(stderr, "pytte: %s: %s\n", id, line.oom ? "out of memory" : pt_error(a));
+                code = 20;
+                break;
+            }
+            if (r == PT_LOAD_TORN) { /* being written right now, or torn: not committed */
+                torn = true;
+                break;
+            }
+        }
+        if (!torn && !code && from < (size_t)got)
+            pt_buf_put(&line, chunk + from, (size_t)got - from);
+        off += (uint64_t)got;
+    }
+    close(fd);
+    free(chunk);
+    pt_buf_free(&line);
+    return code;
+}
+
 static int cmd_log(const opts *o)
 {
     char root[4096], id[64], path[4200];
-    char *src;
-    size_t n, start = 0, i;
     pt_opts ao;
     pt_agent *a;
     pt_entry_view v;
     bool tty = isatty(STDOUT_FILENO);
+    uint32_t i;
+    int code;
     cli_sessions_dir(root, sizeof root);
     if (o->id)
         snprintf(id, sizeof id, "%s", o->id);
     else if (!cli_sessions_list(NULL, &id, 1))
         die("no sessions in", root);
     snprintf(path, sizeof path, "%s/%s/log.jsonl", root, id);
-    src = pt_sys_read_file(path, &n);
-    if (!src)
-        die("cannot read", path);
     memset(&ao, 0, sizeof ao);
     ao.alloc = pt_sys_allocator();
     ao.all_epochs = o->all_epochs;
     a = pt_new(&ao);
-    for (i = 0; i < n; i++) {
-        pt_load_result r;
-        if (src[i] != '\n')
-            continue;
-        r = pt_load_line(a, (pt_str){src + start, i - start}, true, i + 1 == n);
-        if (r == PT_LOAD_CORRUPT) {
-            fprintf(stderr, "pytte: %s: %s\n", id, pt_error(a));
-            return 20;
-        }
-        if (r == PT_LOAD_TORN) /* being written right now, or torn: not committed */
-            break;
-        start = i + 1;
+    if ((code = load_log(a, id, path)) != 0) {
+        pt_free(a);
+        return code;
     }
-    for (i = 0; pt_entry_at(a, (uint32_t)i, &v); i++) {
+    for (i = 0; pt_entry_at(a, i, &v); i++) {
         if (o->json) {
             fwrite(v.raw.p, 1, v.raw.n, stdout);
             fputc('\n', stdout);
@@ -569,7 +627,167 @@ static int cmd_log(const opts *o)
         }
     }
     pt_free(a);
-    free(src);
+    return 0;
+}
+
+/* ---- ls ---- */
+
+#define LS_PEEK 65536 /* ls reads this much of each log's head and tail */
+
+/* The commit lines in p[0..n), whole lines only; fn returns false to stop. */
+static void each_line(const char *p, size_t n, bool (*fn)(void *, pt_str), void *ud)
+{
+    const char *end = p + n, *nl;
+    while (p < end && (nl = (const char *)memchr(p, '\n', (size_t)(end - p)))) {
+        if (!fn(ud, (pt_str){p, (size_t)(nl - p)}))
+            return;
+        p = nl + 1;
+    }
+}
+
+static bool contains(pt_str s, const char *needle)
+{
+    size_t n = strlen(needle), i;
+    for (i = 0; i + n <= s.n; i++)
+        if (s.p[i] == needle[0] && memcmp(s.p + i, needle, n) == 0)
+            return true;
+    return false;
+}
+
+typedef struct ls_row {
+    pt_arena ar; /* reset per session */
+    pt_str cwd, title;
+    const pt_json *claim; /* the last claim seen */
+} ls_row;
+
+/* Head: the session record (cwd) and the first user entry (title). */
+static bool ls_head(void *ud, pt_str line)
+{
+    ls_row *r = (ls_row *)ud;
+    const pt_json *c;
+    if (!contains(line, "\"t\":\"session\"") && !contains(line, "\"kind\":\"user\""))
+        return true;
+    c = pt_json_get(pt_json_parse(line, &r->ar, NULL), "w");
+    for (c = c ? c->child : NULL; c; c = c->next) {
+        pt_str t = pt_json_gets(c, "t", &r->ar);
+        if (pt_str_eqz(t, "session"))
+            r->cwd = pt_json_gets(c, "cwd", &r->ar);
+        else if (pt_str_eqz(t, "entry") && pt_str_eqz(pt_json_gets(c, "kind", &r->ar), "user") && !r->title.p)
+            r->title = pt_json_gets(pt_json_get(c, "data"), "content", &r->ar);
+    }
+    return !r->title.p;
+}
+
+/* Tail: the last claim (the tail starts mid-line; that line is skipped). */
+static bool ls_tail(void *ud, pt_str line)
+{
+    ls_row *r = (ls_row *)ud;
+    const pt_json *c;
+    if (!contains(line, "\"t\":\"claim\""))
+        return true;
+    c = pt_json_get(pt_json_parse(line, &r->ar, NULL), "w");
+    for (c = c ? c->child : NULL; c; c = c->next)
+        if (pt_str_eqz(pt_json_gets(c, "t", &r->ar), "claim"))
+            r->claim = c;
+    return true;
+}
+
+/* closed: closed by its owner. running: an open claim of a live process on
+ * this machine (the lock is left alone: taking it, even shared, could
+ * refuse an owner starting that moment). crashed: an open claim of a
+ * process that is gone. */
+static void ls_status(const ls_row *r, char *out, size_t cap)
+{
+    char host[256], boot[64];
+    int64_t me;
+    pt_str event, h, b;
+    pt_arena *ar = (pt_arena *)&r->ar;
+    int64_t pid = pt_json_geti(r->claim, "pid", 0);
+    if (!r->claim) {
+        snprintf(out, cap, "crashed");
+        return;
+    }
+    event = pt_json_gets(r->claim, "event", ar);
+    if (pt_str_eqz(event, "close")) {
+        snprintf(out, cap, "closed");
+        return;
+    }
+    pt_sys_identity(host, sizeof host, boot, sizeof boot, &me);
+    h = pt_json_gets(r->claim, "host", ar);
+    b = pt_json_gets(r->claim, "boot", ar);
+    if (!pt_str_eqz(h, host))
+        snprintf(out, cap, "open on %.*s", (int)h.n, h.p);
+    else if (pt_str_eqz(b, boot) && pid > 0 && (kill((pid_t)pid, 0) == 0 || errno == EPERM))
+        snprintf(out, cap, "running (pid %lld)", (long long)pid);
+    else
+        snprintf(out, cap, "crashed");
+}
+
+static int cmd_ls(void)
+{
+    char root[4096], path[4200], status[300], *peek;
+    char(*ids)[64];
+    const char *home = getenv("HOME");
+    size_t hn = home ? strlen(home) : 0;
+    uint32_t n, i;
+    ls_row r;
+    cli_sessions_dir(root, sizeof root);
+    ids = (char(*)[64])malloc(4096 * sizeof *ids);
+    peek = (char *)malloc(LS_PEEK);
+    if (!ids || !peek)
+        die("out of memory", NULL);
+    n = cli_sessions_list(NULL, ids, 4096);
+    pt_arena_init(&r.ar, pt_sys_allocator(), 0);
+    for (i = 0; i < n; i++) {
+        struct stat st;
+        ssize_t got;
+        int fd;
+        size_t k;
+        pt_str t;
+        snprintf(path, sizeof path, "%s/%s/log.jsonl", root, ids[i]);
+        if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0 || fstat(fd, &st) != 0) {
+            if (fd >= 0)
+                close(fd);
+            continue;
+        }
+        pt_arena_reset(&r.ar);
+        r.cwd = r.title = PT_STR_NULL;
+        r.claim = NULL;
+        got = pread(fd, peek, LS_PEEK, 0);
+        if (got > 0)
+            each_line(peek, (size_t)got, ls_head, &r);
+        if (st.st_size > LS_PEEK) {
+            got = pread(fd, peek, LS_PEEK, st.st_size - LS_PEEK);
+            if (got > 0 && (t.p = (const char *)memchr(peek, '\n', (size_t)got)))
+                each_line(t.p + 1, (size_t)got - (size_t)(t.p + 1 - peek), ls_tail, &r);
+        } else if (got > 0) {
+            each_line(peek, (size_t)got, ls_tail, &r);
+        }
+        close(fd);
+        ls_status(&r, status, sizeof status);
+        /* the first line of the first prompt, cut on a character */
+        t = r.title.p ? r.title : PT_S("(no prompts)");
+        if (!r.title.p)
+            r.title = t;
+        for (k = 0; k < t.n && t.p[k] != '\n'; k++)
+            ;
+        t.n = k;
+        if (t.n > 60) {
+            t.n = 60;
+            while (t.n && ((unsigned char)t.p[t.n] & 0xC0) == 0x80)
+                t.n--;
+        }
+        if (home && hn > 1 && r.cwd.n >= hn && memcmp(r.cwd.p, home, hn) == 0 &&
+            (r.cwd.n == hn || r.cwd.p[hn] == '/'))
+            printf("%s  %-18s  ~%.*s  %.*s%s\n", ids[i], status, (int)(r.cwd.n - hn), r.cwd.p + hn, (int)t.n,
+                   t.p, t.n < r.title.n ? "…" : "");
+        else
+            printf("%s  %-18s  %.*s  %.*s%s\n", ids[i], status, (int)r.cwd.n, r.cwd.p, (int)t.n, t.p,
+                   t.n < r.title.n ? "…" : "");
+    }
+    pt_arena_free(&r.ar);
+    free(peek);
+    free(ids);
     return 0;
 }
 
@@ -603,6 +821,8 @@ int main(int argc, char **argv)
     parse_args(argc, argv, &o);
     if (o.cmd_log)
         return cmd_log(&o);
+    if (o.cmd_ls)
+        return cmd_ls();
     if (o.cmd_approve) {
         cli_config_load(&cfg, warn, sizeof warn);
         return print_mode(&o, o.id, &cfg);
