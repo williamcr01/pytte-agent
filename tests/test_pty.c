@@ -429,6 +429,41 @@ static void test_commands(void)
     pty_free(&p);
 }
 
+/* ↑ recalls history; Ctrl-O shows the full view in the pager; an unsent
+ * draft survives quitting. */
+static void test_history_pager_draft(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux", "--script", "tests/faux/hello.json", NULL};
+    const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "session ", 3000));
+    keys(&p, "first question\r");
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "\x1b[A");
+    CHECK(wait_for(&p, "› first question", 1000));
+    keys(&p, "\x03"); /* Ctrl-C clears it */
+    keys(&p, "/settings pager cat\r");
+    CHECK(wait_for(&p, "pager cat (user)", 1000));
+    keys(&p, "\x0f"); /* Ctrl-O: the thinking in full, through cat */
+    CHECK(wait_for(&p, "A greeting. Answer briefly.", 2000));
+    CHECK(wait_for(&p, "› ", 1000));
+    keys(&p, "unsent words");
+    pump(&p, 1300); /* saved at most once a second */
+    kill(p.pid, SIGTERM);
+    CHECK(finish(&p, 3000) == 128 + SIGTERM);
+    modes_restored(&p);
+    pty_free(&p);
+    pty_start(&p, 24, 80, again);
+    CHECK(wait_for(&p, "› unsent words", 3000));
+    keys(&p, "\x03\x03");
+    pump(&p, 100);
+    keys(&p, "\x03");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+}
+
 static void test_sigterm(void)
 {
     pty p;
@@ -474,6 +509,7 @@ int main(void)
     RUN(test_suspend_and_signals);
     RUN(test_interrupt_and_queue);
     RUN(test_commands);
+    RUN(test_history_pager_draft);
     RUN(test_sigterm);
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (!t_failed && system(cmd) != 0)

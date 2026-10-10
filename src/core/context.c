@@ -31,7 +31,7 @@ bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena 
             msgs[n++] = a->entries[i].msg;
     out->msgs = msgs;
     out->nmsgs = n;
-    out->tools = NULL; /* tools arrive with the tool task (M2) */
+    out->tools = NULL; /* tools arrive with the tool task (M3) */
     out->ntools = 0;
     return true;
 }

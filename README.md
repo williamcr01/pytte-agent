@@ -4,10 +4,12 @@ A tiny, durable, embeddable coding agent in C. The goal is an agent that can
 run on almost anything (a laptop, a router, a microcontroller, a browser) and
 survive being killed at any point.
 
-Status: **M1, durable chat.** The AI layer (`libpytte-ai`) talks to
-Anthropic, OpenAI and OpenRouter. The core (`libpytte`) commits every step to
-a session log before it happens, so `pytte ask` survives `kill -9` at any
-point and `pytte resume` carries on. Tools come next (M2).
+Status: **M2, the TUI.** The AI layer (`libpytte-ai`) talks to Anthropic,
+OpenAI and OpenRouter. The core (`libpytte`) commits every step to a session
+log before it happens, so a session survives `kill -9` at any point and
+`pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
+few rows at the bottom and leaves the rest to the terminal's scrollback.
+Tools come next (M3).
 
 ## Build
 
@@ -15,11 +17,13 @@ Needs a C99 compiler, make, and libcurl with headers.
 
 ```sh
 make            # build/pytte, build/pytte-ai and the libraries
-make test       # unit, fixture, crash-simulation and CLI tests, with ASan and UBSan
+make test       # unit, fixture, crash-simulation, screen, pty and CLI tests (ASan, UBSan)
+make screen     # the screen property test with many more random sessions
 make crash      # kill -9 pytte at random moments, 100 rounds
 make portable   # the core builds as strict C99 with gcc and clang, no stdio
 make fuzz       # libFuzzer targets in build/fuzz/ (clang)
 make models     # refresh the model catalog (network, needs python3)
+make width      # regenerate the display-width table from Unicode (network)
 ```
 
 ## pytte
@@ -27,20 +31,38 @@ make models     # refresh the model catalog (network, needs python3)
 ```sh
 export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, OPENROUTER_API_KEY
 
-build/pytte ask "what is 25*18?"                 # new session (model: anthropic)
-build/pytte ask --model openai/gpt-5 --reasoning high "hello"
-build/pytte resume                               # continue the newest session
-build/pytte log                                  # its transcript (--json: records)
-build/pytte ask --model faux --script tests/faux/slow.json "anything"   # offline
+build/pytte                                  # the TUI, new session (model: anthropic)
+build/pytte -m openai/gpt-5 --effort high    # another model
+build/pytte -c                               # continue this directory's newest session
+build/pytte -r [ID]                          # that session, or pick one
+build/pytte -p "what is 25*18?"              # print mode: run, print the answer, exit
+echo "hello" | build/pytte -p --output-format json
+build/pytte log [ID]                         # a transcript (--json: records)
+build/pytte -m faux --script tests/faux/slow.json   # offline
 ```
+
+In the TUI: Enter sends (queued while a run is active), Shift+Enter or
+Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft (twice
+on an empty one quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
+Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
+command menu: `/model`, `/effort`, `/new`, `/resume`, `/status`,
+`/thinking`, `/settings`, `/help`, `/quit`. Settings are saved to
+`~/.config/pytte/config.json`.
 
 Sessions live in `$XDG_STATE_HOME/pytte/sessions/<id>/` (by default
 `~/.local/state/pytte`). `log.jsonl` is the whole truth: one commit per line,
-readable with `jq`. Kill the process at any point (or press Ctrl-C to detach)
-and `pytte resume` continues from the last commit: a half-streamed answer is
-kept as an aborted entry and the request is sent again. Exit codes: 0 done,
-1 setup (such as a missing key), 10 the run failed, 20 storage error, 130
-detached.
+readable with `jq`. Kill the process at any point and `pytte -c` continues
+from the last commit: a half-streamed answer is kept as an interrupted entry
+and the request is sent again. A watchdog process restores the terminal
+modes even after `kill -9` (run `reset` if keys still misbehave). Exit codes:
+0 done, 1 setup (such as a missing key), 10 the run failed, 20 storage
+error, 130 detached (Ctrl-C in print mode).
+
+Some terminal settings: `PYTTE_AMBIGUOUS=wide` for terminals set to draw
+East Asian ambiguous characters wide, `PYTTE_REFLOW=0/1` if pytte guesses
+wrong whether the terminal rewraps lines on resize, `PYTTE_ASCII=1` for
+ASCII symbols, `NO_COLOR`. `PYTTE_TUI_TRACE=<file>` records every byte read
+and written, for replaying a display bug.
 
 There are no tools yet: when a model calls one, the call gets an error
 result and the run goes on.
@@ -76,14 +98,19 @@ src/core/              the core: commit lines, state, scheduler, the run task
 src/rt/                the runtime: the host loop over stores, HTTP and timers
 src/drv/               host drivers: libc, curl HTTP, faux HTTP, posix and
                        memory session stores
+src/tui/               the TUI: terminal, keys, text and widths, Markdown,
+                       the band, the input box, the event loop (app.c)
 src/ai/models.gen.inc  the model catalog, generated from models.dev and
                        OpenRouter by scripts/gen_models.py
-src/cli/main.c         the pytte CLI
+src/cli/               the pytte CLI: flags, print mode, sessions, config files
 src/cli/pytte_ai.c     the pytte-ai CLI
 tests/fixtures/        response streams per provider, with golden results
 tests/faux/            faux provider scripts
 tests/test_sim.c       crash simulation: every scenario killed at every commit
 tests/crash.sh         the same with real processes and kill -9
+tests/vt.c             a strict terminal emulator for the TUI tests
+tests/test_screen.c    random sessions checked against the emulator's screen
+tests/test_pty.c       the real pytte in a pseudo-terminal
 ```
 
 ## Fixtures

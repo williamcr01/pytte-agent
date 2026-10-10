@@ -1703,7 +1703,11 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         char head[600], cwd[4096];
         pt_buf first;
         pt_buf_init(&first, pt_sys_allocator());
-        snprintf(head, sizeof head, "pytte %s · %.500s", PT_VERSION, getcwd(cwd, sizeof cwd) ? cwd : "");
+        const char *home = getenv("HOME"), *dir = getcwd(cwd, sizeof cwd) ? cwd : "";
+        size_t hn = home ? strlen(home) : 0;
+        bool tilde = hn > 1 && strncmp(dir, home, hn) == 0 && (dir[hn] == '/' || !dir[hn]);
+        snprintf(head, sizeof head, "pytte %s · %.200s · %s%.300s", PT_VERSION, a.model[0] ? a.model : "(no model)",
+                 tilde ? "~" : "", tilde ? dir + hn : dir);
         out_text(&a, &first, TUI_DIM, NULL, 0, pt_strz(head), 0);
         pt_buf_puts(&first, pt_buf_str(&a.lines));
         pt_buf_reset(&a.lines);

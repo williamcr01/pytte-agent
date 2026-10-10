@@ -348,7 +348,7 @@ static bool classify(pt_agent *a, task *t)
             nt.until = until;
             after(a, AFTER_RETRY, "", e->message, until);
         } else {
-            /* Fatal, or an overflow (compaction comes in M3). */
+            /* Fatal, or an overflow (compaction comes in M4). */
             write_error(a, t->attempt, e, 0);
             nt.status = ST_DONE;
             nt.outcome = PT_S("failed");
