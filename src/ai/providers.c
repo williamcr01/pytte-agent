@@ -83,6 +83,7 @@ static const pt_model models[] = {
     {"anthropic", "claude-haiku-4-5", "Claude Haiku 4.5", NULL, 200000, 64000, false, true,
      {0, 0, 0, 0}, {0}},
 
+    {"openai", "gpt-6-luna", "GPT-6 Luna", NULL, 1050000, 128000, true, true, {0, 0, 0, 0}, {0}},
     {"openai", "gpt-5", "GPT-5", NULL, 400000, 128000, true, true, {0, 0, 0, 0}, {0}},
     {"openai", "gpt-5-mini", "GPT-5 mini", NULL, 400000, 128000, true, true, {0, 0, 0, 0}, {0}},
     {"openai", "gpt-4.1", "GPT-4.1", NULL, 1047576, 32768, false, true, {0, 0, 0, 0}, {0}},

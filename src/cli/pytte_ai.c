@@ -460,6 +460,15 @@ static pt_str canned_result(const pt_block *b, pt_arena *a)
     return r;
 }
 
+static bool has_models(const pt_ai_catalog *cat, const char *provider)
+{
+    uint32_t i;
+    for (i = 0; i < cat->nmodels; i++)
+        if (strcmp(cat->models[i].provider, provider) == 0)
+            return true;
+    return false;
+}
+
 int main(int argc, char **argv)
 {
     opts o;
@@ -496,7 +505,9 @@ int main(int argc, char **argv)
         provider.base_url = o.base_url;
         t.provider = &provider;
     }
-    if (!t.known)
+    /* Only worth a note where the catalog lists the provider's models;
+     * OpenRouter's are never listed. */
+    if (!t.known && has_models(pt_ai_builtin_catalog(), t.provider->id))
         fprintf(stderr, "pytte-ai: note: %s is not in the catalog; using %s defaults\n", t.model.id,
                 t.provider->id);
     if (!pt_ai_find_key(t.provider, pt_sys_env, NULL, &cred, &which)) {
