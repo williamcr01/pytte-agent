@@ -290,11 +290,15 @@ static int64_t next_wake(const pt_rt *rt)
     return t;
 }
 
-static void drain(pt_rt *rt)
+static unsigned drain(pt_rt *rt)
 {
     pt_fx fx;
-    while (pt_poll(rt->a, &fx))
+    unsigned n = 0;
+    while (pt_poll(rt->a, &fx)) {
         handle(rt, &fx);
+        n++;
+    }
+    return n;
 }
 
 static void http_failed(pt_rt *rt)
@@ -347,8 +351,11 @@ static pt_rt_result status(pt_rt *rt)
 
 pt_rt_result pt_rt_step(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
-    drain(rt);
-    wait_once(rt, timeout_ms, fds, nfds);
+    /* Work handed out (a commit, a request) changed what the host shows:
+     * look once without waiting, so the host paints it now, not after
+     * the timeout. */
+    unsigned n = drain(rt);
+    wait_once(rt, n ? 0 : timeout_ms, fds, nfds);
     drain(rt);
     return status(rt);
 }

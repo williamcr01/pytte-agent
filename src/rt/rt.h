@@ -45,8 +45,9 @@ pt_rt_result pt_rt_run(pt_rt *rt);
 /* One bounded step, for hosts that wait on more than the agent (a TUI):
  * start what the agent hands out, then wait up to timeout_ms (-1: no
  * limit) for HTTP progress, the next sleeper or one of fds (marked
- * ready), and start what that produced. Waits on fds even when idle or
- * fatal; cfg.stop is not consulted. */
+ * ready), and start what that produced. When the agent handed out work
+ * the step only looks (timeout 0), so the host shows that work at once.
+ * Waits on fds even when idle or fatal; cfg.stop is not consulted. */
 pt_rt_result pt_rt_step(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds);
 /* Clean exit: drop outstanding requests and commit the close claim.
  * Pending work stays pending for the next owner. */

@@ -16,6 +16,7 @@
 #include "core/core.h"
 #include "rt/rt.h"
 
+#include <poll.h>
 #include <unistd.h>
 
 static bool use_step; /* drive clients with pt_rt_step instead of pt_rt_run */
@@ -561,6 +562,41 @@ static void test_another_writer(void)
     pt_buf_free(&want);
 }
 
+/* A server that holds every request and, like curl_multi_poll, sleeps
+ * out the whole timeout while nothing arrives. */
+typedef struct held_http {
+    pt_http_driver vt;
+    int n;
+} held_http;
+
+static void *held_start(pt_http_driver *d, const pt_http_req *req, const pt_http_sink *sink)
+{
+    (void)req;
+    (void)sink;
+    return &((held_http *)d)->n;
+}
+
+static void held_cancel(pt_http_driver *d, void *h)
+{
+    (void)d;
+    (void)h;
+}
+
+static int held_pump(pt_http_driver *d, int timeout_ms, pt_waitfd *fds, unsigned nfds)
+{
+    (void)fds;
+    (void)nfds;
+    if (timeout_ms > 0)
+        poll(NULL, 0, timeout_ms > 3000 ? 3000 : timeout_ms);
+    ((held_http *)d)->n++;
+    return 1; /* the one held request */
+}
+
+static void held_free(pt_http_driver *d)
+{
+    (void)d;
+}
+
 /* pt_rt_step reaches the same end as pt_rt_run, and wakes on extra fds. */
 static void test_step(void)
 {
@@ -631,6 +667,58 @@ static void test_step(void)
         world_free(&w);
         close(p[0]);
         close(p[1]);
+    }
+    {
+        /* A step that handed out work returns without waiting: a host (the
+         * TUI) shows what that work committed at once, not after its
+         * timeout. Here: the input is committed and the request started,
+         * the server says nothing, and the step still returns at once. */
+        world w;
+        pt_opts o;
+        pt_rt_cfg rc;
+        pt_agent *a;
+        pt_rt *rt;
+        pt_session_cfg c;
+        pt_identity me;
+        pt_input in;
+        pt_entry_view v;
+        held_http held = {{held_start, held_cancel, held_pump, held_free}, 0};
+        int64_t t0;
+        uint32_t k;
+        bool user = false;
+        world_init(&w, "{\"turns\":[]}", 1);
+        memset(&o, 0, sizeof o);
+        o.alloc = T_AL;
+        o.now_ms = w_now;
+        o.ud = &w;
+        o.config.model = PT_S("faux/faux");
+        a = pt_new(&o);
+        memset(&rc, 0, sizeof rc);
+        rc.store = w.store;
+        rc.http = &held.vt;
+        rc.now = w_now;
+        rc.sleep = w_sleep;
+        rc.clock_ud = &w;
+        rt = pt_rt_new(&rc, a);
+        memset(&c, 0, sizeof c);
+        memset(&me, 0, sizeof me);
+        me.host = PT_S("sim");
+        CHECK(pt_create(a, &c));
+        CHECK(pt_open(a, &me, false));
+        memset(&in, 0, sizeof in);
+        in.text = PT_S("hello");
+        CHECK(pt_submit(a, &in));
+        t0 = pt_sys_now_ms();
+        CHECK(pt_rt_step(rt, 2000, NULL, 0) == PT_RT_BUSY);
+        CHECK(pt_sys_now_ms() - t0 < 500);
+        for (k = 0; k < pt_entry_count(a); k++)
+            if (pt_entry_at(a, k, &v) && strcmp(v.kind, "user") == 0)
+                user = true;
+        CHECK(user);
+        CHECK(held.n >= 1); /* the request was started and pumped once */
+        pt_rt_free(rt);
+        pt_free(a);
+        world_free(&w);
     }
 }
 

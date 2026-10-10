@@ -471,6 +471,8 @@ static void on_entries(app *a)
     if (n < a->seen) /* a new epoch */
         a->seen = 0;
     for (i = a->seen; i < n && pt_entry_at(a->s.a, i, &v); i++) {
+        if (strcmp(v.kind, "user") == 0) /* answers a key: no frame wait */
+            a->urgent = true;
         if (strcmp(v.kind, "user") == 0 && a->nq) { /* a queued input was placed */
             pt_buf first = a->queue[0];
             memmove(a->queue, a->queue + 1, (a->nq - 1) * sizeof *a->queue);
