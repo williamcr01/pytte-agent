@@ -1,0 +1,9 @@
+{"model":"claude-haiku-5-5","max_tokens":128000,"stream":true,"cache_control":{"type":"ephemeral"},"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"},"tools":[{"name":"read","description":"Read a file and return its contents.","input_schema":{
+      "type": "object",
+      "properties": {"path": {"type": "string"}},
+      "required": ["path"]
+    },"eager_input_streaming":true},{"name":"write","description":"Write text to a file, replacing it.","input_schema":{
+      "type": "object",
+      "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+      "required": ["path", "content"]
+    },"eager_input_streaming":true}],"messages":[{"role":"user","content":[{"type":"text","text":"Read a.txt and b.txt. Call read for both files at once, in parallel."}]}]}

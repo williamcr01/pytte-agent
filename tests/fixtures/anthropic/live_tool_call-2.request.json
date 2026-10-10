@@ -1,0 +1,5 @@
+{"model":"claude-haiku-5-5","max_tokens":128000,"stream":true,"cache_control":{"type":"ephemeral"},"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"high"},"tools":[{"name":"echo","description":"Echo the given text back. Use it whenever the user asks you to echo something.","input_schema":{
+      "type": "object",
+      "properties": {"text": {"type": "string", "description": "The text to echo."}},
+      "required": ["text"]
+    },"eager_input_streaming":true}],"messages":[{"role":"user","content":[{"type":"text","text":"Use the echo tool to echo 'hi', then tell me what it said."}]},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_01223QnCEuqS5NraNAUDT3Bx","name":"echo","input":{"text": "hi"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01223QnCEuqS5NraNAUDT3Bx","content":"hi"}]}]}
