@@ -8,6 +8,9 @@
  *             keep rows in place (xterm, st, the Linux console);
  *   width     its own width per code point, to play a terminal that
  *             disagrees with pytte;
+ *   sticky    like tmux: a row keeps the width of the longest content it
+ *             held until erased from column 0 by CSI J (CSI K only blanks
+ *             cells), and reflows with those blank cells as content;
  *   modes     kitty flag stack, bracketed paste, cursor, synchronized
  *             output; queries are answered into `replies`. */
 #include <stdio.h>
@@ -27,6 +30,7 @@ typedef struct vt_row {
     vt_cell *c;
     int n;        /* cells allocated */
     bool wrapped; /* continued on the next row by autowrap */
+    int used;     /* sticky: the columns it has held content in */
 } vt_row;
 
 typedef struct vt {
@@ -37,7 +41,7 @@ typedef struct vt {
     int r, c;
     bool pending; /* deferred wrap */
     int style;
-    bool reflow;
+    bool reflow, sticky;
     int (*width)(uint32_t cp);
     /* modes */
     int kitty; /* pushed flags (depth) */
@@ -82,6 +86,7 @@ static void row_init(vt_row *row, int cols)
     row->c = (vt_cell *)calloc((size_t)cols, sizeof(vt_cell));
     row->n = cols;
     row->wrapped = false;
+    row->used = 0;
     for (i = 0; i < cols; i++)
         row->c[i].w = 1;
 }
@@ -186,6 +191,8 @@ static void put_cp(vt *v, uint32_t cp, const char *bytes, int nb)
     cell->style = (unsigned char)v->style;
     if (w == 2)
         row->c[v->c + 1].w = 0, row->c[v->c + 1].n = 0;
+    if (row->used < v->c + w)
+        row->used = v->c + w;
     if (v->c + w >= v->cols) {
         v->c = v->cols - 1;
         v->pending = true;
@@ -297,9 +304,12 @@ static void csi(vt *v, const char *s, int n)
         }
         clear_cells(&v->screen[v->r], v->c, v->cols);
         v->screen[v->r].wrapped = false;
+        if (v->c == 0)
+            v->screen[v->r].used = 0;
         for (i = v->r + 1; i < v->rows; i++) {
             clear_cells(&v->screen[i], 0, v->cols);
             v->screen[i].wrapped = false;
+            v->screen[i].used = 0;
         }
         return;
     case 'c':
@@ -445,7 +455,7 @@ static void vt_resize(vt *v, int rows, int cols)
     v->nsb = v->sbcap = 0;
     /* the last row that matters: content or the cursor */
     for (last = total - 1; last > cur; last--) {
-        bool blank = true;
+        bool blank = !(v->sticky && all[last].used);
         for (j = 0; j < all[last].n && blank; j++)
             blank = !all[last].c[j].n;
         if (!blank)
@@ -463,7 +473,7 @@ static void vt_resize(vt *v, int rows, int cols)
         i = 0;
         while (i <= last) {
             vt_line l = {NULL, 0, 0};
-            int k, col = 0, offset = -1, lw = 0;
+            int k, col = 0, offset = -1, lw = 0, keep = 0;
             bool placed = false;
             /* a logical line: rows joined while wrapped */
             for (;;) {
@@ -473,6 +483,8 @@ static void vt_resize(vt *v, int rows, int cols)
                         end--;
                 if (i == cur) /* the cursor: so many columns of content into the line */
                     offset = lw + v->c;
+                if (v->sticky && lw + all[i].used > keep)
+                    keep = lw + all[i].used;
                 for (j = 0; j < end; j++)
                     if (all[i].c[j].w != 0) {
                         line_push(&l, &all[i].c[j]);
@@ -483,8 +495,10 @@ static void vt_resize(vt *v, int rows, int cols)
                 i++;
             }
             i++;
-            while (l.n && !l.c[l.n - 1].n) /* trailing blanks */
+            while (l.n && !l.c[l.n - 1].n && lw > keep) { /* trailing blanks */
+                lw -= l.c[l.n - 1].w;
                 l.n--;
+            }
             OUT_ROW();
             lw = 0;
             for (k = 0; k < l.n; k++) {
@@ -504,6 +518,8 @@ static void vt_resize(vt *v, int rows, int cols)
                     out[nout - 1].c[col + 1].w = 0;
                 col += w;
                 lw += w;
+                if (out[nout - 1].used < col)
+                    out[nout - 1].used = col;
             }
             if (offset >= 0 && !placed) { /* past the end of the content */
                 col += offset - lw;
@@ -525,6 +541,7 @@ static void vt_resize(vt *v, int rows, int cols)
             if (j < all[i].n && j > 0 && out[nout - 1].c[j - 1].w == 2)
                 clear_cells(&out[nout - 1], j - 1, j); /* a wide character cut in half */
             out[nout - 1].wrapped = all[i].wrapped;
+            out[nout - 1].used = all[i].used < cols ? all[i].used : cols;
         }
         cur_out = cur;
         cur_col = v->c < cols ? v->c : cols - 1;

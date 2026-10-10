@@ -33,7 +33,7 @@ PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) s
 PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) $(CLI_SRC) $(APP_SRC))
 
 .PHONY: all test crash screen portable fuzz clean fixtures-update models width
-all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a
+all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a $(BUILD)/replay
 
 $(BUILD)/obj/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -64,6 +64,11 @@ test: $(TESTS) $(BUILD)/pytte-ai $(BUILD)/pytte
 	@for t in $(TESTS); do ./$$t || exit 1; done
 	@echo "cli:" && sh tests/cli.sh $(BUILD)/pytte-ai $(BUILD)/pytte
 	@bash tests/crash.sh $(BUILD)/pytte 3
+
+# Replay a PYTTE_TUI_TRACE file into the test emulator: build/replay TRACE
+$(BUILD)/replay: tests/replay.c tests/t.h tests/vt.c $(BASE_SRC) src/drv/sys_posix.c src/tui/text.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CFLAGS) $(CPPFLAGS) $< $(BASE_SRC) src/drv/sys_posix.c src/tui/text.c -o $@
 
 # The screen property test with many more random sessions (section 22.5).
 screen: $(BUILD)/test/test_screen

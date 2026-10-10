@@ -320,8 +320,13 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
     if (wait > INT32_MAX)
         wait = INT32_MAX;
     if (rt->nreqs || nfds) {
-        if (rt->c.http->pump(rt->c.http, (int)wait, fds, nfds) < 0)
+        if (rt->c.http->pump(rt->c.http, (int)wait, fds, nfds) < 0) {
             http_failed(rt);
+            /* still wait on the host's fds (a terminal, a signal pipe),
+             * without spinning on a driver that keeps failing */
+            if (nfds)
+                pt_sys_wait(fds, nfds, wait < 0 || wait > 1000 ? 1000 : (int)wait);
+        }
         sweep(rt);
     } else if (rt->nsleeps && wait > 0) {
         rt->c.sleep(rt->c.clock_ud, (uint32_t)wait);

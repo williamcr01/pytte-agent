@@ -87,31 +87,40 @@ static void styled(tui_band *b, pt_str s)
     pt_buf_putz(&b->out, "\x1b[0m");
 }
 
-/* From the top of the band, at column 0: draw f, then place the cursor. */
+/* From the top of the band, at column 0: draw f, then place the cursor.
+ * Rows are rewritten from the first one that changed, after CSI J at its
+ * column 0: tmux (and maybe others) keeps the width of the longest text a
+ * row ever held when it is only blanked by CSI K, and would rewrap those
+ * blanks on a resize, so the band would be taller than it looks. CSI J at
+ * column 0 truly empties a row. */
 static void draw(tui_band *b, const tui_frame *f)
 {
     pt_str nrows = pt_buf_str(&f->rows), orows = pt_buf_str(&b->drawn), cur_row = PT_STR_NULL, prefix;
-    int old_h = b->clear ? 0 : b->h, i;
+    int old_h = b->clear ? 0 : b->h, first = f->n, i;
     size_t at = 0, oat = 0;
-    if (b->clear)
-        pt_buf_putz(&b->out, b->gap ? "\x1b[J\r\n" : "\x1b[J");
+    if (b->clear && b->gap)
+        pt_buf_putz(&b->out, "\x1b[J\r\n");
     b->clear = false;
     b->gap = false;
-    for (i = 0; i < f->n; i++) {
+    for (i = 0; i < f->n && first == f->n; i++) {
         pt_str r = next_row(nrows, &at), o = i < old_h ? next_row(orows, &oat) : PT_STR_NULL;
+        if (i >= old_h || !pt_str_eq(r, o))
+            first = i;
+    }
+    if (first == f->n && old_h > f->n) /* only shrank: clear below the last row */
+        first = f->n - 1;
+    at = 0;
+    for (i = 0; i < f->n; i++) {
+        pt_str r = next_row(nrows, &at);
         if (i > 0)
             pt_buf_putz(&b->out, "\r\n");
-        /* the last row is always written when the band shrinks: CSI J
-         * clears from the cursor, which must be past it */
-        if (i >= old_h || !pt_str_eq(r, o) || (i == f->n - 1 && old_h > f->n)) {
+        if (i == first)
+            pt_buf_putz(&b->out, "\x1b[J");
+        if (i >= first)
             styled(b, r);
-            pt_buf_putz(&b->out, "\x1b[K");
-        }
         if (i == f->cur_row)
             cur_row = r;
     }
-    if (old_h > f->n)
-        pt_buf_putz(&b->out, "\x1b[J");
     up(b, f->n - 1 - f->cur_row);
     pt_buf_putc(&b->out, '\r');
     prefix.p = cur_row.p;

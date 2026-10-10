@@ -303,7 +303,7 @@ static void check_screen(bstate *st, const char *op)
     pt_buf_free(&got);
 }
 
-static void band_run(bool reflow, bool disagree, bool unc, uint64_t seed, int ops)
+static void band_run(bool reflow, bool disagree, bool unc, bool sticky, uint64_t seed, int ops)
 {
     bstate st;
     pt_buf lines, t;
@@ -316,6 +316,7 @@ static void band_run(bool reflow, bool disagree, bool unc, uint64_t seed, int op
     st.v = vt_new(20, 40, reflow);
     if (disagree)
         st.v->width = vt_width_old;
+    st.v->sticky = sticky;
     tui_band_init(&st.b, 20, 40, T_AL);
     st.b.reflow = reflow;
     tui_frame_init(&st.f, T_AL);
@@ -420,11 +421,12 @@ static void test_band(void)
 {
     uint64_t seed, seeds = getenv("BAND_SEEDS") ? (uint64_t)atoi(getenv("BAND_SEEDS")) : 16;
     for (seed = 1; seed <= seeds; seed++) {
-        band_run(true, false, false, seed, 300);  /* exact */
-        band_run(true, false, true, seed, 300);   /* uncertain widths */
-        band_run(true, true, true, seed, 300);    /* a terminal that disagrees */
-        band_run(false, false, false, seed, 300); /* no reflow */
-        band_run(false, true, true, seed, 300);
+        band_run(true, false, false, false, seed, 300);  /* exact */
+        band_run(true, false, true, false, seed, 300);   /* uncertain widths */
+        band_run(true, true, true, false, seed, 300);    /* a terminal that disagrees */
+        band_run(true, false, false, true, seed, 300);   /* tmux: erased rows keep their width */
+        band_run(false, false, false, false, seed, 300); /* no reflow */
+        band_run(false, true, true, false, seed, 300);
     }
 }
 

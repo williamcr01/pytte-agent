@@ -144,6 +144,8 @@ static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfd
     CURLMsg *msg;
     if (nfds > 8)
         nfds = 8;
+    if (timeout_ms < 0) /* no limit: curl_multi_poll takes no -1 */
+        timeout_ms = 3600 * 1000;
     for (i = 0; i < nfds; i++) {
         w[i].fd = fds[i].fd;
         w[i].events = CURL_WAIT_POLLIN;
