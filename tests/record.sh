@@ -19,9 +19,9 @@ rec() {
 
 for p in ${@:-anthropic openai openrouter}; do
     case $p in
-    anthropic) m=anthropic/claude-opus-5-5 key=ANTHROPIC_API_KEY ;;
-    openai) m=openai/gpt-5-mini key=OPENAI_API_KEY ;;
-    openrouter) m=openrouter/anthropic/claude-haiku-4.5 key=OPENROUTER_API_KEY ;;
+    anthropic) m=anthropic/claude-haiku-5-5 key=ANTHROPIC_API_KEY ;;
+    openai) m=openai/gpt-6-luna key=OPENAI_API_KEY ;;
+    openrouter) m=openrouter/anthropic/claude-haiku-5.5 key=OPENROUTER_API_KEY ;;
     *) echo "unknown provider: $p" >&2; exit 1 ;;
     esac
     m=${MODEL:-$m}
