@@ -28,6 +28,9 @@ typedef struct host {
     pt_buf text; /* streamed text */
     int retries, done, failed, idle;
     uint32_t stop_at_request; /* return before answering request n (1-based) */
+    pt_str body;              /* answer with this SSE body instead of the faux script */
+    uint32_t snapshots;       /* live files written */
+    pt_buf longest;           /* the longest one */
 } host;
 
 static int64_t h_now(void *ud)
@@ -90,6 +93,7 @@ static void h_init(host *h, const char *script)
         pt_buf_init(&h->live[i], T_AL);
     pt_buf_init(&h->last_request, T_AL);
     pt_buf_init(&h->text, T_AL);
+    pt_buf_init(&h->longest, T_AL);
     h->script = script;
     h->now = 1760000000000;
 }
@@ -103,6 +107,7 @@ static void h_free(host *h)
         pt_buf_free(&h->live[i]);
     pt_buf_free(&h->last_request);
     pt_buf_free(&h->text);
+    pt_buf_free(&h->longest);
 }
 
 static void answer(host *h, const pt_fx *fx)
@@ -113,7 +118,13 @@ static void answer(host *h, const pt_fx *fx)
     pt_arena_init(&ar, T_AL, 0);
     pt_buf_reset(&h->last_request);
     pt_buf_puts(&h->last_request, fx->http->body);
-    CHECK(pt_faux_respond(pt_strz(h->script), fx->http->body, &h->faux, &r, &ar));
+    if (h->body.n) {
+        r.status = 200;
+        r.body = h->body;
+        r.cut = -1;
+    } else {
+        CHECK(pt_faux_respond(pt_strz(h->script), fx->http->body, &h->faux, &r, &ar));
+    }
     pt_fx_head(h->a, fx->id, r.status, PT_STR_NULL);
     if (r.cut >= 0 && (size_t)r.cut < r.body.n)
         r.body.n = (size_t)r.cut;
@@ -121,6 +132,7 @@ static void answer(host *h, const pt_fx *fx)
         size_t step = r.body.n - at < 5 ? r.body.n - at : 5;
         pt_fx_data(h->a, fx->id, r.body.p + at, step);
         at += step;
+        h->now += 20; /* a slow server */
     }
     pt_fx_done(h->a, fx->id, NULL);
     pt_arena_free(&ar);
@@ -158,6 +170,11 @@ static bool h_run(host *h)
             if (fx.task < 16) {
                 pt_buf_reset(&h->live[fx.task]);
                 pt_buf_puts(&h->live[fx.task], fx.bytes);
+            }
+            h->snapshots += fx.bytes.n > 0;
+            if (fx.bytes.n > h->longest.n) {
+                pt_buf_reset(&h->longest);
+                pt_buf_puts(&h->longest, fx.bytes);
             }
             break;
         case PT_FX_CANCEL:
@@ -489,6 +506,43 @@ static void test_resend_is_identical(void)
     pt_buf_free(&t);
 }
 
+static bool fake_key(void *ud, const pt_provider *p, pt_credentials *out)
+{
+    (void)ud;
+    (void)p;
+    out->api_key = PT_S("sk-test");
+    return true;
+}
+
+/* Live snapshots keep up with a real provider's stream. */
+static void test_live_snapshots(void)
+{
+    host h;
+    size_t n;
+    char *sse;
+    FILE *f = fopen("tests/fixtures/anthropic/live_text.sse", "rb");
+    pt_config c;
+    CHECK(f != NULL);
+    if (!f)
+        return;
+    sse = (char *)malloc(1 << 16);
+    n = fread(sse, 1, 1 << 16, f);
+    fclose(f);
+    h_init(&h, hello);
+    h.body = pt_str_trim((pt_str){strchr(sse, '\n') + 1, n - (size_t)(strchr(sse, '\n') + 1 - sse)});
+    h_create(&h);
+    h.a->o.credentials = fake_key;
+    memset(&c, 0, sizeof c);
+    c.model = PT_S("anthropic/claude-haiku-5-5");
+    pt_set_config(h.a, &c);
+    h_submit(&h, "hi", NULL);
+    h_run(&h);
+    CHECK(h.done == 1);
+    CHECK(pt_str_contains(pt_buf_str(&h.longest), PT_S("\"type\":\"text\",\"text\":\"")));
+    h_free(&h);
+    free(sse);
+}
+
 static void test_claims(void)
 {
     host h;
@@ -531,5 +585,6 @@ int main(void)
     RUN(test_queue_and_req);
     RUN(test_resend_is_identical);
     RUN(test_claims);
+    RUN(test_live_snapshots);
     return t_done("test_core");
 }

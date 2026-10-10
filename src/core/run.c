@@ -22,6 +22,7 @@ struct run_live {
     uint32_t http_fx;
     bool http_done, finished;
     int64_t last_live;
+    bool dirty; /* content arrived since the last snapshot */
     pt_buf snap;
 };
 
@@ -112,39 +113,44 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
 
 /* ---- request ---- */
 
+/* The partial message, for watchers and for the record after a crash: at
+ * most every live_interval_ms, and once more after the last change. */
+static bool snapshot(run_live *rl, const pt_msg *m, bool force)
+{
+    pt_agent *a = rl->agent;
+    int64_t now = pt_core_now(a);
+    uint32_t every = a->o.config.live_interval_ms ? a->o.config.live_interval_ms : 250;
+    pt_jw w;
+    pt_fx fx;
+    if (!force && rl->last_live && now - rl->last_live < (int64_t)every) {
+        rl->dirty = true;
+        return false;
+    }
+    rl->last_live = now ? now : 1;
+    rl->dirty = false;
+    pt_buf_reset(&rl->snap);
+    pt_jw_init(&w, &rl->snap);
+    pt_msg_write_json(&w, m);
+    memset(&fx, 0, sizeof fx);
+    fx.kind = PT_FX_LIVE;
+    fx.id = pt_core_new_fx(a);
+    fx.task = rl->task;
+    return !rl->snap.oom && pt_core_queue(a, &fx, pt_buf_str(&rl->snap));
+}
+
 static void on_ai(void *ud, const pt_ai_event *ev)
 {
     run_live *rl = (run_live *)ud;
-    pt_agent *a = rl->agent;
     pt_event e;
     memset(&e, 0, sizeof e);
     e.kind = PT_E_STREAM;
     e.task = rl->task;
     e.ai = ev;
-    pt_core_emit(a, &e);
-    if (ev->kind == PT_EV_DONE || ev->kind == PT_EV_ERROR) {
+    pt_core_emit(rl->agent, &e);
+    if (ev->kind == PT_EV_DONE || ev->kind == PT_EV_ERROR)
         rl->finished = true;
-        return;
-    }
-    {
-        /* The partial message, for watchers and for the record after a crash. */
-        int64_t now = pt_core_now(a);
-        uint32_t every = a->o.config.live_interval_ms ? a->o.config.live_interval_ms : 250;
-        pt_jw w;
-        pt_fx fx;
-        if (rl->last_live && now - rl->last_live < (int64_t)every)
-            return;
-        rl->last_live = now ? now : 1;
-        pt_buf_reset(&rl->snap);
-        pt_jw_init(&w, &rl->snap);
-        pt_msg_write_json(&w, ev->msg);
-        memset(&fx, 0, sizeof fx);
-        fx.kind = PT_FX_LIVE;
-        fx.id = pt_core_new_fx(a);
-        fx.task = rl->task;
-        if (!rl->snap.oom)
-            pt_core_queue(a, &fx, pt_buf_str(&rl->snap));
-    }
+    else
+        snapshot(rl, ev->msg, false);
 }
 
 static bool start_request(pt_agent *a, task *t)
@@ -434,6 +440,8 @@ bool pt_run_step(pt_agent *a, task *t)
             return start_request(a, t);
         if (t->live->finished)
             return classify(a, t);
+        if (t->live->dirty) /* the trailing snapshot, once its time has come */
+            return snapshot(t->live, pt_ai_stream_message(t->live->s), false);
         return false;
     }
     return false;
