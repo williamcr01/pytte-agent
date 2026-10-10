@@ -375,6 +375,10 @@ void pt_ai_stream_end(pt_ai_stream *s, const char *transport_error, int64_t now_
         pt_buf_free(&msg);
         return;
     }
+    if (!s->status) {
+        pt_emit_fail(s, PT_ERR_RETRYABLE, PT_S("the connection ended without an HTTP response"));
+        return;
+    }
     if (!ok_status(s->status)) {
         pt_ai_error e;
         memset(&e, 0, sizeof e);

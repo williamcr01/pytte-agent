@@ -65,6 +65,7 @@ typedef struct ui {
     bool text_nl; /* last text output ended with a newline */
     bool any_text;
     bool thinking_out; /* thinking text was printed for the current block */
+    pt_buf thinking;   /* what was printed of it */
     pt_buf line;
 } ui;
 
@@ -142,8 +143,16 @@ static void on_event(void *ud, const pt_ai_event *ev)
             fputs("\x1b[2m", stderr);
         u->thinking_out = true;
         out_str(stderr, ev->delta);
+        pt_buf_puts(&u->thinking, ev->delta);
         break;
     case PT_EV_THINKING_END:
+        /* OpenAI sometimes rewrites a reasoning summary mid-stream; then the
+         * final text differs from what was printed. Show the final one. */
+        if (u->thinking_out && !pt_str_eq(pt_buf_str(&u->thinking), m->blocks[ev->index].text)) {
+            fputs("\n[revised]\n", stderr);
+            out_str(stderr, m->blocks[ev->index].text);
+        }
+        pt_buf_reset(&u->thinking);
         if (m->blocks[ev->index].redacted) {
             fputs(u->tty_err ? "\x1b[2m[redacted thinking]" : "[redacted thinking]", stderr);
             u->thinking_out = true;
@@ -187,6 +196,7 @@ typedef struct call {
     pt_ai_stream *s;
     pt_buf rec; /* raw response, when recording */
     bool recording;
+    bool http_done; /* the driver is finished with this request */
     int status;
     char retry_after[32];
 } call;
@@ -218,6 +228,7 @@ static void sink_body(void *ud, const char *p, size_t n)
 static void sink_done(void *ud, const char *error)
 {
     call *c = (call *)ud;
+    c->http_done = true;
     pt_ai_stream_end(c->s, error, now());
 }
 
@@ -547,6 +558,7 @@ int main(int argc, char **argv)
     u.events = o.events;
     u.tty_err = isatty(STDERR_FILENO);
     pt_buf_init(&u.line, al);
+    pt_buf_init(&u.thinking, al);
     signal(SIGINT, on_sigint);
 
     for (turn = 0; turn < o.turns; turn++) {
@@ -587,21 +599,23 @@ int main(int argc, char **argv)
             sink.done = sink_done;
             h = http->start(http, &req, &sink);
         }
-        if (!h)
+        if (!h) {
+            c.http_done = true;
             pt_ai_stream_end(c.s, "could not start the request", now());
+        }
         while (!pt_ai_stream_finished(c.s)) {
-            int r;
             if (interrupted) {
-                http->cancel(http, h);
                 pt_ai_stream_abort(c.s, now());
                 break;
             }
-            r = http->pump(http, 100);
-            if (r < 0) {
-                http->cancel(http, h);
+            if (http->pump(http, 100) < 0)
                 pt_ai_stream_end(c.s, "HTTP driver failure", now());
-            }
         }
+        /* The stream can finish (on the final event) before the transfer
+         * does. Drop the transfer, or its completion would land on the next
+         * turn's call. */
+        if (!c.http_done)
+            http->cancel(http, h);
         m = *pt_ai_stream_message(c.s);
         e = *pt_ai_stream_error(c.s);
         pt_ai_stream_free(c.s);
@@ -642,6 +656,7 @@ int main(int argc, char **argv)
 
     http->free(http);
     pt_buf_free(&u.line);
+    pt_buf_free(&u.thinking);
     free(msgs);
     pt_arena_free(&session);
     return rc;

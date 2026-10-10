@@ -1,1 +1,1 @@
-{"model":"gpt-6-luna","stream":true,"store":false,"reasoning":{"effort":"high","summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"Is 1013 prime? Think it through, then answer yes or no."}]}]}
+{"model":"gpt-6-luna","stream":true,"store":false,"max_output_tokens":128000,"reasoning":{"effort":"high","summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"Is 1013 prime? Think it through, then answer yes or no."}]}]}

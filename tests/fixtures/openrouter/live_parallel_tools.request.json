@@ -1,4 +1,4 @@
-{"model":"anthropic/claude-haiku-5.5","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"Read a.txt and b.txt. Call read for both files at once, in parallel."}],"tools":[{"type":"function","function":{"name":"read","description":"Read a file and return its contents.","parameters":{
+{"model":"anthropic/claude-haiku-5.5","stream":true,"stream_options":{"include_usage":true},"max_tokens":128000,"messages":[{"role":"user","content":"Read a.txt and b.txt. Call read for both files at once, in parallel."}],"tools":[{"type":"function","function":{"name":"read","description":"Read a file and return its contents.","parameters":{
       "type": "object",
       "properties": {"path": {"type": "string"}},
       "required": ["path"]

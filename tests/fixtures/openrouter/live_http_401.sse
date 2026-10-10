@@ -1,2 +1,2 @@
-{"model":"openrouter/anthropic/claude-haiku-5.5","status":401,"retry_after":"","recorded_ms":1791631432611}
+{"model":"openrouter/anthropic/claude-haiku-5.5","status":401,"retry_after":"","recorded_ms":1791631979663}
 {"error":{"message":"Missing Authentication header","code":401}}

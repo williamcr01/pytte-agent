@@ -1,250 +1,253 @@
-{"model":"anthropic/claude-haiku-5-5","status":200,"retry_after":"","recorded_ms":1791631409546}
+{"model":"anthropic/claude-haiku-5-5","status":200,"retry_after":"","recorded_ms":1791631956661}
 event: message_start
-data: {"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011CftUH84KZf6qmeniNXVaW","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":30,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":8,"service_tier":"standard","inference_geo":"global"},"diagnostics":null}           }
+data: {"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_011CftUyUKaouDuSBEMMp5cP","type":"message","role":"assistant","content":[],"container":null,"stop_reason":null,"stop_sequence":null,"stop_details":null,"usage":{"input_tokens":30,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0},"output_tokens":4,"service_tier":"standard","inference_geo":"global"},"diagnostics":null}       }
 
 event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}              }
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}     }
 
 event: ping
 data: {"type": "ping"}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I'm test"}      }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I'm checking whether "}           }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ing 1013 for div"}     }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"1013 is prime,"}  }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"isibility by small primes up"}      }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" testing div"}          }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" to its"} }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"isibility by prim"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" square root, checking 2,"}  }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"es up to its"}         }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 3, 5, 7"}               }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" square root (~"}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":", 11, 13, "}   }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"31.8): 2, "}    }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"17, and now"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"3, 5, 7,"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 19,"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 11, 13, 17"}          }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" finding no"}    }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":", and"}  }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" even"}       }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 19 all fail to"}              }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" division"}       }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" divide evenly."}             }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" so far."}      }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}          }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}      }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Continuing with"}    }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Continuing through 23,"}      }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 23, 29, and"}     }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 29, and 31, none"}     }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" 31 -"}      }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" divide evenly either"}              }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"- none divide ev"}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":", so 1013 is pr"}              }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"enly either, so 1013"}           }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ime."}     }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" is prime."}    }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}             }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"\n\n"}          }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQS0gcKEAgSGAI4AUIIdGhpbmtpbmcSDPqs8PfkKfr+KxPF5RoMtF19ZCM4PdOszOTPIjBftG+0VIGhcM/xFp7hFFFW6yRrVhtYB42XxpHO3XufFadJ4SYNCPX3axzhfxBLagYq7wbAQFO8tcHzGWE4327H2nkRRlKzAs2joMsl+Yk1/2sdmPhNDBGsOX5l1xKCEX1Bm2zelg/KW9LlGT8rQEuRQKOobSaYO6h60DlFBIKKOar4Yr5hBCzH7NWQ/HEC9Z9uyKkEjMK8LtBAcRHcgYxlZ+SLa10x2DDpOcgAQ0F8cA+/IEuNV/VHWADZePvhqG6IuxycgtlaZN/NMNK9F0mOL0d57z867F9tp7Mex0EhYKcI984XOG+/PNZtxdFB9kyCnMv1weGDQzIY/sNtVI/W+YTaOhPnEI1FKv+B7fG/XkdFLf2+PRu7daSXeNk4yyb5hreSwjPFcsahi6b3uw9V+olrdm0jNwvETXKtH/q4WkBmZOXv1qcbrhHDCu1ywsUoyQWhmPDv84WWUokRBuW3sFFoiaarqxgb5H9ltcD2hAs2Uxhc7cQwUtzGrSrMp0KoiuQ15Gz9kRlmM+czbB/6/QEkCCQl0X3qOQn10IfEVljwhiA38A3KQbruWNzqPJHq19Gtjc6CqWHLWptFJTnNVD7tscqK4yIveX9yjMjRFkRJJqkni2Aj0N3+Xyq4jS9PGxDr21d6s0RxYx4fIOGIEAPC6uvQwNbKBkNQH/R3YucS0Ar0ACusQZQ7+Ng5XbeuvlQ64cN5iGJueb8QBmmo+3Xko+iuHwQof0F0XGsZbkNnMdjOpXnOIfk85We44fintSpAcgsUmXaJY2MRIiQHSdyUMl4OkYTJPgnIDUtzxWmY321Ct7G3daPlikmDzdi32cB387Sm9A6buF47CQ97sLpBiOLk0PTFk3K75PMhnDqUi+7yeL4OwIseQsrf3qFV65LJ2urWy26tr6X+rz40uPmxVCFKFfHq0JAho7hkn1i1gazB/rTCmt1FN9CPzAQJasgVWfngZu5kQYdH1J2Ecn4ScCI/Ur18PI5qbN0Yt/rPFr1ZAWh2g+8SJB84g+Dq69REFBw4qgwI2kGGxZwxyFBy+dD90x2C1efViR8QeErw0R6sY6+4gU87hzJCStvAksJboxamctgpL+To/7EIKQwA/VdNvhtf9bHrjc+KgMkIaIS9AjzIQfbMr56yS1PqnZF0c7v8RB+qX/GM9MQsAWV6dVr8z0l3hPegPVxpDmejhjbzV1O0tfY3tzwoRDWBsg3GNlldSGlMdDrVIDWwgcMYAQ=="}               }
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"CAQSzQcKEAgSGAI4AUIIdGhpbmtpbmcSDF6dePZ0Rcye4VDUsxoMsHcjoVB2clydb7EbIjCulZeLs4QM2WANGKk0xPi+u9Nf8tnQZ0fTNFUkuyx9LS8YlnK4EUf8WUOW/6qutbMq6gaB7X6NTfduNB8C02EQUqrX65j66ZKWdzSTMjUf794Ua9ZGBu0tNpIEQQXGK/XBzpMsOA7fto3vKHRLKmIvqFemddqAsparWWrDpMqRBjB6StKxVxLzphyW/ZEb315QE/p+8Ok+fLcGut/mziosrTupMKz9wImt+5ynnSEBFCEk5PsGKt51zrcbVHJLNoaBSmqb8Jc28Lhm6qahifXHtOO7htpUAB7COVLbd7SflyH6EmuwIBFipU6UiwKelS+qz6YBgHUMD7sGt6zHrgt0hc0CuiJe4EJmdeNwUJW5i2XXUpPUTFI4t0xSOL3o2qtV5263ZiAwPb6v25+tsvgGTRWCAeCIkL7NCzDorw3YZKl5vvsvN03hJncQm3zPDEgGNlGp0VFdKF1FiOjS/g3OJCDxPSe40hGrTfAXKMQ3u+OEsZ9kYoraXeYilUfkuzaVumlVqOf7ja/UNbOJsyZqMa/qRGTFotTUVCIrxmAH+pVHdny5ZwcPPNYz/54lfU/0WrMFk7Z+WTurqkqJsIjzCFVzBUrYn9TwUFQ3Rpr55etID+nroLiHZfNWr1rLsbJ+zh4/TQC0hj70QSStG4pDmZOnuGACLTTWl9MZCBSNMK+PvuLhZwdBNWfzziOaPkOf/B7BnYsXkm2tfjRsWxyqyzfOuyLwc7llSeNXzqL7Ym9868TSHH0lVLYpz1ABcSZrTaMk+S0YIey2smAcnkV1KscggfRHUIwKGrbKwq8IltWKzh2wIhgNTGTWsLIbKtVdSCUdjZUmTSIXBEpICiAtfbJI0fkqEyEVwLuaxBbFqp/TtRnrJKmYFw//UHRplhTmPI3+nNr96rsoSa5qJ6JQKvIKSECAnhO8rnstUxl6LlbT/rYu7ioosLUX+LcOrykeZ+tKAU3itUrZ3tp73eKuRgb//gLSsToL85NJP4Y1pm0r2a1dUYHBKbYdbhvyPOPOPl1we4CEPNhPcF1bifvRDoZGuaBisgBP10c9n0sND61RIpms5sWdexoUyIIAQ+QGYaok6GDVTi8HepDilUb2icsUllTAsiUxAPfOtrSWAgFx5AAGLqKAhESzpIOz3fvANFHrK2WJ4HdhHrseix/LrWiZ7cPBK5YaQzxZj4SWL3sEeRhLJhYiX+f1NW0LzIxDkRooGg38J3tp/bGbGAE="}  }
 
 event: content_block_stop
-data: {"type":"content_block_stop","index":0               }
+data: {"type":"content_block_stop","index":0             }
 
 event: content_block_start
-data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}  }
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""} }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"**Y"}}
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"**"}        }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"es.** 1013 is"} }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Yes.** 1013"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" prime.\n\nThe"}              }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" is prime.\n\nSince"}           }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" square root of 1013 is"}     }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" √"}              }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" about 31.8, so I"}        }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1013 ≈ "}    }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" only"}      }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"31.8, I only"}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" need to check primes up to "}           }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" need to check primes up to "}         }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"31:\n\n- **"}             }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"31:\n\n-"}  }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"2:** "}          }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" **"}  }
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"2:** "}               }
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1013 is odd."}  }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"\n- **3:** The"}         }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"\n- **3:** The"}            }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" digit sum is 1"}             }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" digit sum is 1"}   }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"+0+1+3 ="}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"+0+1+3 "}  }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 5, not"}         }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"= 5, which"}    }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" divisible by 3."}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" is"}      }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"\n- **5:** It"}         }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"n't divisible by 3"}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" doesn't end in 0"}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":".\n- **5:** It"}      }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" or 5.\n- **"}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" doesn't end in 0"}    }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"7:** 7 × "}             }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" or 5.\n- **"}         }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"144 = 1008, rem"}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"7:** 7 "}     }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ainder 5.\n- **"}            }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"× 144 = 1008"}            }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"11:** The alternating dig"}              }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":", rem"}   }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"it sum is 3"}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ainder 5.\n- **"} }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" − 1"} }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"11:** 11 × "}        }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" + 0 − 1"} }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"92 = 1012, rem"}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" = "}}
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ainder 1.\n- **"}            }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1, not divisible by "}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"13:** 13 × "}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"11.\n- **13:**"}               }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"77 = 1001, rem"}             }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 13 × 77 ="}  }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ainder 12.\n- **"}         }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 1001, remainder "}           }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"17:** 17 × "}          }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"12.\n- **17:**"}            }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"59 = 1003, rem"}          }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 17 × 59 ="}   }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ainder 10.\n- **"}     }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 1003, remainder "}     }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"19:** 19 × "}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"10.\n- **19:**"}     }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"53 = 1007, rem"}              }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 19 × 53 ="}          }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ainder 6.\n- **"}    }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 1007, remainder "}}
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"23:** 23 × "}      }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"6.\n- **23:**"}            }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"44 = 1012, rem"}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 23 × 44 ="}        }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ainder 1.\n- **"}     }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 1012, remainder "} }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"29:** 29 × "}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"1.\n- **29:**"}         }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"34 = 986, remain"}   }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 29 × 34 ="}               }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"der 27.\n- **31"}   }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 986, remainder 27"}           }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":":** 31 × 32"}      }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":".\n- **31:** "} }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" = 992, remainder"}           }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"31 × 32 = "}          }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" 21.\n\nNone"}      }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"992, remainder 21."} }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" of these"}     }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"\n\nNone of"}    }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" divide 1013, so it"}             }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" these divide 1013, so"}    }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" has"} }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" it has"}       }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" no pr"}             }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" no prime factor"}              }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ime factor"}        }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" up"}            }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" up"}   }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" to its"}        }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" to its"}          }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" square root and"}   }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" square root and"}  }
 
 event: content_block_delta
 data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":" is pr"}       }
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ime."}        }
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"ime."}   }
 
 event: content_block_stop
-data: {"type":"content_block_stop","index":1 }
+data: {"type":"content_block_stop","index":1}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":30,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":577,"output_tokens_details":{"thinking_tokens":229}}             }
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"container":null},"usage":{"input_tokens":30,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":554,"output_tokens_details":{"thinking_tokens":222}}     }
 
 event: message_stop
-data: {"type":"message_stop"  }
+data: {"type":"message_stop"   }
 

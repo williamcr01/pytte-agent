@@ -1,1 +1,1 @@
-{"model":"anthropic/claude-haiku-5.5","stream":true,"stream_options":{"include_usage":true},"reasoning":{"effort":"high"},"messages":[{"role":"user","content":"Is 1013 prime? Think it through, then answer yes or no."}]}
+{"model":"anthropic/claude-haiku-5.5","stream":true,"stream_options":{"include_usage":true},"max_tokens":128000,"reasoning":{"effort":"high"},"messages":[{"role":"user","content":"Is 1013 prime? Think it through, then answer yes or no."}]}

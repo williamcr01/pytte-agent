@@ -1,1 +1,1 @@
-{"model":"gpt-6-luna","stream":true,"store":false,"reasoning":{"summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}
+{"model":"gpt-6-luna","stream":true,"store":false,"max_output_tokens":128000,"reasoning":{"summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}

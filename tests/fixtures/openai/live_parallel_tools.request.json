@@ -1,4 +1,4 @@
-{"model":"gpt-6-luna","stream":true,"store":false,"reasoning":{"summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"Read a.txt and b.txt. Call read for both files at once, in parallel."}]}],"tools":[{"type":"function","name":"read","description":"Read a file and return its contents.","parameters":{
+{"model":"gpt-6-luna","stream":true,"store":false,"max_output_tokens":128000,"reasoning":{"summary":"auto"},"include":["reasoning.encrypted_content"],"input":[{"role":"user","content":[{"type":"input_text","text":"Read a.txt and b.txt. Call read for both files at once, in parallel."}]}],"tools":[{"type":"function","name":"read","description":"Read a file and return its contents.","parameters":{
       "type": "object",
       "properties": {"path": {"type": "string"}},
       "required": ["path"]
