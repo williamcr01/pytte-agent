@@ -49,7 +49,7 @@ static const struct {
     {"thinking", " [mode]", "how thinking is shown: collapsed, full, hidden"},
     {"settings", "", "user settings (saved)"},
     {"help", "", "commands and keys"},
-    {"quit", "", "exit; pytte -c continues"},
+    {"quit", "", "exit; it prints how to continue"},
 };
 #define NCMDS (sizeof cmds / sizeof cmds[0])
 
@@ -80,6 +80,7 @@ typedef struct app {
     char model[256];     /* shown */
     char model_ref[256]; /* o.model points here */
     bool created;        /* this process created the session */
+    bool discarded;      /* ...and left it empty: closing deleted it */
     char err[700];
     tui_term *t;
     tui_keys keys;
@@ -987,23 +988,28 @@ static void apply_thinking(app *a)
             a->thinking = i;
 }
 
-static void save_setting(app *a, int k, const char *v)
+/* Save a user setting; false (with the reason shown) when it was not. */
+static bool save_setting(app *a, int k, const char *v)
 {
     char err[700];
+    bool ok = true;
     pt_ai_target t;
     const char *why = NULL;
     pt_arena_reset(&a->ar);
     if (k == CFG_MODEL && !pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(v), &t, &a->ar, &why)) {
         snprintf(err, sizeof err, "%s: %s", v, why ? why : "unknown");
         out_z(a, TUI_RED, err);
-        return;
+        return false;
     }
-    if (!cli_config_save(a->cfg, k, v, err, sizeof err))
+    if (!cli_config_save(a->cfg, k, v, err, sizeof err)) {
         out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(err), 2);
+        ok = false;
+    }
     if (k == CFG_THINKING)
         apply_thinking(a);
     if (k == CFG_SYMBOLS)
         apply_symbols(a);
+    return ok;
 }
 
 /* The model shown: the configured one, else the session's last. */
@@ -1132,6 +1138,7 @@ static bool open_session(app *a, const char *id)
     return true;
 }
 
+/* Close the session; an empty one this process made is discarded. */
 static void close_session(app *a)
 {
     uint32_t i, n;
@@ -1147,7 +1154,8 @@ static void close_session(app *a)
         cli_session_free(&a->s);
     else
         cli_session_close(&a->s);
-    if (empty && !a->in.text.n) /* nothing was ever said: leave no session behind */
+    a->discarded = empty && !a->in.text.n;
+    if (a->discarded) /* nothing was ever said: leave no session behind */
         cli_session_discard(a->s.dir);
     a->open = false;
 }
@@ -1213,12 +1221,6 @@ static void pager(app *a)
 }
 
 /* ---- commands ---- */
-
-static void out_cmd(app *a, pt_str line)
-{
-    out_blank(&a->lines);
-    out_rail(a, &a->lines, a->sy->rail, TUI_DIM, TUI_DIM, line, 0);
-}
 
 static void cmd_status(app *a)
 {
@@ -1288,7 +1290,7 @@ static bool valid_setting(int k, const char *v)
 
 static void run_command(app *a, pt_str line)
 {
-    pt_str cmd = line, arg = PT_STR_NULL;
+    pt_str cmd = line, arg = PT_S("");
     long sp = pt_str_find(line, ' ');
     char v[600], msg[700];
     if (sp >= 0) {
@@ -1298,7 +1300,7 @@ static void run_command(app *a, pt_str line)
     cmd.p++;
     cmd.n--;
     snprintf(v, sizeof v, "%.*s", (int)(arg.n < sizeof v ? arg.n : sizeof v - 1), arg.p);
-    out_cmd(a, line);
+    out_blank(&a->lines); /* the command itself is not echoed: only what it did */
     if (pt_str_eqz(cmd, "model")) {
         if (arg.n) {
             pt_ai_target t;
@@ -1313,7 +1315,8 @@ static void run_command(app *a, pt_str line)
             a->o.model = a->model_ref;
             set_config(a);
         }
-        snprintf(msg, sizeof msg, "model %s", a->model[0] ? a->model : "(the session's last)");
+        snprintf(msg, sizeof msg, "%smodel: %s", arg.n ? "switched " : "",
+                 a->model[0] ? a->model : "(the session's last)");
         out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "effort")) {
         if (arg.n) {
@@ -1325,7 +1328,7 @@ static void run_command(app *a, pt_str line)
             a->o.reasoning = r;
             set_config(a);
         }
-        snprintf(msg, sizeof msg, "effort %s", pt_reasoning_name(a->o.reasoning));
+        snprintf(msg, sizeof msg, "%seffort: %s", arg.n ? "switched " : "", pt_reasoning_name(a->o.reasoning));
         out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "new")) {
         switch_session(a, NULL);
@@ -1345,9 +1348,10 @@ static void run_command(app *a, pt_str line)
                 out_z(a, TUI_RED, "modes: collapsed, full, hidden");
                 return;
             }
-            save_setting(a, CFG_THINKING, v);
+            if (!save_setting(a, CFG_THINKING, v))
+                return;
         }
-        snprintf(msg, sizeof msg, "thinking %s", th_names[a->thinking]);
+        snprintf(msg, sizeof msg, "%sthinking: %s", arg.n ? "switched " : "", th_names[a->thinking]);
         out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "settings")) {
         long sp2 = pt_str_find(arg, ' ');
@@ -1370,10 +1374,16 @@ static void run_command(app *a, pt_str line)
                 out_z(a, TUI_RED, msg);
                 return;
             }
-            save_setting(a, settings[s].k, v);
+            if (!save_setting(a, settings[s].k, v))
+                return;
         }
-        snprintf(msg, sizeof msg, "%s %s (%s)", settings[s].name,
-                 a->cfg->val[settings[s].k][0] ? a->cfg->val[settings[s].k] : "(none)", a->cfg->src[settings[s].k]);
+        if (sp2 >= 0) /* saved: the value, and where it was saved */
+            snprintf(msg, sizeof msg, "saved %s: %s", settings[s].name,
+                     a->cfg->val[settings[s].k][0] ? a->cfg->val[settings[s].k] : "(none)");
+        else
+            snprintf(msg, sizeof msg, "%s: %s (%s)", settings[s].name,
+                     a->cfg->val[settings[s].k][0] ? a->cfg->val[settings[s].k] : "(none)",
+                     a->cfg->src[settings[s].k]);
         out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "help")) {
         cmd_help(a);
@@ -1781,7 +1791,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     const char *term = getenv("TERM"), *amb = getenv("PYTTE_AMBIGUOUS");
     int64_t asked;
     int sig = 0;
-    char picked[64] = "";
+    char picked[64] = "", kept[64];
     memset(&a, 0, sizeof a);
     a.o = *o;
     a.cfg = cfg;
@@ -1941,13 +1951,15 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         a.menu = MENU_NONE;
         paint(&a);
     }
+    snprintf(kept, sizeof kept, "%s", a.open ? a.s.id : "");
     close_session(&a);
     tui_band_erase(&a.band);
     flush_out(&a);
-    if (a.code != 129) {
+    if (a.code != 129 && kept[0] && !a.discarded) { /* how to come back to it */
         char last[200];
         pt_buf_reset(&a.lines);
-        snprintf(last, sizeof last, "pytte -c to continue");
+        out_blank(&a.lines);
+        snprintf(last, sizeof last, "to continue this session: pytte -r %s", kept);
         out_z(&a, TUI_DIM, last);
         pt_buf_reset(&a.tmp);
         tui_sgr(&a.tmp, pt_buf_str(&a.lines), a.color);

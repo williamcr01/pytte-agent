@@ -278,9 +278,30 @@ static void test_chat(void)
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
     CHECK(finish(&p, 3000) == 0);
     CHECK(has(&p, "┃ hi there"));
-    CHECK(has(&p, "pytte -c to continue"));
+    CHECK(has(&p, "\n\nto continue this session: pytte -r 20")); /* the session's id */
     modes_restored(&p);
     CHECK(!p.v->paste);
+    {
+        /* the id it printed opens that session again */
+        char id[64] = "";
+        const char *at = strstr(p.scratch.p, "pytte -r "), *again[] = {"-r", id, "--script",
+                                                                       "tests/faux/hello.json", NULL};
+        if (at)
+            sscanf(at + 9, "%63s", id);
+        pty_free(&p);
+        CHECK(id[0] != 0);
+        pty_start(&p, 24, 80, again);
+        CHECK(wait_for(&p, "┃ hi there\n", 3000));
+        keys(&p, "\x04");
+        CHECK(finish(&p, 3000) == 0);
+        pty_free(&p);
+    }
+    /* a session where nothing was said is not kept, so there is nothing to continue */
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    CHECK(!has(&p, "to continue this session"));
     pty_free(&p);
 }
 
@@ -455,13 +476,18 @@ static void test_commands(void)
     CHECK(wait_for(&p, "┃ /thinking ", 1000));
     CHECK(wait_for(&p, "collapsed", 1000));
     keys(&p, "full\r");
-    CHECK(wait_for(&p, "thinking full", 1000));
+    CHECK(wait_for(&p, "\nswitched thinking: full\n", 1000));
+    CHECK(!has(&p, "┃ /thinking")); /* a command is not echoed, only what it did */
     snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "\"tui\": {\"thinking\": \"full\"}"));
     free(cfg);
     keys(&p, "/effort high\r");
-    CHECK(wait_for(&p, "effort high", 1000));
+    CHECK(wait_for(&p, "switched effort: high", 1000));
+    keys(&p, "/model faux/faux\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "\nswitched model: faux/faux\n", 1000));
     CHECK(wait_for(&p, "faux · high", 1000));
     keys(&p, "/model nosuch/provider\r");
     CHECK(wait_for(&p, "nosuch/provider: ", 1000));
@@ -476,7 +502,8 @@ static void test_commands(void)
     keys(&p, "/settings model anthropic\x1b");
     pump(&p, 100);
     keys(&p, "\r");
-    CHECK(wait_for(&p, "┃ /settings model anthropic\nanthropic: no model given", 1000));
+    CHECK(wait_for(&p, "\n\nanthropic: no model given", 1000));
+    CHECK(!has(&p, "saved model")); /* refused: nothing was saved */
     keys(&p, "/status\r");
     CHECK(wait_for(&p, "kitty keys on", 1000));
     keys(&p, "/help\r");
@@ -509,7 +536,7 @@ static void test_history_pager_draft(void)
     CHECK(wait_for(&p, "┃ first question", 1000));
     keys(&p, "\x03"); /* Ctrl-C clears it */
     keys(&p, "/settings pager cat\r");
-    CHECK(wait_for(&p, "pager cat (user)", 1000));
+    CHECK(wait_for(&p, "saved pager: cat", 1000));
     keys(&p, "\x0f"); /* Ctrl-O: the thinking in full, through cat */
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 2000));
     CHECK(wait_for(&p, "┃ ", 1000));

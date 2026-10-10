@@ -376,8 +376,8 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
         break;
     case PT_RT_STOPPED:
         end_text(&u);
+        fprintf(stderr, "pytte: detached; continue with: pytte -r %s\n", s.id);
         cli_session_close(&s);
-        fprintf(stderr, "pytte: detached; continue with: pytte -c\n");
         rc = 130;
         status = "detached";
         break;
