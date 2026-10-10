@@ -19,6 +19,7 @@ Needs a C99 compiler, make, and libcurl with headers.
 make            # build/pytte, build/pytte-ai and the libraries
 make test       # unit, fixture, crash-simulation, screen, pty and CLI tests (ASan, UBSan)
 make screen     # the screen property test with many more random sessions
+make pty-asan   # the pty test against pytte built with ASan and UBSan
 make crash      # kill -9 pytte at random moments, 100 rounds
 make portable   # the core builds as strict C99 with gcc and clang, no stdio
 make fuzz       # libFuzzer targets in build/fuzz/ (clang)

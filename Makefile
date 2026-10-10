@@ -32,7 +32,7 @@ obj       = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
 PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) src/cli/pytte_ai.c)
 PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) $(CLI_SRC) $(APP_SRC))
 
-.PHONY: all test crash screen portable fuzz clean fixtures-update models width
+.PHONY: all test crash screen pty-asan portable fuzz clean fixtures-update models width
 all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a $(BUILD)/replay
 
 $(BUILD)/obj/%.o: %.c
@@ -73,6 +73,12 @@ $(BUILD)/replay: tests/replay.c tests/t.h tests/vt.c $(BASE_SRC) src/drv/sys_pos
 # The screen property test with many more random sessions (section 22.5).
 screen: $(BUILD)/test/test_screen
 	BAND_SEEDS=400 ./$(BUILD)/test/test_screen
+
+# The pty test against pytte built with ASan and UBSan: app.c and term.c
+# only run inside the real binary. A report fails the test (exit code).
+pty-asan: $(BUILD)/test/test_pty
+	$(MAKE) BUILD=$(BUILD)/asan CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' $(BUILD)/asan/pytte
+	PYTTE_BIN=$(BUILD)/asan/pytte ./$(BUILD)/test/test_pty
 
 # kill -9 pytte at random moments, many times (section 22.3).
 crash: $(BUILD)/pytte

@@ -88,7 +88,7 @@ typedef struct app {
     int thinking;
     /* output: styled lines for the scrollback, committed at the next paint */
     pt_buf lines;
-    pt_buf tmp, tmp2;
+    pt_buf tmp, tmp2, live_rows; /* scratch, reused */
     pt_arena ar;
     /* the display model */
     uint32_t seen;   /* entries already shown */
@@ -672,16 +672,16 @@ static void build_frame(app *a, int64_t now)
 {
     int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, act, st, i, first, top;
     bool tiny = a->cols < 20 || a->rows < 4;
-    pt_buf live_rows;
+    pt_buf *live_rows = &a->live_rows;
     tui_frame_reset(&a->frame);
     if (avail < 1)
         avail = 1;
     /* the pieces */
-    pt_buf_init(&live_rows, pt_sys_allocator());
+    pt_buf_reset(live_rows);
     if (a->live_kind != LIVE_NONE && a->live.n) {
         tui_md copy = a->md;
         live_n = tui_md_line(&copy, pt_buf_str(&a->live), a->cols, a->live_kind == LIVE_THINK ? TUI_DIM : 0, true,
-                             &live_rows);
+                             live_rows);
     }
     act = a->running ? 1 : 0;
     nq = a->running ? (int)(a->nq > 3 ? 4 : a->nq) : 0;
@@ -722,7 +722,7 @@ static void build_frame(app *a, int64_t now)
     tui_input_layout(&a->in, w > 3 ? w - 2 : 1, show);
     /* live tail: its last rows */
     {
-        pt_str all = pt_buf_str(&live_rows);
+        pt_str all = pt_buf_str(live_rows);
         size_t at = 0;
         int total = 0, skip;
         for (i = 0; (size_t)i < all.n; i++)
@@ -737,7 +737,6 @@ static void build_frame(app *a, int64_t now)
             at = e + 1;
         }
     }
-    pt_buf_free(&live_rows);
     if (act)
         spinner_row(a, now);
     for (i = 0; i < nq; i++) {
@@ -1674,6 +1673,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_init(&a.lines, pt_sys_allocator());
     pt_buf_init(&a.tmp, pt_sys_allocator());
     pt_buf_init(&a.tmp2, pt_sys_allocator());
+    pt_buf_init(&a.live_rows, pt_sys_allocator());
     pt_buf_init(&a.live, pt_sys_allocator());
     pt_buf_init(&a.retry_err, pt_sys_allocator());
     pt_buf_init(&a.items_buf, pt_sys_allocator());
@@ -1830,6 +1830,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_free(&a.lines);
     pt_buf_free(&a.tmp);
     pt_buf_free(&a.tmp2);
+    pt_buf_free(&a.live_rows);
     pt_buf_free(&a.live);
     pt_buf_free(&a.retry_err);
     pt_buf_free(&a.items_buf);

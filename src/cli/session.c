@@ -119,7 +119,7 @@ uint32_t cli_sessions_list(const char *cwd, char (*ids)[64], uint32_t max)
                 break;
             all = na;
         }
-        snprintf(all[n++], 64, "%s", e->d_name);
+        snprintf(all[n++], 64, "%.63s", e->d_name);
     }
     closedir(d);
     if (n)
