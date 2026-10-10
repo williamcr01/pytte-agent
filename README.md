@@ -4,12 +4,13 @@ A tiny, durable, embeddable coding agent in C. The goal is an agent that can
 run on almost anything (a laptop, a router, a microcontroller, a browser) and
 survive being killed at any point.
 
-Status: **M2, the TUI.** The AI layer (`libpytte-ai`) talks to Anthropic,
+Status: **M3, tools.** The AI layer (`libpytte-ai`) talks to Anthropic,
 OpenAI and OpenRouter. The core (`libpytte`) commits every step to a session
 log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
 few rows at the bottom and leaves the rest to the terminal's scrollback.
-Tools come next (M3).
+The model works with four tools (bash, read, write, edit); each call is a
+durable task, so a crash never runs an unsafe call twice.
 
 ## Build
 
@@ -46,6 +47,8 @@ build/pytte -r [ID]                          # that session, or pick one
 build/pytte -p "what is 25*18?"              # print mode: run, print the answer, exit
 echo "hello" | build/pytte -p --output-format json
 build/pytte log [ID]                         # a transcript (--json: records)
+build/pytte --permission-mode auto           # run every tool call without asking
+build/pytte approve ID TASK yes              # answer a call -p left waiting (exit 3)
 build/pytte -m faux/faux --script tests/faux/slow.json   # offline
 ```
 
@@ -70,8 +73,9 @@ readable with `jq`. Kill the process at any point and `pytte -c` continues
 from the last commit: a half-streamed answer is kept as an interrupted entry
 and the request is sent again. A watchdog process restores the terminal
 modes even after `kill -9` (run `reset` if keys still misbehave). Exit codes:
-0 done, 1 setup (such as a missing key), 10 the run failed, 20 storage
-error, 130 detached (Ctrl-C in print mode).
+0 done, 1 setup (such as a missing key), 3 a tool call waits for approval
+(print mode), 10 the run failed, 20 storage error, 130 detached (Ctrl-C in
+print mode).
 
 Some terminal settings: `PYTTE_AMBIGUOUS=wide` for terminals set to draw
 East Asian ambiguous characters wide, `PYTTE_REFLOW=0/1` if pytte guesses
@@ -79,8 +83,26 @@ wrong whether the terminal rewraps lines on resize, `PYTTE_ASCII=1` for
 ASCII symbols, `NO_COLOR`. `PYTTE_TUI_TRACE=<file>` records every byte read
 and written, for replaying a display bug.
 
-There are no tools yet: when a model calls one, the call gets an error
-result and the run goes on.
+Tools: `bash` runs a command line in its own process group (stdin empty,
+stdout and stderr together, an optional timeout). `read` shows a file with
+line numbers. `write` replaces a whole file atomically. `edit` replaces
+text that must match exactly once, and refuses when the file changed since
+the model last read it. The model sees up to 16 KB of output: the first
+4 KB and the last 12 KB. Arguments are checked against each tool's JSON
+schema before anything runs.
+
+Permissions (`--permission-mode`, `$PYTTE_PERMISSION_MODE` or
+`permissions.mode` in the config): `ask` (the default) runs `read` freely
+and asks before `bash`, `write` and `edit`. The TUI asks inline: 1 yes,
+2 yes and allow the same command word (or tool) for this session, 3 or Esc
+no. Allowing `git` never allows `git status; rm -rf x`. `auto` runs
+everything. `read-only` refuses whatever may change things. In print mode
+a question ends the process with exit code 3 and prints the
+`pytte approve` command that answers it.
+
+Recovery after a crash follows each tool's replay policy. `read` and
+`write` run again. A `bash` or `edit` call that was cut off is not repeated;
+the model gets an "interrupted" result and decides what to do.
 
 ## pytte-ai
 
@@ -101,7 +123,8 @@ Text goes to stdout; thinking, tool calls and a usage summary go to stderr.
 ## Layout
 
 ```
-include/pytte_base.h   arena, strings, buffers, JSON, SSE, CRC-32
+include/pytte_base.h   arena, strings, buffers, JSON, SSE, CRC-32, SHA-256,
+                       a JSON Schema subset
 include/pytte_ai.h     the AI layer: messages, providers, models, streams
 include/pytte.h        the core: a sans-I/O durable task interpreter
 src/base/              portable C99: no stdio, no malloc, no floating point
@@ -109,10 +132,13 @@ src/ai/                APIs (anthropic-messages, openai-responses for OpenAI,
                        openai-completions for OpenRouter and other compatible
                        servers, faux), providers and models as data,
                        cross-provider transforms
-src/core/              the core: commit lines, state, scheduler, the run task
-src/rt/                the runtime: the host loop over stores, HTTP and timers
+src/core/              the core: commit lines, state, scheduler, the run and
+                       tool tasks
+src/rt/                the runtime: the host loop over stores, HTTP, timers
+                       and fds; the tool registry, the permission gate and
+                       the builtin tools
 src/drv/               host drivers: libc, curl HTTP, faux HTTP, posix and
-                       memory session stores
+                       memory session stores, processes
 src/tui/               the TUI: terminal, keys, text and widths, Markdown,
                        the band, the input box, the event loop (app.c)
 src/ai/models.gen.inc  the model catalog, generated from models.dev and

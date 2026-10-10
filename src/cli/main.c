@@ -40,7 +40,7 @@ static const char usage[] =
     "  --output-format FMT     with -p: text (default), json (one object at the end),\n"
     "                          stream-json (every commit as a JSON line)\n"
     "  --permission-mode MODE  ask (default), auto or read-only: what tools that may\n"
-    "                          change things do (config: permissions.mode)\n"
+    "                          change things do ($PYTTE_PERMISSION_MODE, permissions.mode)\n"
     "  --script FILE           faux provider script (default: $PYTTE_FAUX_SCRIPT)\n"
     "  --no-sync               do not fsync commits (survives crashes, not power loss)\n"
     "  --force                 take over a session another host left open\n"

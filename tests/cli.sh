@@ -89,9 +89,14 @@ check "a missing key exits with 1" [ $? -eq 1 ]
 env -u ANTHROPIC_API_KEY "$pytte" -p -c -m faux/faux --script tests/faux/hello.json </dev/null >/dev/null 2>&1
 check "...and the session resumes with another model" [ $? -eq 0 ]
 
+n=$(ls "$XDG_STATE_HOME/pytte/sessions" | wc -l)
 "$pytte" -p -m faux/faux --script tests/faux/slow.json "list" >/dev/null 2>&1 &
 owner=$!
-sleep 0.5
+for i in $(seq 50); do # until the owner has made its session (slow under load)
+    [ "$(ls "$XDG_STATE_HOME/pytte/sessions" | wc -l)" -gt "$n" ] && break
+    sleep 0.1
+done
+sleep 0.2
 err=$("$pytte" -p -c --script tests/faux/slow.json </dev/null 2>&1 >/dev/null)
 case $err in *"in use by"*"pid $owner"*) ok=0 ;; *) ok=1 ;; esac
 check "a second process is refused, naming the owner" [ $ok -eq 0 ]

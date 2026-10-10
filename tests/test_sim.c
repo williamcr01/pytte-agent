@@ -85,6 +85,17 @@ typedef struct world {
     pt_store *via; /* when set, clients use this store (wrapping store) */
     char err[512]; /* the last client's fatal error */
     rec_http *http;
+    /* the fake tools: how often each unsafe call ran, and look's timers */
+    struct {
+        char id[64];
+        uint32_t runs;
+    } unsafe[16];
+    uint32_t nunsafe;
+    struct pend {
+        struct world *w;
+        uint32_t fx, timer;
+        bool used;
+    } pend[8];
     int64_t now;
     uint64_t rng;
 } world;
@@ -135,7 +146,8 @@ static void world_free(world *w)
     rh_free(&w->http->vt);
 }
 
-enum { ABORT_NONE, ABORT_STREAM, ABORT_RETRY };
+enum { ABORT_NONE, ABORT_STREAM, ABORT_RETRY, ABORT_TOOL };
+enum { TOOLS_NONE, TOOLS_AUTO, TOOLS_ASK };
 
 /* The user interrupts the first prompt's run: after abort_after stream
  * events, or once it waits to retry. Each client decides again from what
@@ -145,6 +157,7 @@ struct scenario {
     const char *prompts[3];
     int abort;
     uint32_t abort_after;
+    int tools; /* fake tools, run without asking or approved by the client */
 };
 
 static task *first_run(world *w)
@@ -174,11 +187,109 @@ static bool w_stop(void *ud)
     task *t = first_run(w);
     if (!w->aborted && t && t->status != ST_DONE &&
         ((w->sc->abort == ABORT_STREAM && w->streamed >= w->sc->abort_after) ||
-         (w->sc->abort == ABORT_RETRY && t->phase == PH_RETRY))) {
+         (w->sc->abort == ABORT_RETRY && t->phase == PH_RETRY) ||
+         (w->sc->abort == ABORT_TOOL && t->phase == PH_TOOLS))) {
         w->aborted = true;
         CHECK(pt_abort(w->agent));
     }
     return false;
+}
+
+/* ---- fake tools ----
+ * count: unsafe, runs at once; how often each call ran is kept in the
+ *        world, which outlives the process (an unsafe call runs at most once).
+ * look:  safe and parallel; answers a little later, from a timer. */
+
+static void count_run(void *ud, pt_rt *rt, const pt_fx *fx)
+{
+    world *w = (world *)ud;
+    pt_rt_out r;
+    uint32_t i;
+    for (i = 0; i < w->nunsafe && !pt_str_eqz(fx->call_id, w->unsafe[i].id); i++)
+        ;
+    if (i == w->nunsafe && w->nunsafe < 16)
+        snprintf(w->unsafe[w->nunsafe++].id, 64, "%.*s", (int)fx->call_id.n, fx->call_id.p);
+    if (i < 16)
+        w->unsafe[i].runs++;
+    memset(&r, 0, sizeof r);
+    r.content = PT_S("counted");
+    pt_rt_tool_done(rt, fx->id, &r);
+}
+
+static void look_fire(void *ud, pt_rt *rt)
+{
+    struct pend *p = (struct pend *)ud;
+    pt_rt_out r;
+    p->used = false;
+    memset(&r, 0, sizeof r);
+    pt_rt_tool_output(rt, p->fx, "looking\n", 8);
+    r.note = PT_S("looked");
+    pt_rt_tool_done(rt, p->fx, &r);
+}
+
+static void look_run(void *ud, pt_rt *rt, const pt_fx *fx)
+{
+    world *w = (world *)ud;
+    uint32_t i;
+    for (i = 0; i < 8 && w->pend[i].used; i++)
+        ;
+    if (i == 8) {
+        CHECK(!"too many looks at once");
+        return;
+    }
+    w->pend[i].w = w;
+    w->pend[i].fx = fx->id;
+    w->pend[i].used = true;
+    w->pend[i].timer = pt_rt_timer(rt, pt_rt_now(rt) + 5, look_fire, &w->pend[i]);
+}
+
+static void look_cancel(void *ud, pt_rt *rt, uint32_t fx)
+{
+    world *w = (world *)ud;
+    uint32_t i;
+    for (i = 0; i < 8; i++)
+        if (w->pend[i].used && w->pend[i].fx == fx) {
+            pt_rt_out r;
+            pt_rt_timer_cancel(rt, w->pend[i].timer);
+            w->pend[i].used = false;
+            memset(&r, 0, sizeof r);
+            r.content = PT_S("stopped");
+            r.is_error = true;
+            pt_rt_tool_done(rt, fx, &r);
+        }
+}
+
+static void add_tools(world *w, pt_rt *rt)
+{
+    pt_rt_tool t[2];
+    memset(t, 0, sizeof t);
+    t[0].def.name = PT_S("count");
+    t[0].def.description = PT_S("Count.");
+    t[0].def.schema = PT_S("{\"type\":\"object\"}");
+    t[0].run = count_run;
+    t[0].ud = w;
+    t[1].def.name = PT_S("look");
+    t[1].def.description = PT_S("Look.");
+    t[1].def.schema = PT_S("{\"type\":\"object\",\"properties\":{\"at\":{\"type\":\"string\"}}}");
+    t[1].def.replay = PT_REPLAY_SAFE;
+    t[1].def.parallel = true;
+    t[1].read_only = true;
+    t[1].run = look_run;
+    t[1].cancel = look_cancel;
+    t[1].ud = w;
+    CHECK(pt_rt_tool_add(rt, &t[0]));
+    CHECK(pt_rt_tool_add(rt, &t[1]));
+    pt_rt_set_perm(rt, w->sc->tools == TOOLS_ASK ? PT_PERM_ASK : PT_PERM_AUTO);
+}
+
+/* The user says yes to every question. */
+static bool approve_all(pt_agent *a)
+{
+    pt_ask_view v[8];
+    uint32_t n = pt_asks(a, v, 8), i;
+    for (i = 0; i < n && i < 8; i++)
+        CHECK(pt_approve(a, v[i].task, true, PT_STR_NULL));
+    return n > 0;
 }
 
 /* One process. Returns how its run loop ended. */
@@ -214,6 +325,9 @@ static pt_rt_result client(world *w, const scenario *sc)
     rc.sleep = w_sleep;
     rc.clock_ud = w;
     rt = pt_rt_new(&rc, a);
+    memset(w->pend, 0, sizeof w->pend); /* a crash took the timers along */
+    if (sc->tools)
+        add_tools(w, rt);
     memset(&me, 0, sizeof me);
     me.host = PT_S("sim");
     me.pid = 1;
@@ -230,6 +344,7 @@ static pt_rt_result client(world *w, const scenario *sc)
         c.cwd = PT_S("/sim");
         c.host = PT_S("sim");
         c.system = PT_S("You are being simulated.");
+        c.tools = pt_rt_tool_defs(rt, &c.ntools);
         CHECK(pt_create(a, &c));
     }
     CHECK(pt_open(a, &me, false));
@@ -241,7 +356,9 @@ static pt_rt_result client(world *w, const scenario *sc)
         in.req = pt_strz(req);
         CHECK(pt_submit(a, &in));
     }
-    res = use_step ? run_stepped(rt, w) : pt_rt_run(rt);
+    do
+        res = use_step ? run_stepped(rt, w) : pt_rt_run(rt);
+    while (res == PT_RT_ASK && approve_all(a));
     if (res == PT_RT_IDLE && !pt_rt_close(rt))
         res = PT_RT_FATAL; /* the close commit failed: also a crash */
     snprintf(w->err, sizeof w->err, "%s", pt_error(a));
@@ -290,6 +407,9 @@ static void outcome(world *w, pt_buf *out)
                 pt_buf_puts(out, v.msg->blocks[j].kind == PT_BLOCK_TOOL_CALL ? v.msg->blocks[j].name
                                                                              : v.msg->blocks[j].text);
             }
+        } else if (strcmp(v.kind, "tool_result") == 0) {
+            /* an unsafe call cut short by a crash says "interrupted" */
+            pt_buf_puts(out, v.msg->name);
         } else {
             pt_buf_puts(out, v.msg->text);
         }
@@ -364,6 +484,14 @@ static void check_against(const scenario *sc, world *w, const pt_buf *want, cons
     uint32_t i;
     pt_buf_init(&got, T_AL);
     outcome(w, &got);
+    for (i = 0; i < w->nunsafe; i++) {
+        t_checks++;
+        if (w->unsafe[i].runs > 1) {
+            t_failed++;
+            fprintf(stderr, "%s: crash at commit %u (%s): unsafe call %s ran %u times\n", sc->name, n, how,
+                    w->unsafe[i].id, w->unsafe[i].runs);
+        }
+    }
     t_checks++;
     if (!pt_str_eq(pt_buf_str(&got), pt_buf_str(want))) {
         t_failed++;
@@ -409,6 +537,8 @@ static void exhaustive(const scenario *sc)
     CHECK(clients == 1);
     k = pt_store_memory_appends(ref.store);
     outcome(&ref, &want);
+    if (getenv("SIM_SHOW"))
+        fprintf(stderr, "%s:\n%.*s", sc->name, (int)want.n, want.p);
 
     for (n = 1; n <= k; n++) {
         for (m = 0; m < sizeof keeps / sizeof *keeps; m++) {
@@ -453,36 +583,56 @@ static const scenario scenarios[] = {
     {"answer",
      "{\"chunk\":7,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Easy.\"},"
      "{\"type\":\"text\",\"text\":\"The answer is 450, since 25 times 18 is 450.\"}]}]}",
-     {"what is 25*18?", NULL, NULL}, ABORT_NONE, 0},
+     {"what is 25*18?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
     {"retry",
      "{\"chunk\":7,\"turns\":[[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"This stream gets cut off somewhere in the middle\"}],"
      "\"cut\":150},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Third time lucky.\"}]}]]}",
-     {"go", NULL, NULL}, ABORT_NONE, 0},
+     {"go", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
     {"tool_round",
      "{\"chunk\":9,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Let me look.\"},"
      "{\"type\":\"tool_call\",\"name\":\"bash\",\"args\":{\"cmd\":\"ls\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"No tools here, so I will just answer.\"}]}]}",
-     {"list the files", NULL, NULL}, ABORT_NONE, 0},
+     {"list the files", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
     {"fatal",
      "{\"turns\":[{\"status\":401,\"body\":{\"class\":\"fatal\",\"message\":\"invalid key\"}}]}",
-     {"hello?", NULL, NULL}, ABORT_NONE, 0},
+     {"hello?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
     {"length",
      "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"This is cut by max_tok\"}],"
      "\"stop\":\"length\"}]}",
-     {"write a novel", NULL, NULL}, ABORT_NONE, 0},
+     {"write a novel", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE},
     {"two_inputs",
      "{\"chunk\":6,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First answer.\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Second answer.\"}]}]}",
-     {"first question", "second question", NULL}, ABORT_NONE, 0},
+     {"first question", "second question", NULL}, ABORT_NONE, 0, TOOLS_NONE},
     {"abort_stream",
      "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Long.\"},"
      "{\"type\":\"text\",\"text\":\"A long answer that the user interrupts somewhere in the middle.\"}]}]}",
-     {"first question", "second question", NULL}, ABORT_STREAM, 6},
+     {"first question", "second question", NULL}, ABORT_STREAM, 6, TOOLS_NONE},
     {"abort_retry",
      "{\"turns\":[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}}]}",
-     {"go", NULL, NULL}, ABORT_RETRY, 0},
+     {"go", NULL, NULL}, ABORT_RETRY, 0, TOOLS_NONE},
+    {"tools",
+     "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Count, then look.\"},"
+     "{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}},"
+     "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"a\"}}]},"
+     "{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"b\"}},"
+     "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":7}},"
+     "{\"type\":\"tool_call\",\"name\":\"nope\",\"args\":{}}]},"
+     "{\"content\":[{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Counted twice and looked.\"}]}]}",
+     {"count and look", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO},
+    {"approve",
+     "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}},"
+     "{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Approved.\"}]}]}",
+     {"count, if I may", "and again", NULL}, ABORT_NONE, 0, TOOLS_ASK},
+    {"abort_tool",
+     "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}},"
+     "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Next.\"}]}]}",
+     {"look twice", "then this", NULL}, ABORT_TOOL, 0, TOOLS_AUTO},
 };
 
 /* Another writer appends to the log behind the owner's back (shared

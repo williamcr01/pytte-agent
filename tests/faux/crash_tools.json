@@ -1,0 +1,34 @@
+{
+  "chunk": 8,
+  "delay_ms": 4,
+  "turns": [
+    {
+      "content": [
+        {"type": "text", "text": "First a command."},
+        {"type": "tool_call", "name": "bash", "args": {"command": "echo \"$PYTTE_CALL_ID\" >> runs; sleep 0.2; echo ran"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "write", "args": {"path": "notes/a.txt", "content": "one\ntwo\n"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "read", "args": {"path": "notes/a.txt"}},
+        {"type": "tool_call", "name": "read", "args": {"path": "missing.txt"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "edit", "args": {"path": "notes/a.txt", "old": "two", "new": "three"}},
+        {"type": "tool_call", "name": "bash", "args": {"command": "echo \"$PYTTE_CALL_ID\" >> runs; cat notes/a.txt"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "The tools ran, each unsafe call at most once, and this answer streams slowly enough to be killed."}
+      ]
+    }
+  ]
+}

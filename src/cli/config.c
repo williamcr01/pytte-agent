@@ -108,6 +108,8 @@ void cli_config_load(cli_config *c, char *warn, size_t cap)
         cli_config_set(c, CFG_MODEL, e, "env");
     if ((e = getenv("PYTTE_EFFORT")) && *e)
         cli_config_set(c, CFG_REASONING, e, "env");
+    if ((e = getenv("PYTTE_PERMISSION_MODE")) && *e)
+        cli_config_set(c, CFG_PERMS, e, "env");
     if ((e = getenv("PYTTE_ASCII")) && strcmp(e, "1") == 0)
         cli_config_set(c, CFG_SYMBOLS, "ascii", "env");
 }
