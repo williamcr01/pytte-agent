@@ -1,0 +1,9 @@
+{
+  "turns": [
+    {"content": [{"type": "tool_call", "id": "old", "name": "bash", "args": {"command": "seq 1 10000"}}]},
+    {"content": [{"type": "text", "text": "Counted."}]},
+    {"content": [{"type": "tool_call", "id": "again", "name": "read_output", "args": {"call_id": "old", "offset": 48888, "limit": 100}}]},
+    {"content": [{"type": "text", "text": "Read it after the compaction."}]}
+  ],
+  "compact": {"content": [{"type": "text", "text": "Ran seq 1 10000 as call old."}]}
+}

@@ -677,38 +677,108 @@ static void bash_cancel(void *ud, pt_rt *rt, uint32_t fx)
 
 /* ---- read_output ---- */
 
-/* The blob of call_id's output, from its result in this epoch: false with
- * why set when there is none. */
+/* The blob a tool_result record names, if any. */
+static bool blob_of(builtins *b, const pt_json *rec, char hex[65], uint64_t *size)
+{
+    const pt_json *d = pt_json_get(pt_json_get(rec, "data"), "details");
+    pt_str ref = pt_json_str(pt_json_get(d, "blob"), &b->ar);
+    size_t k;
+    if (ref.n != 71 || memcmp(ref.p, "sha256:", 7) != 0)
+        return false;
+    for (k = 0; k < 64; k++) {
+        char ch = ref.p[7 + k];
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')))
+            return false;
+        hex[k] = ch;
+    }
+    hex[64] = 0;
+    *size = (uint64_t)pt_json_geti(d, "size", 0);
+    return true;
+}
+
+/* A line of the log that may hold call_id's result: parse it and look. */
+static int log_line(builtins *b, pt_str line, pt_str needle, pt_str call_id, char hex[65], uint64_t *size)
+{
+    const pt_json *c;
+    size_t i;
+    for (i = 0; i + needle.n <= line.n; i++)
+        if (line.p[i] == '"' && memcmp(line.p + i, needle.p, needle.n) == 0)
+            break;
+    if (i + needle.n > line.n)
+        return 0;
+    c = pt_json_get(pt_json_parse(line, &b->ar, NULL), "w");
+    for (c = c ? c->child : NULL; c; c = c->next)
+        if (pt_str_eqz(pt_json_gets(c, "kind", &b->ar), "tool_result") &&
+            pt_str_eq(pt_json_gets(pt_json_get(c, "data"), "call_id", &b->ar), call_id))
+            return blob_of(b, c, hex, size) ? 1 : -1;
+    return 0;
+}
+
+/* Results of earlier epochs are not in memory: read the log in chunks
+ * (memory for one chunk and the longest line). 1 found, -1 not cut, 0
+ * no such call. */
+static int find_in_log(builtins *b, pt_str call_id, char hex[65], uint64_t *size)
+{
+    pt_store *st = b->rt->c.store;
+    pt_buf line, needle;
+    pt_jw w;
+    uint64_t end, off = 0;
+    int found = 0;
+    if (!st->read || st->size(st, &end) != 0)
+        return 0;
+    pt_buf_init(&line, pt_sys_allocator());
+    pt_buf_init(&needle, pt_sys_allocator());
+    pt_buf_putz(&needle, "\"call_id\":");
+    pt_jw_init(&w, &needle);
+    pt_jw_str(&w, call_id);
+    while (!found && off < end) {
+        size_t got = 0, i, from = 0;
+        if (st->read(st, off, b->io, CHUNK, &got) != 0 || !got)
+            break;
+        for (i = 0; i < got && !found; i++) {
+            if (b->io[i] != '\n')
+                continue;
+            if (line.n) {
+                pt_buf_put(&line, b->io + from, i - from);
+                found = log_line(b, pt_buf_str(&line), pt_buf_str(&needle), call_id, hex, size);
+                pt_buf_reset(&line);
+            } else {
+                found = log_line(b, (pt_str){b->io + from, i - from}, pt_buf_str(&needle), call_id, hex, size);
+            }
+            from = i + 1;
+        }
+        if (!found && from < got)
+            pt_buf_put(&line, b->io + from, got - from);
+        off += got;
+    }
+    pt_buf_free(&line);
+    pt_buf_free(&needle);
+    return found;
+}
+
+/* The blob of call_id's output, from its result: false with why set when
+ * there is none. */
 static bool find_blob(builtins *b, pt_str call_id, char hex[65], uint64_t *size, const char **why)
 {
     pt_agent *a = pt_rt_agent(b->rt);
     uint32_t i = pt_entry_count(a);
-    *why = "No tool call with that ID in this conversation (since the last compaction).";
+    *why = "That call's output was not cut: all of it is in its result.";
     while (i--) {
         pt_entry_view e;
-        const pt_json *rec, *d;
-        pt_str ref;
-        size_t k;
         if (!pt_entry_at(a, i, &e) || !e.msg || strcmp(e.kind, "tool_result") != 0 ||
             !pt_str_eq(e.msg->call_id, call_id))
             continue;
-        *why = "That call's output was not cut: all of it is in its result.";
-        rec = pt_json_parse(e.raw, &b->ar, NULL);
-        d = pt_json_get(pt_json_get(rec, "data"), "details");
-        ref = pt_json_str(pt_json_get(d, "blob"), &b->ar);
-        if (ref.n != 71 || memcmp(ref.p, "sha256:", 7) != 0)
-            return false;
-        for (k = 0; k < 64; k++) {
-            char ch = ref.p[7 + k];
-            if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')))
-                return false;
-            hex[k] = ch;
-        }
-        hex[64] = 0;
-        *size = (uint64_t)pt_json_geti(d, "size", 0);
-        return true;
+        return blob_of(b, pt_json_parse(e.raw, &b->ar, NULL), hex, size);
     }
-    return false;
+    switch (find_in_log(b, call_id, hex, size)) { /* before a compaction */
+    case 1:
+        return true;
+    case -1:
+        return false;
+    default:
+        *why = "No tool call with that ID in this conversation.";
+        return false;
+    }
 }
 
 static void t_read_output(void *ud, pt_rt *rt, const pt_fx *fx)

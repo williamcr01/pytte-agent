@@ -85,6 +85,9 @@ if command -v jq >/dev/null; then
     check "...the result says how to read it" sh -c 'printf "%s" "$1" | jq -se ".[0].data.content | contains(\"read_output pages through them\")" >/dev/null' _ "$results"
     check "...read_output returns the asked bytes" sh -c 'printf "%s" "$1" | jq -se ".[1].data.content == \"8001\n8002\n8003\n8004\n8005\n8006\n…[bytes 38893-38923 of 48894; read on with offset 38923]\"" >/dev/null' _ "$results"
     check "...and refuses an unknown call" sh -c 'printf "%s" "$1" | jq -se ".[2].data.is_error == true" >/dev/null' _ "$results"
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --context-window 8000 --script tests/faux/old_output.json count >/dev/null 2>&1
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -c --context-window 8000 --script tests/faux/old_output.json "page it" >/dev/null 2>&1
+    check "read_output finds a call from before a compaction" sh -c '"$1" log --json | jq -se "(map(select(.kind == \"epoch\")) | .[0].data.n == 2) and (map(select(.kind == \"tool_result\")) | .[0].data.content == \"10000\n\")" >/dev/null' _ "$pytte"
 fi
 
 printf '%s' '{"turns": [[{"status": 529}, {"status": 400, "body": {"message": "bad request"}}]]}' \
