@@ -9,7 +9,7 @@ OpenAI and OpenRouter. The core (`libpytte`) commits every step to a session
 log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
 few rows at the bottom and leaves the rest to the terminal's scrollback.
-The model works with four tools (bash, read, write, edit);
+The model works with five tools (bash, bash_poll, read, write, edit);
 each call is a durable task, so a crash never runs an unsafe call twice.
 When the conversation nears the model's context window, pytte compacts it
 into a summary and carries on, so sessions outlive any one window.
@@ -118,7 +118,10 @@ none), up to 32 KiB, the outermost cut first. The files are read when a
 session starts and again at each compaction.
 
 Tools: `bash` runs a command line in its own process group (stdin empty,
-stdout and stderr together, an optional timeout). `read` shows a file with
+stdout and stderr together, an optional timeout). A command still running
+after `yield` seconds (default 10) goes on in the background as a session,
+and the model works on; `bash_poll` reads what it printed since, waits for
+it to end, or stops it. Background sessions end when pytte does. `read` shows a file with
 line numbers. `write` replaces a whole file atomically. `edit` replaces
 text that must match exactly once, and refuses when the file changed since
 the model last read it. The model sees up to 16 KB of output: the first

@@ -1,5 +1,11 @@
-/* The built-in tools (section 13.3): bash, read, write and edit. Search
- * and listing go through bash.
+/* The built-in tools (section 13.3): bash, bash_poll, read, write and
+ * edit. Search and listing go through bash.
+ *
+ * A bash call that runs past its yield time ends with the output so far,
+ * and its process goes on in the background, named by the call's task ID
+ * (unique in the session, so a name from before a restart never finds a
+ * new process). bash_poll reads what it printed since, waits for more,
+ * or stops it. Background processes die with this process.
  *
  * read records a stamp (size, mtime, SHA-256) in the doc "reads:<path>";
  * edit refuses a file that changed since, so the model never edits text
@@ -17,6 +23,10 @@
 
 #define CHUNK 65536
 #define READ_LIMIT 2000 /* lines a read shows unless it asks for more */
+#define YIELD_S 10        /* seconds a bash call waits before it goes to the background */
+#define POLL_S 10         /* seconds a bash_poll waits for the process to end */
+#define HELD_MAX (1 << 20) /* output kept while no call reads it: the newest bytes */
+#define BACKGROUND_MAX 16 /* processes in the background; past it, bash calls wait */
 
 typedef struct job job;
 
@@ -33,12 +43,20 @@ typedef struct builtins {
 struct job {
     job *next;
     builtins *b;
-    uint32_t fx, timer;
+    uint32_t fx;      /* the call reading it; 0: in the background */
+    uint32_t session; /* the bash call's task: its name in the background */
+    uint32_t timer;   /* the timeout, then the SIGKILL after a stop */
+    uint32_t yield;   /* when the reading call ends while it runs on */
     pt_proc *p;
     int out_fd, exit_fd;
-    int64_t started;
+    int64_t started, read_at; /* read_at: when the reading call began */
     uint32_t timeout_s;
-    bool timed_out, stopped, eof;
+    int status;
+    bool timed_out, stopped, eof, ended;
+    bool polled;  /* the reading call is a bash_poll */
+    bool told;    /* a bash_poll asked it to stop: not an error */
+    pt_buf held;  /* output while in the background */
+    uint64_t dropped; /* bytes cut from the front of held */
 };
 
 /* ---- shared ---- */
@@ -470,44 +488,118 @@ static job *find_job(builtins *b, uint32_t fx)
     return j;
 }
 
-static void job_end(job *j)
+static uint32_t background_count(const builtins *b)
 {
-    builtins *b = j->b;
-    pt_rt *rt = b->rt;
-    job **pp;
-    int status = 0;
-    char note[160], details[160];
-    size_t k = 0;
-    pt_rt_out r;
-    int64_t ms = pt_rt_now(rt) - j->started;
-    pt_proc_reap(j->p, true, &status);
+    const job *j;
+    uint32_t n = 0;
+    for (j = b->jobs; j; j = j->next)
+        n += !j->fx;
+    return n;
+}
+
+/* Output goes to the reading call, else into held: its newest HELD_MAX
+ * bytes, trimmed once it holds twice that (amortized O(n)). */
+static void emit(job *j, const char *p, size_t n)
+{
+    pt_buf *h = &j->held;
+    if (j->fx) {
+        pt_rt_tool_output(j->b->rt, j->fx, p, n);
+        return;
+    }
+    if (n >= HELD_MAX) {
+        j->dropped += h->n + n - HELD_MAX;
+        pt_buf_reset(h);
+        pt_buf_put(h, p + n - HELD_MAX, HELD_MAX);
+        return;
+    }
+    if (h->n + n > 2 * HELD_MAX) {
+        size_t k = HELD_MAX - n;
+        j->dropped += h->n - k;
+        memmove(h->p, h->p + h->n - k, k);
+        h->n = k;
+    }
+    pt_buf_put(h, p, n);
+}
+
+static void unwatch(job *j)
+{
+    pt_rt *rt = j->b->rt;
     if (j->out_fd >= 0)
         pt_rt_unwatch(rt, j->out_fd);
     if (j->exit_fd >= 0)
         pt_rt_unwatch(rt, j->exit_fd);
+    j->out_fd = j->exit_fd = -1;
     if (j->timer)
         pt_rt_timer_cancel(rt, j->timer);
-    for (pp = &b->jobs; *pp != j; pp = &(*pp)->next)
+    j->timer = 0;
+}
+
+static void job_free(job *j)
+{
+    job **pp;
+    for (pp = &j->b->jobs; *pp != j; pp = &(*pp)->next)
         ;
     *pp = j->next;
+    unwatch(j);
+    if (j->yield)
+        pt_rt_timer_cancel(j->b->rt, j->yield);
+    pt_proc_free(j->p);
+    pt_buf_free(&j->held);
+    free(j);
+}
+
+/* The reading call ends: with how the process ended, which frees it, or
+ * with where it runs on, which leaves it in the background. */
+static void job_report(job *j)
+{
+    pt_rt *rt = j->b->rt;
+    uint32_t fx = j->fx;
+    char note[200], details[160];
+    size_t k = 0;
+    pt_rt_out r;
+    int64_t ms = pt_rt_now(rt) - (j->polled ? j->read_at : j->started);
+    if (ms < 0)
+        ms = 0;
+    if (j->yield)
+        pt_rt_timer_cancel(rt, j->yield);
+    j->yield = 0;
     note[0] = 0;
-    if (j->timed_out)
-        k += (size_t)snprintf(note + k, sizeof note - k, "\n[timed out after %us]", j->timeout_s);
-    else if (j->stopped)
-        k += (size_t)snprintf(note + k, sizeof note - k, "\n[stopped]");
-    else if (status)
-        k += (size_t)snprintf(note + k, sizeof note - k, "\n[exit code %d]", status);
-    snprintf(details, sizeof details, "{\"exit\":%d,\"ms\":%lld}", status, (long long)(ms < 0 ? 0 : ms));
     memset(&r, 0, sizeof r);
-    r.note = (pt_str){note, k};
-    r.is_error = status != 0 || j->timed_out;
-    r.details = pt_strz(details);
-    {
-        uint32_t fx = j->fx;
-        pt_proc_free(j->p);
-        free(j);
-        pt_rt_tool_done(rt, fx, &r);
+    if (!j->ended) {
+        k += (size_t)snprintf(note, sizeof note,
+                              j->polled ? "\n[still running as session %u]"
+                                        : "\n[still running as session %u; bash_poll reads on]",
+                              j->session);
+        snprintf(details, sizeof details, "{\"session\":%u,\"ms\":%lld}", j->session, (long long)ms);
+    } else {
+        if (j->timed_out)
+            k += (size_t)snprintf(note, sizeof note, "\n[timed out after %us]", j->timeout_s);
+        else if (j->stopped)
+            k += (size_t)snprintf(note, sizeof note, "\n[stopped]");
+        else if (j->status)
+            k += (size_t)snprintf(note, sizeof note, "\n[exit code %d]", j->status);
+        else if (j->polled)
+            k += (size_t)snprintf(note, sizeof note, "\n[ended]");
+        snprintf(details, sizeof details, "{\"exit\":%d,\"ms\":%lld}", j->status, (long long)ms);
+        r.is_error = j->timed_out || (j->status != 0 && !j->told);
     }
+    r.note = (pt_str){note, k};
+    r.details = pt_strz(details);
+    j->fx = 0;
+    j->polled = false;
+    if (j->ended)
+        job_free(j);
+    pt_rt_tool_done(rt, fx, &r);
+}
+
+/* The process ended (and its output with it). */
+static void job_end(job *j)
+{
+    pt_proc_reap(j->p, true, &j->status);
+    unwatch(j);
+    j->ended = true;
+    if (j->fx)
+        job_report(j);
 }
 
 /* Output waits: read what is there (bounded, so keys stay responsive). */
@@ -526,7 +618,7 @@ static void job_drain(job *j)
             j->out_fd = -1;
             return;
         }
-        pt_rt_tool_output(b->rt, j->fx, b->io, (size_t)got);
+        emit(j, b->io, (size_t)got);
         total += (size_t)got;
     }
 }
@@ -557,7 +649,7 @@ static void on_exit_fd(void *ud, pt_rt *rt)
         long got = pt_proc_read(j->p, j->b->io, CHUNK);
         if (got <= 0)
             break;
-        pt_rt_tool_output(j->b->rt, j->fx, j->b->io, (size_t)got);
+        emit(j, j->b->io, (size_t)got);
     }
     job_end(j);
 }
@@ -589,6 +681,16 @@ static void on_timeout(void *ud, pt_rt *rt)
     stop_job(j);
 }
 
+/* The reading call has waited long enough: it ends, the process runs on. */
+static void on_yield(void *ud, pt_rt *rt)
+{
+    job *j = (job *)ud;
+    (void)rt;
+    j->yield = 0;
+    if (j->fx && !j->ended)
+        job_report(j);
+}
+
 static const char *shell(void)
 {
     static const char *const ok[] = {"/bash", "/zsh", "/sh", "/dash", "/ksh"};
@@ -608,7 +710,7 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     builtins *b = (builtins *)ud;
     const pt_json *args = args_of(b, fx);
     const char *cmd = arg_str(b, args, "command"), *argv[4], *add[4];
-    int64_t timeout = pt_json_geti(args, "timeout", 0);
+    int64_t timeout = pt_json_geti(args, "timeout", 0), yield = pt_json_geti(args, "yield", YIELD_S);
     pt_str cwd = pt_session_cwd(pt_rt_agent(rt));
     char err[300], call_id[200], attempt[40];
     job *j;
@@ -639,9 +741,11 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     }
     j->b = b;
     j->fx = fx->id;
-    j->started = pt_rt_now(rt);
+    j->session = fx->task;
+    j->started = j->read_at = pt_rt_now(rt);
     j->out_fd = pt_proc_out_fd(j->p);
     j->exit_fd = pt_proc_exit_fd(j->p);
+    pt_buf_init(&j->held, pt_sys_allocator());
     j->next = b->jobs;
     b->jobs = j;
     if (!pt_rt_watch(rt, j->out_fd, on_output, j) ||
@@ -655,14 +759,22 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
         j->timeout_s = timeout > 86400 ? 86400 : (uint32_t)timeout;
         j->timer = pt_rt_timer(rt, j->started + (int64_t)j->timeout_s * 1000, on_timeout, j);
     }
+    if (yield > 0 && background_count(b) < BACKGROUND_MAX)
+        j->yield = pt_rt_timer(rt, j->started + (yield > 86400 ? 86400 : yield) * 1000, on_yield, j);
 }
 
+/* Abort: a bash call stops its process; a bash_poll only stops reading,
+ * and the process runs on in the background. */
 static void bash_cancel(void *ud, pt_rt *rt, uint32_t fx)
 {
     builtins *b = (builtins *)ud;
     job *j = find_job(b, fx);
     if (!j)
         return;
+    if (j->polled) {
+        job_report(j);
+        return;
+    }
     j->stopped = true;
     if (rt->closing) { /* exiting: no time for a grace period */
         pt_proc_stop(j->p, true);
@@ -672,13 +784,68 @@ static void bash_cancel(void *ud, pt_rt *rt, uint32_t fx)
     }
 }
 
+static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
+{
+    builtins *b = (builtins *)ud;
+    const pt_json *args = args_of(b, fx);
+    int64_t session = pt_json_geti(args, "session", 0), wait = pt_json_geti(args, "wait", POLL_S);
+    bool stop = pt_json_truthy(pt_json_get(args, "stop"));
+    char msg[200];
+    size_t k = 0; /* held bytes before the first whole line */
+    job *j;
+    for (j = b->jobs; j && (int64_t)j->session != session; j = j->next)
+        ;
+    if (!j) {
+        snprintf(msg, sizeof msg,
+                 "No session %lld: it ended and was read already, or pytte restarted since.", (long long)session);
+        done_text(rt, fx->id, pt_strz(msg), true);
+        return;
+    }
+    if (j->fx) {
+        snprintf(msg, sizeof msg, "Another call is reading session %lld.", (long long)session);
+        done_text(rt, fx->id, pt_strz(msg), true);
+        return;
+    }
+    j->fx = fx->id;
+    j->polled = true;
+    j->read_at = pt_rt_now(rt);
+    if (j->dropped) { /* from the first whole line */
+        const char *nl = (const char *)memchr(j->held.p, '\n', j->held.n);
+        k = nl ? (size_t)(nl + 1 - j->held.p) : 0;
+        snprintf(msg, sizeof msg, "[%llu earlier bytes dropped]\n", (unsigned long long)(j->dropped + k));
+        pt_rt_tool_output(rt, fx->id, msg, strlen(msg));
+        j->dropped = 0;
+    }
+    if (j->held.n > k)
+        pt_rt_tool_output(rt, fx->id, j->held.p + k, j->held.n - k);
+    pt_buf_reset(&j->held);
+    if (j->ended) {
+        job_report(j);
+    } else if (stop) { /* ends within two seconds */
+        j->stopped = j->told = true;
+        stop_job(j);
+    } else if (wait <= 0) {
+        job_report(j);
+    } else {
+        j->yield = pt_rt_timer(rt, j->read_at + (wait > 86400 ? 86400 : wait) * 1000, on_yield, j);
+    }
+}
+
 /* ---- the table ---- */
 
 static const char bash_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"command\":{\"type\":\"string\",\"description\":\"The command line\"},"
-    "\"timeout\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Stop it after this many seconds (default: never)\"}},"
+    "\"timeout\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Stop it after this many seconds (default: never)\"},"
+    "\"yield\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Return after this many seconds if it still runs, "
+    "leaving it in the background (default 10; 0: wait for it to end)\"}},"
     "\"required\":[\"command\"],\"additionalProperties\":false}";
+static const char bash_poll_schema[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"session\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"The session a bash call left running\"},"
+    "\"wait\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Seconds to wait for it to end (default 10; 0: return at once)\"},"
+    "\"stop\":{\"type\":\"boolean\",\"description\":\"Stop it (SIGTERM, then SIGKILL after 2s)\"}},"
+    "\"required\":[\"session\"],\"additionalProperties\":false}";
 static const char read_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\"},"
@@ -699,10 +866,14 @@ static const char edit_schema[] =
 static void builtins_free(void *ud)
 {
     builtins *b = (builtins *)ud;
-    while (b->jobs) {
-        b->jobs->stopped = true;
-        pt_proc_stop(b->jobs->p, true);
-        job_end(b->jobs);
+    while (b->jobs) { /* a reading call gets its result; the background just goes */
+        job *j = b->jobs;
+        j->stopped = true;
+        pt_proc_stop(j->p, true);
+        if (j->fx)
+            job_end(j);
+        else
+            job_free(j);
     }
     free(b->io);
     pt_buf_free(&b->out);
@@ -715,7 +886,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
 {
     builtins *b = (builtins *)calloc(1, sizeof *b);
     const pt_ai_catalog *cat = pt_ai_builtin_catalog();
-    pt_rt_tool t[4];
+    pt_rt_tool t[5];
     uint32_t i, k, n = 0;
     if (!b || !(b->io = (char *)malloc(CHUNK))) {
         free(b);
@@ -731,7 +902,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     rt->builtin = b;
     rt->builtin_free = builtins_free;
     memset(t, 0, sizeof t);
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < 5; i++) {
         t[i].def.source = PT_S("builtin");
         t[i].ud = b;
     }
@@ -739,7 +910,8 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[0].def.description = PT_S(
         "Run a command line in the user's shell, in the session's directory, and return its output "
         "(stdout and stderr together). Each call starts fresh: cd and export do not carry over. stdin "
-        "is empty, so nothing can prompt.");
+        "is empty, so nothing can prompt. A command still running after yield seconds keeps running "
+        "in the background as a session: work on, then read it with bash_poll.");
     t[0].def.schema = PT_S(bash_schema);
     t[0].def.parallel = true;
     t[0].run = t_bash;
@@ -764,7 +936,17 @@ bool pt_rt_add_builtins(pt_rt *rt)
         "file must have been read since it last changed.");
     t[3].def.schema = PT_S(edit_schema);
     t[3].run = t_edit;
-    for (i = 0; i < 4; i++)
+    t[4].def.name = PT_S("bash_poll");
+    t[4].def.description = PT_S(
+        "Read what a background bash session printed since it was last read, waiting up to wait "
+        "seconds for it to end; or stop it. Its result says whether it still runs.");
+    t[4].def.schema = PT_S(bash_poll_schema);
+    t[4].def.replay = PT_REPLAY_SAFE;
+    t[4].def.parallel = true;
+    t[4].def.read_only = true;
+    t[4].run = t_bash_poll;
+    t[4].cancel = bash_cancel;
+    for (i = 0; i < 5; i++)
         if (!pt_rt_tool_add(rt, &t[i]))
             return false;
     return true;

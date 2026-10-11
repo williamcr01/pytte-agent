@@ -348,8 +348,17 @@ static void out_md(app *a, pt_buf *out, tui_md *m, pt_str raw, int base)
 static pt_str call_gist(app *a, pt_str args)
 {
     const pt_json *j, *c;
+    int64_t session;
     pt_arena_reset(&a->ar);
     j = pt_json_parse(args, &a->ar, NULL);
+    if (pt_json_int(pt_json_get(j, "session"), &session)) { /* bash_poll */
+        char *g = (char *)pt_arena_alloc(&a->ar, 48);
+        if (g) {
+            snprintf(g, 48, "session %lld%s", (long long)session,
+                     pt_json_truthy(pt_json_get(j, "stop")) ? " (stop)" : "");
+            return pt_strz(g);
+        }
+    }
     if (j && j->type == PT_J_OBJ)
         for (c = j->child; c; c = c->next)
             if (c->type == PT_J_STR)
@@ -372,6 +381,7 @@ static const struct {
     int cat;
 } verbs[] = {
     {"bash", "Run", "Running", "Ran", "Couldn't run", CAT_COMMAND},
+    {"bash_poll", "Check", "Checking", "Checked", "Couldn't check", CAT_COMMAND},
     {"read", "Read", "Reading", "Read", "Couldn't read", CAT_READ},
     {"write", "Write", "Writing", "Wrote", "Couldn't write", CAT_WRITE},
     {"edit", "Edit", "Editing", "Edited", "Couldn't edit", CAT_EDIT},
@@ -530,8 +540,8 @@ static void group_add(app *a, const pt_entry_view *v)
     const pt_block *call = find_call(a, m->call_id);
     const pt_json *data, *d, *j;
     pt_str text = m->text, args = call ? call->args : PT_S("");
-    int64_t ms = -1, code = 0;
-    bool has_code, timed = false, stats = false;
+    int64_t ms = -1, code = 0, session = 0;
+    bool has_code, timed = false, stats = false, on = false;
     unsigned add = 0, del = 0;
     int vi = verb_of(m->name), left = TOOL_DIFF;
     int nn = (int)(m->name.n > 60 ? 60 : m->name.n);
@@ -547,12 +557,14 @@ static void group_add(app *a, const pt_entry_view *v)
     data = pt_json_get(pt_json_parse(v->raw, &a->ar, NULL), "data");
     d = pt_json_get(data, "details");
     has_code = pt_json_int(pt_json_get(d, "exit"), &code);
+    on = pt_json_int(pt_json_get(d, "session"), &session); /* runs on in the background */
     if (!pt_json_int(pt_json_get(d, "ms"), &ms))
         ms = -1;
     if (g->cat == CAT_COMMAND) { /* bash's closing note: the row says it */
         pt_str last = last_lines(text, 1);
         timed = starts(last, "[timed out after ");
-        if (timed || starts(last, "[exit code ") || starts(last, "[stopped]")) {
+        if (timed || starts(last, "[exit code ") || starts(last, "[stopped]") || starts(last, "[ended]") ||
+            starts(last, "[still running as session ")) {
             text.n = (size_t)(last.p - text.p);
             while (text.n && text.p[text.n - 1] == '\n')
                 text.n--;
@@ -596,13 +608,19 @@ static void group_add(app *a, const pt_entry_view *v)
         put_lines(a, last_lines(text, TOOL_FAIL), "", &left);
     }
     g->dn = (uint32_t)(a->grp.n - g->dat);
-    if (g->cat == CAT_COMMAND && ms >= 1000) {
+    if (on && g->bad == G_OK && pt_str_eqz(m->name, "bash")) {
+        snprintf(tail, sizeof tail, " · still running as session %lld", (long long)session);
+    } else if (on && g->bad == G_OK) {
+        snprintf(tail, sizeof tail, " · still running");
+    } else if (g->cat == CAT_COMMAND && ms >= 1000) {
         char took[32];
         secs_short(took, sizeof took, ms);
         snprintf(tail, sizeof tail, " · %s", took);
     }
     /* the row */
-    if (g->bad == G_OK) {
+    if (g->bad == G_OK && on && pt_str_eqz(m->name, "bash")) {
+        vz = "Started";
+    } else if (g->bad == G_OK) {
         vz = vi < 0 ? NULL : verbs[vi].done;
     } else if (g->bad == G_FAILED && g->cat == CAT_COMMAND && has_code && code) {
         snprintf(verb, sizeof verb, "Exited %lld", (long long)code);

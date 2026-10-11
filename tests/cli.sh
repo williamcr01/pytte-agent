@@ -91,6 +91,15 @@ if command -v jq >/dev/null; then
     blob="$XDG_STATE_HOME/pytte/sessions/$id/blobs/$(echo "$sum" | cut -c1-2)/$(echo "$sum" | cut -c3-)"
     check "...stored under its hash" [ "$(sha256sum <"$blob" | cut -c1-64)" = "$sum" ]
     check "...the result names its file" sh -c 'printf "%s" "$1" | jq -se ".[0].data.content | contains(\"bytes omitted; the whole output is in $2]\")" >/dev/null' _ "$results" "$blob"
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/background.json go >/dev/null 2>&1
+    results=$("$pytte" log --json | jq -c 'select(.kind == "tool_result") | .data')
+    bg() { sh -c 'printf "%s" "$1" | jq -se "$2" >/dev/null' _ "$results" "$1"; }
+    check "a command past its yield goes to the background" bg '.[0] | (.content == "first\n\n[still running as session 8; bash_poll reads on]") and .details.session == 8 and (.is_error | not)'
+    check "...a poll with no wait returns at once" bg '.[1].content == "\n[still running as session 8]"'
+    check "...a poll waits for the end and its exit code" bg '.[2] | .content == "second\n\n[exit code 3]" and .details.exit == 3 and .is_error'
+    check "...an ended session read once is gone" bg '.[3] | (.content | startswith("No session 8:")) and .is_error'
+    check "...a stopped session is no error" bg '.[5] | .content == "\n[stopped]" and (.is_error | not)'
+    check "...and nothing outlives pytte" sh -c '! pgrep -f "^sh -c echo up; sleep 100" >/dev/null && ! pgrep -xf "sleep 100" >/dev/null'
     d=$XDG_STATE_HOME/files
     mkdir -p "$d" && seq 1 5000 >"$d/big.txt"
     printf '{"turns": [{"content": [{"type": "tool_call", "name": "write", "args": {"path": "%s/notes.txt", "content": "hi"}}]}, {"content": [{"type": "tool_call", "name": "read", "args": {"path": "%s/big.txt"}}]}, {"content": [{"type": "text", "text": "Read."}]}]}' \

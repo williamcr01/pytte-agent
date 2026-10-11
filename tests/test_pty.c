@@ -511,6 +511,32 @@ static void test_tool_rendering(void)
     remove("build/test/render.c");
 }
 
+/* A command past its yield runs on in the background; polls name it by
+ * session, and say whether it still runs. */
+static void test_background(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/background.json", "--permission-mode", "auto", NULL};
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "go\r");
+    CHECK(wait_for(&p, "Done.", 8000));
+    CHECK(has(&p, "Starting it.\n\n"
+                  "● 6 tool calls · 6 commands · 2 failed\n"
+                  "├ Started echo first; sleep 2; echo second; exit 3 · still running as session 8\n"
+                  "├ Checked session 8 · still running\n"
+                  "├ Exited 3 session 8 · 1s\n"
+                  "│   second\n"
+                  "├ Couldn't check session 8\n"));
+    CHECK(has(&p, "├ Started echo up; sleep 100 · still running as session 19\n"
+                  "└ Checked session 19 (stop)\n"));
+    CHECK(!has(&p, "[still running"));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+}
+
 /* A tool call that may change things waits for approval: 1 runs it,
  * esc denies the next one. */
 static void test_approval(void)
@@ -894,6 +920,7 @@ int main(void)
     RUN(test_interrupt_and_queue);
     RUN(test_approval);
     RUN(test_tool_rendering);
+    RUN(test_background);
     RUN(test_compaction);
     RUN(test_resize_while_streaming);
     RUN(test_commands);
