@@ -71,7 +71,7 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     pt_jw w;
     uint32_t i, first = 0, max_tokens;
     const char *sysrole = t->compat.system_role == PT_SYSROLE_SYSTEM ? "system" : "developer";
-    bool summary = t->compat.thinking_display == PT_YES;
+    bool summary = t->compat.thinking_display == PT_YES && !o->hide_thinking;
     pt_buf_init(&b, a->al);
     pt_jw_init(&w, &b);
 

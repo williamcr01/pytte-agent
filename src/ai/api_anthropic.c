@@ -129,9 +129,12 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
         pt_jw_raw(&w, PT_S("{\"type\":\"ephemeral\"}"));
     }
     if (t->model.reasoning) {
-        /* Always explicit: on older models omitting it means no thinking. */
+        /* Always explicit: on older models omitting it means no thinking.
+         * A summary trails the model, and the answer waits for it to end:
+         * unread, it only delays the first text. Without display, current
+         * models omit it. */
         pt_jw_key(&w, "thinking");
-        pt_jw_raw(&w, t->compat.thinking_display == PT_YES
+        pt_jw_raw(&w, t->compat.thinking_display == PT_YES && !o->hide_thinking
                           ? PT_S("{\"type\":\"adaptive\",\"display\":\"summarized\"}")
                           : PT_S("{\"type\":\"adaptive\"}"));
         pt_jw_key(&w, "output_config");

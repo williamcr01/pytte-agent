@@ -201,6 +201,13 @@ static void test_anthropic_request(void)
     b = body_of(&r);
     CHECK_STR(jget(b, "output_config.effort"), "max");
     CHECK_STR(jget(b, "max_tokens"), "1000");
+
+    /* unread thinking: no summary, the model's default display */
+    o.hide_thinking = true;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "thinking.type"), "adaptive");
+    CHECK(pt_json_get(pt_json_get(b, "thinking"), "display") == NULL);
 }
 
 static void test_anthropic_folding_and_bad_args(void)
@@ -318,6 +325,14 @@ static void test_responses_request(void)
     o.reasoning = PT_REASON_HIGH;
     CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
     CHECK_STR(jget(body_of(&r), "reasoning.effort"), "high");
+
+    /* unread thinking: no summary */
+    o.hide_thinking = true;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "reasoning.effort"), "high");
+    CHECK(pt_json_get(pt_json_get(b, "reasoning"), "summary") == NULL);
+    o.hide_thinking = false;
 
     /* history from Anthropic: its thinking becomes text, signatures stay home */
     c = conversation();

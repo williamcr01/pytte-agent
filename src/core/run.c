@@ -203,6 +203,7 @@ bool pt_run_start(pt_agent *a, task *t)
     memset(&opts, 0, sizeof opts);
     opts.max_tokens = t->max_tokens;
     opts.reasoning = t->reasoning;
+    opts.hide_thinking = a->o.config.hide_thinking;
     if (!(t->kind == TASK_COMPACT ? pt_compact_context(a, t, &ctx, &rl->a)
                                   : pt_core_context(a, t->cutoff, &ctx, &rl->a)) ||
         !pt_ai_build(&rl->target, &ctx, &opts, &cred, &rl->req, &rl->a)) {

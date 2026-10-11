@@ -110,6 +110,7 @@ typedef struct pt_config {
     uint32_t live_interval_ms; /* live file snapshots at most this often; 0: 250 */
     bool no_sync;              /* skip fsync: survives process crashes, not power loss */
     bool serial_tools;         /* run a round's tools one at a time even when all may run together */
+    bool hide_thinking;        /* the frontend shows no reasoning text: requests leave it out */
     uint32_t context_window;   /* 0: the model's */
     uint32_t compact_reserve;  /* compact when fewer tokens are left; 0: 24576 (a quarter of small windows) */
     uint32_t compact_keep;     /* tokens of the newest turns a compaction keeps as they are;

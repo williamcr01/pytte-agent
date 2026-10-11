@@ -193,6 +193,7 @@ typedef struct pt_ai_opts {
     uint32_t max_tokens;     /* 0: model maximum, clamped to what fits the context */
     uint32_t input_estimate; /* tokens; 0: estimated from the context */
     pt_reasoning reasoning;
+    bool hide_thinking; /* nobody reads the reasoning: ask for none, where that is optional */
     pt_str temperature; /* raw JSON number; empty = unset */
     bool no_cache;
     pt_str session_id;

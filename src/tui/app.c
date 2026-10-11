@@ -1944,8 +1944,10 @@ static bool save_setting(app *a, int k, const char *v)
         a->saving->pending |= 1u << k;
         start_setting(a);
     }
-    if (k == CFG_THINKING)
+    if (k == CFG_THINKING) {
         apply_thinking(a);
+        set_config(a);
+    }
     if (k == CFG_SYMBOLS)
         apply_symbols(a);
     if (k == CFG_PERMS && pt_perm_parse(pt_strz(a->cfg->val[k]), &a->o.perm) && a->open)
@@ -2000,6 +2002,7 @@ static void set_config(app *a)
     c.model = a->o.model ? pt_strz(a->o.model) : PT_STR_NULL;
     c.compact_model = a->o.compact_model ? pt_strz(a->o.compact_model) : PT_STR_NULL;
     c.reasoning = a->o.reasoning;
+    c.hide_thinking = a->thinking != TH_FULL; /* collapsed shows only how long */
     c.max_tokens = a->o.max_tokens;
     c.retry_base_ms = a->o.retry_base_ms;
     c.context_window = a->o.context_window;
