@@ -40,6 +40,7 @@ static const syms asc = {">", "*", "*", "x", ">", "|", "|", "-", "...", "ok", "|
 #define TOOL_DIFF 8  /* rows of an edit's diff */
 #define TOOL_LIVE 5  /* rows of a running tool's output in the band */
 #define TOOL_KEEP 4096 /* bytes of it kept for that */
+#define RUN_MAX 8      /* running calls the band shows; more still run */
 
 static const struct {
     const char *name, *args, *desc;
@@ -98,6 +99,14 @@ typedef struct grow {
     uint8_t cat, bad;
     bool diff;
 } grow;
+
+/* A call that is running: its row, and the end of its output. */
+typedef struct run_call {
+    uint32_t task;
+    int cat;
+    char name[64];
+    pt_buf id, head, out;
+} run_call;
 
 typedef struct queued_input {
     pt_buf text;
@@ -168,17 +177,14 @@ typedef struct app {
     int phase;
     int64_t run_at, retry_until;
     pt_buf retry_err;
-    /* the running tool: its name and the end of its output */
-    uint32_t tool_task;
-    char tool_name[64];
-    pt_buf tool_out;
-    pt_buf tool_head; /* the running tool's row, for the band */
+    /* the running calls, in the order they started */
+    run_call runs[RUN_MAX];
+    int nruns;
     pt_buf diff;      /* scratch for the band, reused */
     /* the open group of finished calls: in the band until something else is shown */
     pt_buf grp;
     grow grows[GROUP_MAX];
     int ngrows;
-    int tool_cat; /* the running call's kind */
     /* a tool call waiting for approval (refreshed from pt_asks) */
     pt_ask_view ask;
     uint32_t ask_task;
@@ -680,9 +686,31 @@ static void group_details(app *a, pt_buf *out, const grow *g, const char *cont)
     }
 }
 
+/* A running call ended: its slot goes to the end, buffers and all. */
+static void run_done(app *a, pt_str call_id)
+{
+    int i;
+    for (i = 0; i < a->nruns; i++)
+        if (pt_str_eq(pt_buf_str(&a->runs[i].id), call_id)) {
+            run_call r = a->runs[i];
+            memmove(&a->runs[i], &a->runs[i + 1], (size_t)(a->nruns - i - 1) * sizeof r);
+            a->runs[--a->nruns] = r;
+            return;
+        }
+}
+
+static bool runs_oom(const app *a)
+{
+    int i;
+    for (i = 0; i < RUN_MAX; i++)
+        if (a->runs[i].id.oom || a->runs[i].head.oom || a->runs[i].out.oom)
+            return true;
+    return false;
+}
+
 /* "● 3 tool calls · 2 commands · 1 edit · 1 failed": the kinds, most
  * first, then what went wrong. */
-static void group_header(app *a, pt_buf *out, int bstyle, int running_cat)
+static void group_header(app *a, pt_buf *out, int bstyle, bool running)
 {
     int cats[NCAT] = {0}, bads[NBAD] = {0}, i, total = a->ngrows;
     bool used[NCAT] = {false};
@@ -692,8 +720,8 @@ static void group_header(app *a, pt_buf *out, int bstyle, int running_cat)
         cats[a->grows[i].cat]++;
         bads[a->grows[i].bad]++;
     }
-    if (running_cat >= 0) {
-        cats[running_cat]++;
+    for (i = 0; running && i < a->nruns; i++) {
+        cats[a->runs[i].cat]++;
         total++;
     }
     pt_buf_reset(&a->tmp2);
@@ -729,11 +757,12 @@ static void group_header(app *a, pt_buf *out, int bstyle, int running_cat)
 }
 
 /* The group: whole for the scrollback; live, for the band, with its
- * newest rows only, without details, and the running call last. */
+ * newest rows only, without details, and the running calls last (the
+ * newest with the end of its output). */
 static void group_render(app *a, pt_buf *out, bool live)
 {
-    bool running = live && a->phase == PH_TOOL && a->tool_head.n;
-    int n = a->ngrows + running, i, first = 0;
+    bool running = live && a->nruns;
+    int n = a->ngrows + (running ? a->nruns : 0), i, first = 0;
     bool single = n == 1, bad = false;
     char cont[16], more[48];
     if (!n)
@@ -741,7 +770,7 @@ static void group_render(app *a, pt_buf *out, bool live)
     for (i = 0; i < a->ngrows; i++)
         bad = bad || a->grows[i].bad != G_OK;
     if (!single)
-        group_header(a, out, running ? TUI_DIM : bad ? TUI_RED : TUI_GREEN, running ? a->tool_cat : -1);
+        group_header(a, out, running ? TUI_DIM : bad ? TUI_RED : TUI_GREEN, running);
     if (live && a->ngrows > GROUP_LIVE) {
         first = a->ngrows - GROUP_LIVE;
         snprintf(more, sizeof more, "%s %d more", a->sy->more, first);
@@ -764,11 +793,14 @@ static void group_render(app *a, pt_buf *out, bool live)
             group_details(a, out, g, cont);
         }
     }
-    if (running) { /* its row, and the end of its output */
-        pt_str o = pt_buf_str(&a->tool_out), rows;
+    for (i = 0; running && i + 1 < a->nruns; i++)
+        group_row(a, out, a->sy->tee, TUI_DIM, pt_buf_str(&a->runs[i].head));
+    if (running) { /* the newest: its row, and the end of its output */
+        const run_call *r = &a->runs[a->nruns - 1];
+        pt_str o = pt_buf_str(&r->out), rows;
         size_t at = o.n;
         int lines = 0;
-        group_row(a, out, single ? a->sy->bullet : a->sy->elbow, TUI_DIM, pt_buf_str(&a->tool_head));
+        group_row(a, out, single ? a->sy->bullet : a->sy->elbow, TUI_DIM, pt_buf_str(&r->head));
         while (at && o.p[at - 1] == '\n')
             at--;
         o.n = at;
@@ -1038,9 +1070,9 @@ static void on_entries(app *a)
             a->queue[--a->nq] = first;
             pt_buf_reset(&a->queue[a->nq].text);
         }
-        if (strcmp(v.kind, "tool_result") == 0) {
-            pt_buf_reset(&a->tool_out);
-            if (a->phase == PH_TOOL)
+        if (strcmp(v.kind, "tool_result") == 0 && v.msg) {
+            run_done(a, v.msg->call_id);
+            if (a->phase == PH_TOOL && !a->nruns)
                 a->phase = PH_WAIT;
         }
         if (strcmp(v.kind, "assistant") == 0 && a->streamed) {
@@ -1082,31 +1114,40 @@ static void on_event(void *ud, const pt_event *ev)
         break;
     case PT_E_TOOL_START:
         a->phase = PH_TOOL;
-        a->tool_task = ev->task;
-        snprintf(a->tool_name, sizeof a->tool_name, "%.*s", (int)(ev->name.n > 60 ? 60 : ev->name.n), ev->name.p);
-        pt_buf_reset(&a->tool_out);
-        {
+        if (a->nruns < RUN_MAX) {
+            run_call *r = &a->runs[a->nruns++];
             int vi = verb_of(ev->name);
-            a->tool_cat = vi < 0 ? CAT_OTHER : verbs[vi].cat;
-            pt_buf_reset(&a->tool_head);
-            phrase(a, &a->tool_head, 0, vi < 0 ? NULL : verbs[vi].running, ev->name, ev->args);
+            r->task = ev->task;
+            r->cat = vi < 0 ? CAT_OTHER : verbs[vi].cat;
+            snprintf(r->name, sizeof r->name, "%.*s", (int)(ev->name.n > 60 ? 60 : ev->name.n), ev->name.p);
+            pt_buf_reset(&r->id);
+            pt_buf_puts(&r->id, ev->call_id);
+            pt_buf_reset(&r->out);
+            pt_buf_reset(&r->head);
+            phrase(a, &r->head, 0, vi < 0 ? NULL : verbs[vi].running, ev->name, ev->args);
         }
         break;
-    case PT_E_TOOL_OUTPUT:
-        if (ev->task != a->tool_task)
+    case PT_E_TOOL_OUTPUT: {
+        run_call *r = NULL;
+        int i;
+        for (i = 0; i < a->nruns && !r; i++)
+            if (a->runs[i].task == ev->task)
+                r = &a->runs[i];
+        if (!r)
             break;
         if (ev->data.n >= TOOL_KEEP) {
-            pt_buf_reset(&a->tool_out);
-            pt_buf_put(&a->tool_out, ev->data.p + ev->data.n - TOOL_KEEP, TOOL_KEEP);
+            pt_buf_reset(&r->out);
+            pt_buf_put(&r->out, ev->data.p + ev->data.n - TOOL_KEEP, TOOL_KEEP);
         } else {
-            if (a->tool_out.n + ev->data.n > 2 * TOOL_KEEP) { /* keep the end: amortized O(n) */
+            if (r->out.n + ev->data.n > 2 * TOOL_KEEP) { /* keep the end: amortized O(n) */
                 size_t k = TOOL_KEEP - ev->data.n;
-                memmove(a->tool_out.p, a->tool_out.p + a->tool_out.n - k, k);
-                a->tool_out.n = k;
+                memmove(r->out.p, r->out.p + r->out.n - k, k);
+                r->out.n = k;
             }
-            pt_buf_puts(&a->tool_out, ev->data);
+            pt_buf_puts(&r->out, ev->data);
         }
         break;
+    }
     case PT_E_RETRY:
         a->phase = PH_RETRY;
         a->retry_until = ev->until;
@@ -1356,8 +1397,11 @@ static void spinner_row(app *a, int64_t now)
     const char *spin = a->sy->spin[frame % a->sy->nspin];
     const char *hint = now - a->esc_at < DOUBLE_MS ? "esc again to interrupt" : "esc esc to interrupt";
     int n, i, at;
-    if (a->phase == PH_TOOL) {
-        snprintf(running, sizeof running, "Running %s", a->tool_name);
+    if (a->phase == PH_TOOL && a->nruns == 1) {
+        snprintf(running, sizeof running, "Running %s", a->runs[0].name);
+        what = running;
+    } else if (a->phase == PH_TOOL && a->nruns) {
+        snprintf(running, sizeof running, "Running %d calls", a->nruns);
         what = running;
     }
     pt_buf_reset(&a->tmp);
@@ -1569,7 +1613,7 @@ static void build_frame(app *a, int64_t now)
         avail = 1;
     /* the pieces */
     pt_buf_reset(live_rows);
-    if (a->ngrows || (a->phase == PH_TOOL && a->tool_head.n)) { /* the open group */
+    if (a->ngrows || a->nruns) { /* the open group */
         pt_buf_putc(live_rows, '\n');
         group_render(a, live_rows, true);
     }
@@ -1740,7 +1784,7 @@ static void paint(app *a)
     build_frame(a, now);
     if (a->in.text.oom || a->in.kill.oom || a->in.saved.oom || a->frame.rows.oom || a->lines.oom ||
         a->live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->items_buf.oom || a->grp.oom ||
-        a->tool_head.oom || a->live_rows.oom || a->diff.oom) {
+        runs_oom(a) || a->live_rows.oom || a->diff.oom) {
         if (!a->quit)
             fprintf(stderr, "pytte: out of memory drawing the terminal\n");
         a->code = 1;
@@ -2863,7 +2907,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
 {
     app a;
     const char *term = getenv("TERM"), *amb = getenv("PYTTE_AMBIGUOUS");
-    int sig = 0;
+    int sig = 0, slot;
     char picked[64] = "", kept[64];
     memset(&a, 0, sizeof a);
     a.o = *o;
@@ -2893,8 +2937,11 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_init(&a.live_rows, pt_sys_allocator());
     pt_buf_init(&a.live, pt_sys_allocator());
     pt_buf_init(&a.retry_err, pt_sys_allocator());
-    pt_buf_init(&a.tool_out, pt_sys_allocator());
-    pt_buf_init(&a.tool_head, pt_sys_allocator());
+    for (slot = 0; slot < RUN_MAX; slot++) {
+        pt_buf_init(&a.runs[slot].id, pt_sys_allocator());
+        pt_buf_init(&a.runs[slot].head, pt_sys_allocator());
+        pt_buf_init(&a.runs[slot].out, pt_sys_allocator());
+    }
     pt_buf_init(&a.diff, pt_sys_allocator());
     pt_buf_init(&a.grp, pt_sys_allocator());
     pt_buf_init(&a.items_buf, pt_sys_allocator());
@@ -3107,8 +3154,11 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_free(&a.wrap);
     pt_buf_free(&a.live);
     pt_buf_free(&a.retry_err);
-    pt_buf_free(&a.tool_out);
-    pt_buf_free(&a.tool_head);
+    for (slot = 0; slot < RUN_MAX; slot++) {
+        pt_buf_free(&a.runs[slot].id);
+        pt_buf_free(&a.runs[slot].head);
+        pt_buf_free(&a.runs[slot].out);
+    }
     pt_buf_free(&a.diff);
     pt_buf_free(&a.grp);
     pt_buf_free(&a.items_buf);

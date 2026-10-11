@@ -99,7 +99,10 @@ static void write_state(pt_jw *w, const task *t)
             pt_jw_uint(w, t->calls[i]);
         pt_jw_arr_end(w);
         pt_jw_key(w, "parallel");
-        pt_jw_bool(w, t->parallel);
+        pt_jw_arr(w);
+        for (i = 0; i < t->ncalls; i++)
+            pt_jw_bool(w, t->parallel[i]);
+        pt_jw_arr_end(w);
     }
 }
 
@@ -244,15 +247,15 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
     } else if (t->phase == PH_RETRY) {
         t->until = pt_json_geti(st, "until", 0);
     } else if (t->phase == PH_TOOLS) {
-        const pt_json *calls = pt_json_get(st, "calls"), *c;
+        const pt_json *calls = pt_json_get(st, "calls"), *par = pt_json_get(st, "parallel"), *c;
         uint32_t i = 0;
         t->entry = getid(st, "assistant");
-        t->parallel = pt_json_truthy(pt_json_get(st, "parallel"));
-        if (!pt_json_is(calls, PT_J_ARR) || !t->entry)
+        if (!pt_json_is(calls, PT_J_ARR) || !pt_json_is(par, PT_J_ARR) || par->len != calls->len || !t->entry)
             return false;
         t->ncalls = calls->len;
         t->calls = (uint32_t *)pt_arena_alloc(ar, sizeof(uint32_t) * (calls->len ? calls->len : 1));
-        if (!t->calls)
+        t->parallel = (bool *)pt_arena_alloc(ar, sizeof(bool) * (calls->len ? calls->len : 1));
+        if (!t->calls || !t->parallel)
             return false;
         for (c = calls->child; c; c = c->next) {
             int64_t id;
@@ -260,6 +263,8 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
                 return false;
             t->calls[i++] = (uint32_t)id;
         }
+        for (i = 0, c = par->child; c; c = c->next)
+            t->parallel[i++] = pt_json_truthy(c);
     }
     return t->attempt > 0;
 }
@@ -341,9 +346,13 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
             nt.prompt = pt_arena_dup(&nt.a, nt.prompt);
         if (nt.ncalls) {
             uint32_t *c = (uint32_t *)pt_arena_alloc(&nt.a, sizeof(uint32_t) * nt.ncalls);
+            bool *par = (bool *)pt_arena_alloc(&nt.a, sizeof(bool) * nt.ncalls);
             if (c)
                 memcpy(c, nt.calls, sizeof(uint32_t) * nt.ncalls);
+            if (par)
+                memcpy(par, nt.parallel, sizeof(bool) * nt.ncalls);
             nt.calls = c;
+            nt.parallel = par;
         }
         *t = nt;
         t->fx = keep.fx;

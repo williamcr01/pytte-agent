@@ -741,6 +741,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
         "(stdout and stderr together). Each call starts fresh: cd and export do not carry over. stdin "
         "is empty, so nothing can prompt.");
     t[0].def.schema = PT_S(bash_schema);
+    t[0].def.parallel = true;
     t[0].run = t_bash;
     t[0].cancel = bash_cancel;
     t[1].def.name = PT_S("read");

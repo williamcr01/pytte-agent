@@ -70,7 +70,7 @@ typedef struct task {
     pt_str model; pt_reasoning reasoning; uint32_t max_tokens; /* request params */
     uint32_t entry;     /* run tools, tool: the assistant entry with the calls */
     uint32_t *calls, ncalls; /* run tools: its tool tasks, in call order */
-    bool parallel;      /* run tools: they may run at the same time */
+    bool *parallel;     /* run tools: per call, whether it may run alongside others */
     pt_str call_id;     /* tool */
     pt_str args;        /* tool: arguments a gate rewrote; empty: as called */
     pt_str prompt;      /* tool approve */

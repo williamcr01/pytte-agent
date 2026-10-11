@@ -592,9 +592,20 @@ static void build_place(pt_agent *a, input *in)
 
 /* ---- scheduler ---- */
 
+/* Whether a round's call may run alongside other calls. */
+static bool tool_parallel(const task *run, uint32_t id)
+{
+    uint32_t i;
+    for (i = 0; run && i < run->ncalls; i++)
+        if (run->calls[i] == id)
+            return run->parallel[i];
+    return false;
+}
+
 static bool step(pt_agent *a)
 {
-    uint32_t i, blocked = 0;
+    uint32_t i, round = 0;
+    bool pending = false, exclusive = false; /* in round: a call not done; one that holds up the rest */
     input *q;
     pt_arena_reset(&a->scratch);
     if (a->commit_out || a->fatal)
@@ -653,14 +664,21 @@ static bool step(pt_agent *a)
         if (t->status == ST_DONE)
             continue;
         if (t->kind == TASK_TOOL) {
-            /* A round runs one call at a time, in call order, unless all
-             * of its tools may run together (section 7.5). */
-            task *run = pt_core_task(a, t->owner);
-            bool serial = !run || !run->parallel;
-            if (serial && blocked == t->owner)
+            /* A round's calls go in call order (section 7.5): a parallel
+             * call runs alongside the parallel calls before it, the others
+             * wait for every call before them, and hold up every call
+             * after. Done calls have left the table. */
+            bool par = tool_parallel(pt_core_task(a, t->owner), t->id);
+            if (t->owner != round) {
+                round = t->owner;
+                pending = exclusive = false;
+            }
+            if (par ? exclusive : pending) {
+                exclusive = true; /* holds up the rest of the round */
                 continue;
-            if (serial)
-                blocked = t->owner;
+            }
+            pending = true;
+            exclusive = exclusive || !par;
             if (!t->fx && pt_tool_step(a, t))
                 return true;
         } else if (!t->fx && (t->kind == TASK_COMPACT ? pt_compact_step(a, t) : pt_run_step(a, t))) {

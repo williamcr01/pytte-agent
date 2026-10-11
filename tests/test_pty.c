@@ -469,9 +469,10 @@ static void test_tool_rendering(void)
     pty_start(&p, 30, 100, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
-    CHECK(wait_for(&p, /* the band */
-                   "● 2 tool calls · 2 commands\n"
+    CHECK(wait_for(&p, /* the band: the commands run at once, and rows come as they end */
+                   "● 3 tool calls · 3 commands · 1 failed\n"
                    "├ Ran echo 31\n"
+                   "├ Exited 2 echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2\n"
                    "└ Running echo started; sleep 1; echo finished\n"
                    "  │ started\n",
                    3000));
@@ -479,11 +480,11 @@ static void test_tool_rendering(void)
     CHECK(has(&p, "Looking.\n\n"
                   "● 6 tool calls · 3 commands · 1 read · 1 write · 1 edit · 1 failed\n"
                   "├ Ran echo 31\n"
-                  "├ Ran echo started; sleep 1; echo finished · 1s\n"
                   "├ Exited 2 echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2\n"
                   "│   two\n"
                   "│   band.c:88: error\n"
                   "│   make: Error 1\n"
+                  "├ Ran echo started; sleep 1; echo finished · 1s\n"
                   "├ Wrote build/test/render.c +2\n"
                   "├ Read build/test/render.c · 2 lines\n"
                   "└ Edited build/test/render.c +1 / -1\n"

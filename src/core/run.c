@@ -387,10 +387,10 @@ static bool tool_parallel(pt_agent *a, pt_str name)
 static void write_round(pt_agent *a, task *nt, const pt_msg *m, uint32_t calls)
 {
     uint32_t aid = pt_core_new_id(a), i, k = 0;
-    bool parallel = !a->o.config.serial_tools;
     pt_run_write_assistant(a, aid, m);
     nt->calls = (uint32_t *)pt_arena_alloc(&a->scratch, sizeof(uint32_t) * calls);
-    if (!nt->calls)
+    nt->parallel = (bool *)pt_arena_alloc(&a->scratch, sizeof(bool) * calls);
+    if (!nt->calls || !nt->parallel)
         return;
     for (i = 0; i < m->nblocks; i++) {
         const pt_block *b = &m->blocks[i];
@@ -406,12 +406,11 @@ static void write_round(pt_agent *a, task *nt, const pt_msg *m, uint32_t calls)
         tt.entry = aid;
         tt.call_id = b->id;
         pt_write_task(&a->cw, &tt);
+        nt->parallel[k] = !a->o.config.serial_tools && tool_parallel(a, b->name);
         nt->calls[k++] = tt.id;
-        parallel = parallel && tool_parallel(a, b->name);
     }
     nt->ncalls = k;
     nt->entry = aid;
-    nt->parallel = parallel;
     nt->status = ST_WAITING;
     nt->phase = PH_TOOLS;
 }
