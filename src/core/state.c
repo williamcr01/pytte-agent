@@ -164,8 +164,15 @@ void pt_write_input(pt_jw *w, const input *in)
         pt_jw_key(w, "answer");
         pt_jw_strz(w, in->yes ? "yes" : "no");
     }
-    pt_jw_key(w, "text");
-    pt_jw_str(w, in->text);
+    if (in->blob.n) {
+        pt_jw_key(w, "blob");
+        pt_jw_str(w, in->blob);
+        pt_jw_key(w, "size");
+        pt_jw_uint(w, in->text.n);
+    } else {
+        pt_jw_key(w, "text");
+        pt_jw_str(w, in->text);
+    }
     pt_jw_key(w, "status");
     pt_jw_strz(w, input_status_names[in->status]);
     if (in->run) {
@@ -354,16 +361,27 @@ oom:
     return false;
 }
 
+/* The text of a blob ref, read through the host, into ar. */
+static bool blob_text(pt_agent *a, pt_str ref, pt_arena *ar, pt_str *out)
+{
+    if (!a->o.blob || !a->o.blob(a->o.blob_ud, ref, ar, out)) {
+        pt_core_seterr(a, "a blob the log refers to cannot be read", ref);
+        return false;
+    }
+    return true;
+}
+
 static bool apply_input(pt_agent *a, const pt_json *r, uint32_t id)
 {
     input *in = pt_core_input(a, id);
-    pt_str req, text;
+    pt_str req, text, blob;
     input_kind kind;
     unsigned v;
     if (!lookup(pt_json_gets(r, "status", &a->scratch), input_status_names, 5, &v))
         return false;
     req = pt_json_gets(r, "req", &a->scratch);
     text = pt_json_gets(r, "text", &a->scratch);
+    blob = pt_json_gets(r, "blob", &a->scratch);
     kind = pt_str_eqz(pt_json_gets(r, "kind", &a->scratch), "approve") ? INK_APPROVE : INK_USER;
     if (a->scratch.oom)
         goto oom;
@@ -376,10 +394,21 @@ static bool apply_input(pt_agent *a, const pt_json *r, uint32_t id)
         pt_arena_init(&in->a, a->al, 64);
         a->inputs[a->ninputs++] = in;
     }
-    if (!pt_str_eq(in->req, req) || !pt_str_eq(in->text, text)) {
+    if (blob.n) { /* the text is read once: rewrites of the record keep it */
+        if (!pt_str_eq(in->blob, blob) || !pt_str_eq(in->req, req)) {
+            pt_arena_reset(&in->a);
+            in->req = req.n ? pt_arena_dup(&in->a, req) : PT_STR_NULL;
+            in->blob = pt_arena_dup(&in->a, blob);
+            if (!blob_text(a, blob, &in->a, &in->text))
+                return false;
+            if (in->a.oom)
+                goto oom;
+        }
+    } else if (in->blob.n || !pt_str_eq(in->req, req) || !pt_str_eq(in->text, text)) {
         pt_arena_reset(&in->a);
         in->req = req.n ? pt_arena_dup(&in->a, req) : PT_STR_NULL;
         in->text = text.n ? pt_arena_dup(&in->a, text) : PT_STR_NULL;
+        in->blob = PT_STR_NULL;
         if (in->a.oom)
             goto oom;
     }
@@ -502,10 +531,21 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
         if (!apply_tools(a, pt_json_get(d, "tools")))
             return false;
         break;
-    case ENT_USER:
+    case ENT_USER: {
+        const pt_json *c = pt_json_get(d, "content");
         e->msg.role = PT_ROLE_USER;
-        e->msg.text = pt_arena_dup(ea, pt_json_gets(d, "content", sa));
+        if (pt_json_is(c, PT_J_OBJ)) { /* a blob: its input has the text */
+            pt_str ref = pt_json_gets(c, "blob", sa);
+            input *in = pt_core_input(a, getid(d, "input"));
+            if (in && pt_str_eq(in->blob, ref))
+                e->msg.text = pt_arena_dup(ea, in->text);
+            else if (!blob_text(a, ref, ea, &e->msg.text))
+                return false;
+        } else {
+            e->msg.text = pt_arena_dup(ea, pt_json_str(c, sa));
+        }
         break;
+    }
     case ENT_ASSISTANT:
         if (!pt_msg_read_json(pt_json_get(d, "message"), &e->msg, ea))
             return false;

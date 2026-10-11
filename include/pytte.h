@@ -36,7 +36,8 @@ typedef enum {
     PT_FX_CANCEL,     /* stop effect `cancel` (a request, a sleep, a tool); no completion */
     PT_FX_GATE,       /* may this tool call run? answer with pt_fx_gate */
     PT_FX_ASK,        /* ask the user about a tool call; answered by pt_approve, no completion */
-    PT_FX_TOOL        /* run a tool: pt_fx_data for its output as it comes, then pt_fx_tool */
+    PT_FX_TOOL,       /* run a tool: pt_fx_data for its output as it comes, then pt_fx_tool */
+    PT_FX_BLOB        /* store bytes as a blob (section 6.5); complete with pt_fx_blob */
 } pt_fx_kind;
 
 /* What running a tool again after an unknown partial run does (section 13.4). */
@@ -47,7 +48,8 @@ typedef struct pt_fx {
     uint32_t id;   /* unique within the agent */
     uint32_t task; /* the task it serves; 0 for session commits */
     /* COMMIT: one line with its newline, valid until completed.
-     * LIVE: the snapshot, valid until the next pt_poll. */
+     * LIVE: the snapshot, valid until the next pt_poll.
+     * BLOB: the contents, valid until completed. */
     pt_str bytes;
     bool sync;                /* COMMIT */
     const pt_http_req *http;  /* HTTP: valid until completed or cancelled */
@@ -116,6 +118,10 @@ typedef struct pt_opts {
     bool (*credentials)(void *ud, const pt_provider *p, pt_credentials *out);
     pt_event_fn on_event;
     void *ud; /* passed to all of the above */
+    /* A blob's contents ("sha256:<hex>"), into ar, while loading a log
+     * whose large prompts are blobs. False when it cannot be read. */
+    bool (*blob)(void *blob_ud, pt_str ref, pt_arena *ar, pt_str *out);
+    void *blob_ud;
     const pt_ai_catalog *catalog; /* NULL: the built-in one */
     pt_config config;
     bool all_epochs; /* keep the entries of every epoch, not just the current one
@@ -234,6 +240,10 @@ typedef struct pt_tool_result {
 
 /* A TOOL ended (also after PT_FX_CANCEL: with what it produced). Copied. */
 void pt_fx_tool(pt_agent *a, uint32_t fx, const pt_tool_result *r);
+
+/* A BLOB is durable: ref is "sha256:<hex>" (copied), or empty when it
+ * could not be stored (the bytes then stay inline in the log). */
+void pt_fx_blob(pt_agent *a, uint32_t fx, pt_str ref);
 
 typedef enum {
     PT_FATAL_NONE,

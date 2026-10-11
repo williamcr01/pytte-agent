@@ -64,6 +64,7 @@ struct pt_rt {
     pt_fx io;          /* borrowed effect bytes until the worker finishes */
     bool io_pending, io_ok;
     char io_error[512];
+    char io_blob[72]; /* a stored BLOB's ref: "sha256:<hex>" */
     /* tools */
     pt_rt_tool *tools;
     pt_tool_def *defs;

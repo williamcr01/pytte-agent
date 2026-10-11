@@ -288,6 +288,30 @@ static void store_io(void *ud)
     uint64_t size;
     rt->io_ok = false;
     rt->io_error[0] = 0;
+    if (fx->kind == PT_FX_BLOB) {
+        static const char digits[] = "0123456789abcdef";
+        unsigned char d[32];
+        pt_sha256 sh;
+        void *h;
+        int i;
+        if (!st->blob_begin || !(h = st->blob_begin(st)))
+            return;
+        if (st->blob_write(st, h, fx->bytes.p, fx->bytes.n) != 0) {
+            st->blob_abort(st, h);
+            return;
+        }
+        pt_sha256_init(&sh);
+        pt_sha256_update(&sh, fx->bytes.p, fx->bytes.n);
+        pt_sha256_final(&sh, d);
+        memcpy(rt->io_blob, "sha256:", 7);
+        for (i = 0; i < 32; i++) {
+            rt->io_blob[7 + 2 * i] = digits[d[i] >> 4];
+            rt->io_blob[8 + 2 * i] = digits[d[i] & 15];
+        }
+        rt->io_blob[71] = 0;
+        rt->io_ok = st->blob_commit(st, h, rt->io_blob + 7) == 0;
+        return;
+    }
     if (fx->kind == PT_FX_LIVE) {
         if (fx->bytes.n)
             st->live_put(st, fx->task, fx->bytes.p, fx->bytes.n);
@@ -318,6 +342,8 @@ static void io_done(pt_rt *rt)
         if (rt->io_ok)
             rt->log_end += rt->io.bytes.n;
         pt_fx_done(rt->a, rt->io.id, rt->io_ok ? NULL : rt->io_error);
+    } else if (rt->io.kind == PT_FX_BLOB) {
+        pt_fx_blob(rt->a, rt->io.id, rt->io_ok ? pt_strz(rt->io_blob) : PT_STR_NULL);
     }
 }
 
@@ -346,6 +372,8 @@ static void start_io(pt_rt *rt, const pt_fx *fx)
         rt->io_pending = true;
     } else if (fx->kind == PT_FX_COMMIT) {
         pt_fx_done(rt->a, fx->id, "could not schedule the durable write");
+    } else if (fx->kind == PT_FX_BLOB) {
+        pt_fx_blob(rt->a, fx->id, PT_STR_NULL); /* kept inline */
     }
 }
 
@@ -407,6 +435,7 @@ static void handle(pt_rt *rt, const pt_fx *fx)
         rt->sleeps[rt->nsleeps++].until = fx->until;
         break;
     case PT_FX_LIVE:
+    case PT_FX_BLOB:
         start_io(rt, fx);
         break;
     case PT_FX_GATE:
@@ -626,4 +655,35 @@ bool pt_rt_close(pt_rt *rt)
     }
     finish_io(rt, true);
     return pt_closed(rt->a);
+}
+
+bool pt_rt_read_blob(void *store, pt_str ref, pt_arena *ar, pt_str *out)
+{
+    pt_store *st = (pt_store *)store;
+    char hex[65], chunk[16384];
+    pt_buf b;
+    uint64_t off = 0;
+    size_t got, i;
+    bool ok = false;
+    if (!st->blob_read || ref.n != 71 || memcmp(ref.p, "sha256:", 7) != 0)
+        return false;
+    for (i = 0; i < 64; i++) {
+        char c = ref.p[7 + i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+            return false;
+        hex[i] = c;
+    }
+    hex[64] = 0;
+    pt_buf_init(&b, pt_sys_allocator());
+    while ((ok = st->blob_read(st, hex, off, chunk, sizeof chunk, &got) == 0) && got) {
+        pt_buf_put(&b, chunk, got);
+        off += got;
+    }
+    ok = ok && !b.oom;
+    if (ok) {
+        *out = pt_arena_dup(ar, pt_buf_str(&b));
+        ok = !ar->oom;
+    }
+    pt_buf_free(&b);
+    return ok;
 }

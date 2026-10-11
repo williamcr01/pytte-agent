@@ -100,6 +100,7 @@ typedef struct input {
     uint32_t task; /* approve: the tool task */
     bool yes;      /* approve: the answer */
     pt_str req, text; /* approve: text is the reason */
+    pt_str blob;      /* "sha256:…" when the log holds text as a blob */
     pt_arena a;
 } input;
 
@@ -122,11 +123,19 @@ typedef struct claim {
     int64_t pid, opened;
 } claim;
 
+/* Prompts this long are stored once, as a blob, and the log's records
+ * refer to it (section 6.5): the input record is rewritten as it is
+ * placed and finished, and the user entry repeats it. */
+#define PT_BLOB_MIN 16384
+
 typedef struct sub { /* a submission waiting for its commit */
     input_kind kind;
     pt_str text, req;
     uint32_t task; /* approve */
     bool yes;
+    pt_str blob;      /* the stored text's ref, once PT_FX_BLOB completed */
+    uint32_t blob_fx; /* the PT_FX_BLOB in flight */
+    bool blob_tried;  /* done storing (blob empty: it failed; keep the text inline) */
 } sub;
 
 #define PT_FXQ 32

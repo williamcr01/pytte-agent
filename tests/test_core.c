@@ -33,7 +33,19 @@ typedef struct host {
     pt_str body;              /* answer with this SSE body instead of the faux script */
     uint32_t snapshots;       /* live files written */
     pt_buf longest;           /* the longest one */
+    pt_buf blob;              /* the one blob this host keeps, and its ref */
+    char blob_ref[72];
+    bool no_blobs;            /* a store without blobs */
 } host;
+
+static bool h_blob(void *ud, pt_str ref, pt_arena *ar, pt_str *out)
+{
+    host *h = (host *)ud;
+    if (!h->blob.n || !pt_str_eqz(ref, h->blob_ref))
+        return false;
+    *out = pt_arena_dup(ar, pt_buf_str(&h->blob));
+    return true;
+}
 
 static int64_t h_now(void *ud)
 {
@@ -84,6 +96,8 @@ static pt_agent *h_agent(host *h)
     o.ud = h;
     o.config.model = PT_S("faux/faux");
     o.config.live_interval_ms = 1;
+    o.blob = h_blob;
+    o.blob_ud = h;
     h->a = pt_new(&o);
     return h->a;
 }
@@ -98,6 +112,7 @@ static void h_init(host *h, const char *script)
     pt_buf_init(&h->last_request, T_AL);
     pt_buf_init(&h->text, T_AL);
     pt_buf_init(&h->longest, T_AL);
+    pt_buf_init(&h->blob, T_AL);
     h->script = script;
     h->now = 1760000000000;
 }
@@ -112,6 +127,7 @@ static void h_free(host *h)
     pt_buf_free(&h->last_request);
     pt_buf_free(&h->text);
     pt_buf_free(&h->longest);
+    pt_buf_free(&h->blob);
 }
 
 static void answer(host *h, const pt_fx *fx)
@@ -185,6 +201,28 @@ static bool h_run(host *h)
             break;
         case PT_FX_CANCEL:
             h->cancelled = fx.cancel;
+            break;
+        case PT_FX_BLOB:
+            if (h->no_blobs) {
+                pt_fx_blob(h->a, fx.id, PT_STR_NULL);
+            } else {
+                static const char digits[] = "0123456789abcdef";
+                unsigned char d[32];
+                pt_sha256 sh;
+                int k;
+                pt_buf_reset(&h->blob);
+                pt_buf_puts(&h->blob, fx.bytes);
+                pt_sha256_init(&sh);
+                pt_sha256_update(&sh, fx.bytes.p, fx.bytes.n);
+                pt_sha256_final(&sh, d);
+                memcpy(h->blob_ref, "sha256:", 7);
+                for (k = 0; k < 32; k++) {
+                    h->blob_ref[7 + 2 * k] = digits[d[k] >> 4];
+                    h->blob_ref[8 + 2 * k] = digits[d[k] & 15];
+                }
+                h->blob_ref[71] = 0;
+                pt_fx_blob(h->a, fx.id, pt_strz(h->blob_ref));
+            }
             break;
         default: /* no tools here */
             CHECK(!"unexpected effect");
@@ -393,6 +431,62 @@ static void test_torn_tail(void)
     CHECK(h_reload(&h) == PT_LOAD_CORRUPT);
     h_free(&h);
     pt_buf_free(&full);
+    pt_buf_free(&want);
+    pt_buf_free(&got);
+}
+
+/* A prompt of PT_BLOB_MIN bytes or more is stored once, as a blob, and
+ * read back on load; a store without blobs keeps it inline. */
+static bool has(pt_str hay, pt_str needle)
+{
+    size_t i;
+    for (i = 0; i + needle.n <= hay.n; i++)
+        if (memcmp(hay.p + i, needle.p, needle.n) == 0)
+            return true;
+    return false;
+}
+
+static void test_big_prompt(void)
+{
+    static char text[20000];
+    host h;
+    pt_buf want, got;
+    pt_str needle = {text + 5000, 64};
+    size_t i;
+    for (i = 0; i < sizeof text - 1; i++)
+        text[i] = (char)('a' + (i * 7) % 26);
+    pt_buf_init(&want, T_AL);
+    pt_buf_init(&got, T_AL);
+    h_init(&h, hello);
+    h_create(&h);
+    h_submit(&h, text, NULL);
+    h_run(&h);
+    CHECK(h.done == 1);
+    CHECK(h.blob.n == sizeof text - 1);
+    CHECK(!has(pt_buf_str(&h.log), needle)); /* not in the log */
+    CHECK(has(pt_buf_str(&h.log), pt_strz(h.blob_ref)));
+    CHECK(has(pt_buf_str(&h.last_request), needle)); /* the model saw it */
+    transcript(h.a, &want);
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    transcript(h.a, &got);
+    CHECK_SAME(pt_buf_str(&got), pt_buf_str(&want));
+    pt_buf_reset(&h.blob); /* gone: the log cannot be read */
+    CHECK(h_reload(&h) == PT_LOAD_CORRUPT);
+    CHECK(strstr(pt_error(h.a), "blob") != NULL);
+    h_free(&h);
+
+    h_init(&h, hello);
+    h.no_blobs = true;
+    h_create(&h);
+    h_submit(&h, text, NULL);
+    h_run(&h);
+    CHECK(h.done == 1);
+    CHECK(has(pt_buf_str(&h.log), needle));
+    CHECK(!has(pt_buf_str(&h.log), PT_S("\"blob\"")));
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    transcript(h.a, &got);
+    CHECK_SAME(pt_buf_str(&got), pt_buf_str(&want));
+    h_free(&h);
     pt_buf_free(&want);
     pt_buf_free(&got);
 }
@@ -663,6 +757,7 @@ int main(void)
     RUN(test_ask);
     RUN(test_torn_tail);
     RUN(test_retry);
+    RUN(test_big_prompt);
     RUN(test_tool_call_without_tools);
     RUN(test_fatal_error);
     RUN(test_queue_and_req);

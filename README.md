@@ -94,7 +94,8 @@ text that must match exactly once, and refuses when the file changed since
 the model last read it. The model sees up to 16 KB of output: the first
 4 KB and the last 12 KB. Longer output is kept whole in the session's
 `blobs/` (content-addressed, SHA-256), and `read_output` pages through it
-by call ID and byte offset. Arguments are checked against each tool's JSON
+by call ID and byte offset. A prompt of 16 KB or more (a big paste) is
+stored the same way, once, and the log refers to it. Arguments are checked against each tool's JSON
 schema before anything runs.
 
 Permissions (`--permission-mode`, `$PYTTE_PERMISSION_MODE` or

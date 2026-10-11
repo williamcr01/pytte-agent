@@ -365,6 +365,8 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     ao.credentials = credentials;
     ao.on_event = on_event;
     ao.ud = ud;
+    ao.blob = pt_rt_read_blob;
+    ao.blob_ud = st;
     ao.config.model = o->model ? pt_strz(o->model) : PT_STR_NULL;
     ao.config.reasoning = o->reasoning;
     ao.config.max_tokens = o->max_tokens;

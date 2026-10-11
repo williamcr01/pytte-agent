@@ -74,6 +74,8 @@ typedef struct pt_rt_out {
 void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r);
 /* The agent the runtime drives (for a tool's lookups: pt_doc, the cwd). */
 pt_agent *pt_rt_agent(pt_rt *rt);
+/* pt_opts.blob for a store (blob_ud: the pt_store). */
+bool pt_rt_read_blob(void *store, pt_str ref, pt_arena *ar, pt_str *out);
 
 /* Event-loop hooks for calls that end later. A timer fires once at `at`
  * (wall-clock ms). A watch fires whenever fd is readable, until removed.

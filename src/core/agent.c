@@ -496,7 +496,16 @@ static void write_placement(pt_agent *a, input *in)
     pt_write_input(w, &placed);
     pt_core_entry_begin(a, entry_id, "user");
     pt_jw_key(w, "content");
-    pt_jw_str(w, in->text);
+    if (in->blob.n) {
+        pt_jw_obj(w);
+        pt_jw_key(w, "blob");
+        pt_jw_str(w, in->blob);
+        pt_jw_key(w, "size");
+        pt_jw_uint(w, in->text.n);
+        pt_jw_obj_end(w);
+    } else {
+        pt_jw_str(w, in->text);
+    }
     pt_jw_key(w, "input");
     pt_jw_uint(w, in->id);
     pt_core_entry_end(a);
@@ -509,11 +518,23 @@ static void write_placement(pt_agent *a, input *in)
     pt_write_task(w, &t);
 }
 
-static void build_submit(pt_agent *a)
+/* Commit the oldest submission: true when an effect was queued, false
+ * while its text is still being stored as a blob. */
+static bool build_submit(pt_agent *a)
 {
     sub s = a->subs[0];
     input in;
     bool place = !active_run(a) && !first_queued(a);
+    if (s.kind == INK_USER && s.text.n >= PT_BLOB_MIN && !s.blob_tried) {
+        pt_fx fx;
+        if (s.blob_fx)
+            return false;
+        memset(&fx, 0, sizeof fx);
+        fx.kind = PT_FX_BLOB;
+        fx.id = a->subs[0].blob_fx = pt_core_new_fx(a);
+        fx.bytes = s.text; /* in subs_a until this submission is committed */
+        return pt_core_queue(a, &fx, PT_STR_NULL);
+    }
     memset(&in, 0, sizeof in);
     pt_core_commit_begin(a, 0);
     in.id = pt_core_new_id(a);
@@ -522,6 +543,7 @@ static void build_submit(pt_agent *a)
     in.req = s.req;
     in.task = s.task;
     in.yes = s.yes;
+    in.blob = s.blob;
     in.status = IN_QUEUED;
     if (place && s.kind == INK_USER)
         write_placement(a, &in);
@@ -531,6 +553,21 @@ static void build_submit(pt_agent *a)
     memmove(a->subs, a->subs + 1, sizeof(sub) * --a->nsubs);
     if (!a->nsubs)
         pt_arena_reset(&a->subs_a);
+    return true;
+}
+
+void pt_fx_blob(pt_agent *a, uint32_t fx, pt_str ref)
+{
+    uint32_t i;
+    for (i = 0; i < a->nsubs; i++)
+        if (a->subs[i].blob_fx == fx) {
+            a->subs[i].blob_fx = 0;
+            a->subs[i].blob_tried = true;
+            a->subs[i].blob = ref.n ? pt_arena_dup(&a->subs_a, ref) : PT_STR_NULL;
+            if (a->subs_a.oom) /* inline, then */
+                a->subs[i].blob = PT_STR_NULL;
+            return;
+        }
 }
 
 static void build_place(pt_agent *a, input *in)
@@ -573,10 +610,8 @@ static bool step(pt_agent *a)
     if (a->closing) {
         /* Input accepted while the opening commit was pending must still
          * reach the log. Leave its run pending for the next host. */
-        if (a->nsubs) {
-            build_submit(a);
-            return true;
-        }
+        if (a->nsubs)
+            return build_submit(a);
         if (!a->want_close) {
             a->closed = true;
             return false;
@@ -584,10 +619,8 @@ static bool step(pt_agent *a)
         build_close(a);
         return true;
     }
-    if (a->nsubs) {
-        build_submit(a);
+    if (a->nsubs && build_submit(a))
         return true;
-    }
     if (a->want_compact) {
         a->want_compact = false;
         if (!active_run(a) && pt_compact_possible(a)) {

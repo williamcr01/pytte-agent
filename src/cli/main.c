@@ -595,9 +595,29 @@ static int load_log(pt_agent *a, const char *id, const char *path)
     return code;
 }
 
+/* pt_opts.blob for a reader: blob_ud is the session directory. The
+ * owner's lock is left alone, as for the log. */
+static bool read_blob(void *dir, pt_str ref, pt_arena *ar, pt_str *out)
+{
+    char path[4300];
+    char *p;
+    size_t n, i;
+    if (ref.n != 71 || memcmp(ref.p, "sha256:", 7) != 0)
+        return false;
+    for (i = 7; i < ref.n; i++)
+        if (!((ref.p[i] >= '0' && ref.p[i] <= '9') || (ref.p[i] >= 'a' && ref.p[i] <= 'f')))
+            return false;
+    snprintf(path, sizeof path, "%s/blobs/%.2s/%.62s", (const char *)dir, ref.p + 7, ref.p + 9);
+    if (!(p = pt_sys_read_file(path, &n)))
+        return false;
+    *out = pt_arena_dup(ar, (pt_str){p, n});
+    free(p);
+    return !ar->oom;
+}
+
 static int cmd_log(const opts *o)
 {
-    char root[4096], id[64], path[4200];
+    char root[4096], id[64], dir[4200], path[4300];
     pt_opts ao;
     pt_agent *a;
     pt_entry_view v;
@@ -609,10 +629,13 @@ static int cmd_log(const opts *o)
         snprintf(id, sizeof id, "%s", o->id);
     else if (!cli_sessions_list(NULL, &id, 1))
         die("no sessions in", root);
-    snprintf(path, sizeof path, "%s/%s/log.jsonl", root, id);
+    snprintf(dir, sizeof dir, "%s/%s", root, id);
+    snprintf(path, sizeof path, "%s/log.jsonl", dir);
     memset(&ao, 0, sizeof ao);
     ao.alloc = pt_sys_allocator();
     ao.all_epochs = o->all_epochs;
+    ao.blob = read_blob;
+    ao.blob_ud = dir;
     a = pt_new(&ao);
     if ((code = load_log(a, id, path)) != 0) {
         pt_free(a);
@@ -656,8 +679,8 @@ static bool contains(pt_str s, const char *needle)
 
 typedef struct ls_row {
     pt_arena ar; /* reset per session */
-    pt_str cwd, title;
-    const pt_json *claim; /* the last claim seen */
+    pt_str cwd, title, title_blob; /* title_blob: a large prompt's ref */
+    const pt_json *claim;          /* the last claim seen */
 } ls_row;
 
 /* Head: the session record (cwd) and the first user entry (title). */
@@ -672,8 +695,13 @@ static bool ls_head(void *ud, pt_str line)
         pt_str t = pt_json_gets(c, "t", &r->ar);
         if (pt_str_eqz(t, "session"))
             r->cwd = pt_json_gets(c, "cwd", &r->ar);
-        else if (pt_str_eqz(t, "entry") && pt_str_eqz(pt_json_gets(c, "kind", &r->ar), "user") && !r->title.p)
-            r->title = pt_json_gets(pt_json_get(c, "data"), "content", &r->ar);
+        else if (pt_str_eqz(t, "entry") && pt_str_eqz(pt_json_gets(c, "kind", &r->ar), "user") &&
+                   !r->title.p) {
+            const pt_json *content = pt_json_get(pt_json_get(c, "data"), "content");
+            if (pt_json_is(content, PT_J_OBJ))
+                r->title_blob = pt_json_gets(content, "blob", &r->ar);
+            r->title = pt_json_str(content, &r->ar);
+        }
     }
     return !r->title.p;
 }
@@ -756,6 +784,7 @@ static int cmd_ls(void)
             continue;
         }
         pt_arena_reset(&r.ar);
+        r.title_blob = PT_STR_NULL;
         r.cwd = r.title = PT_STR_NULL;
         r.claim = NULL;
         got = pread(fd, peek, LS_PEEK, 0);
@@ -769,6 +798,19 @@ static int cmd_ls(void)
             each_line(peek, (size_t)got, ls_tail, &r);
         }
         close(fd);
+        if (r.title_blob.n == 71) { /* a large prompt: its first bytes */
+            char bp[4400];
+            int bf;
+            snprintf(bp, sizeof bp, "%s/%s/blobs/%.2s/%.62s", root, ids[i], r.title_blob.p + 7,
+                     r.title_blob.p + 9);
+            if ((bf = open(bp, O_RDONLY | O_CLOEXEC)) >= 0) {
+                char *head = (char *)pt_arena_alloc(&r.ar, 256);
+                got = head ? pread(bf, head, 256, 0) : -1;
+                if (got > 0)
+                    r.title = (pt_str){head, (size_t)got};
+                close(bf);
+            }
+        }
         ls_status(&r, status, sizeof status);
         /* the first line of the first prompt, cut on a character */
         t = r.title.p ? r.title : PT_S("(no prompts)");

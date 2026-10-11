@@ -202,6 +202,8 @@ static bool w_stop(void *ud)
     return false;
 }
 
+static pt_str big_prompt(void);
+
 /* Where needle starts in s, or NULL. */
 static const char *find(pt_str s, const char *needle)
 {
@@ -336,6 +338,8 @@ static pt_rt_result client(world *w, const scenario *sc)
     o.now_ms = w_now;
     o.random = w_random;
     o.ud = w;
+    o.blob = pt_rt_read_blob;
+    o.blob_ud = w->store;
     o.on_event = w_event;
     o.config.model = PT_S("faux/faux");
     o.config.live_interval_ms = 1;
@@ -381,7 +385,7 @@ static pt_rt_result client(world *w, const scenario *sc)
         pt_input in;
         char req[8] = {'p', (char)('0' + i), 0};
         memset(&in, 0, sizeof in);
-        in.text = pt_strz(sc->prompts[i]);
+        in.text = strcmp(sc->prompts[i], "@big") == 0 ? big_prompt() : pt_strz(sc->prompts[i]);
         in.req = pt_strz(req);
         CHECK(pt_submit(a, &in));
     }
@@ -412,6 +416,8 @@ static void outcome(world *w, pt_buf *out)
     o.alloc = T_AL;
     o.now_ms = w_now;
     o.ud = w;
+    o.blob = pt_rt_read_blob;
+    o.blob_ud = w->store;
     a = pt_new(&o);
     memset(&rc, 0, sizeof rc);
     rc.store = w->store;
@@ -461,6 +467,8 @@ static void outcome(world *w, pt_buf *out)
             }
         } else {
             pt_buf_puts(out, v.msg->text);
+            if (find(v.raw, "\"blob\":\"sha256:"))
+                pt_buf_putz(out, " (in a blob)");
         }
         pt_buf_putc(out, '\n');
     }
@@ -637,6 +645,17 @@ static void exhaustive(const scenario *sc)
     "labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco "     \
     "laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit."
 
+/* "@big" in a scenario's prompts: past PT_BLOB_MIN, so stored as a blob. */
+static pt_str big_prompt(void)
+{
+    static char text[20000];
+    size_t i;
+    if (!text[0])
+        for (i = 0; i < sizeof text; i++)
+            text[i] = i % 64 == 63 ? '\n' : (char)('a' + (i / 64) % 26);
+    return (pt_str){text, sizeof text};
+}
+
 static const scenario scenarios[] = {
     {"answer",
      "{\"chunk\":7,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Easy.\"},"
@@ -691,6 +710,10 @@ static const scenario scenarios[] = {
      "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Next.\"}]}]}",
      {"look twice", "then this", NULL}, ABORT_TOOL, 0, TOOLS_AUTO, 0},
+    {"big_prompt",
+     "{\"chunk\":9,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"A long read.\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"And a short one.\"}]}]}",
+     {"@big", "short", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0},
     {"big_output",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"big\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"That was long.\"}]}]}",
@@ -874,6 +897,8 @@ static void test_step(void)
         o.alloc = T_AL;
         o.now_ms = w_now;
         o.ud = &w;
+        o.blob = pt_rt_read_blob;
+        o.blob_ud = w.store;
         a = pt_new(&o);
         memset(&rc, 0, sizeof rc);
         rc.store = w.store;
@@ -925,6 +950,8 @@ static void test_step(void)
         o.alloc = T_AL;
         o.now_ms = w_now;
         o.ud = &w;
+        o.blob = pt_rt_read_blob;
+        o.blob_ud = w.store;
         o.config.model = PT_S("faux/faux");
         a = pt_new(&o);
         memset(&rc, 0, sizeof rc);
