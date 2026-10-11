@@ -87,6 +87,11 @@ struct pt_http_driver {
     void (*free)(pt_http_driver *d);
 };
 
+/* Uses system libcurl and its certificate trust configuration. Captures
+ * SSL_CERT_FILE / SSL_CERT_DIR at creation; copied paths live until free.
+ * OpenSSL's hashed CA directory is preferred when available, with a verified
+ * bundle retry before any request bytes are sent. Explicit files and proxy
+ * configurations keep the bundle path. Driver use has one owner thread. */
 pt_http_driver *pt_http_curl_new(void);
 /* Answers every request from a faux script (see src/ai/faux.c). */
 pt_http_driver *pt_http_faux_new(pt_str script);

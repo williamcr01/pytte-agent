@@ -16,7 +16,7 @@ into a summary and carries on, so sessions outlive any one window.
 
 ## Build
 
-Needs a C99 compiler, make, and libcurl with headers.
+Needs a C99 compiler, make, and libcurl 7.84+ with headers.
 
 ```sh
 make            # build/pytte, build/pytte-ai and the libraries
@@ -36,6 +36,18 @@ The default build loads the system libcurl when the first real HTTP request
 starts. Offline sessions and terminal startup do not load its TLS dependency
 tree. Use `make CURL_LINK=direct BUILD=build/direct` for a custom or static
 libcurl. See [PERFORMANCE.md](PERFORMANCE.md) for reproducible measurements.
+
+For distribution, `make release` builds the native 64-bit executable
+`build/release/pytte` with system curl/TLS. It bundles neither library.
+
+With OpenSSL, pytte prefers a hashed system certificate directory so only
+needed roots are loaded. It uses curl's configured directory, or
+`/etc/ssl/certs` for the conventional `/etc/ssl/certs/ca-certificates.crt` and
+`/etc/ssl/cert.pem` system bundles. Explicit `SSL_CERT_FILE` overrides and
+proxy configurations retain the bundle; `SSL_CERT_DIR` chooses a directory.
+The paths are captured when the HTTP driver is created. Certificate and
+hostname verification remain enabled, with a bundle fallback before any
+request bytes are sent. Other TLS backends keep their normal trust handling.
 
 ## pytte
 

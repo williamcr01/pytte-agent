@@ -48,7 +48,7 @@ obj       = $(patsubst %.c,$(BUILD)/obj/%.o,$(1))
 PYTTE_AI_OBJ := $(call obj,src/drv/sys_posix.c src/drv/http_faux.c $(CURL_SRC) src/cli/pytte_ai.c)
 PYTTE_OBJ    := $(call obj,$(SYS_SRC) $(CURL_SRC) $(TUI_SRC) $(CLI_SRC) $(APP_SRC))
 
-.PHONY: all release test crash screen pty-asan portable fuzz clean fixtures-update models width bench
+.PHONY: all release test crash screen pty-asan portable fuzz clean fixtures-update models width bench bench-http test-https
 all: $(BUILD)/pytte $(BUILD)/pytte-ai $(BUILD)/libpytte-ai.a $(BUILD)/libpytte.a $(BUILD)/replay
 
 # Keep normal builds debuggable. The distributable binaries use the same
@@ -58,12 +58,31 @@ release:
 	$(STRIP) $(BUILD)/release/pytte $(BUILD)/release/pytte-ai
 
 # Offline optimized workloads; counters are in the harness, not the core.
+BENCH_CFLAGS ?= -O2 -g
 $(BUILD)/bench/perf: tests/bench_perf.c $(LIB_SRC) src/tui/input.c src/tui/text.c $(wildcard include/*.h src/*/*.h)
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(WARN) -O2 -g $(CPPFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) src/tui/input.c src/tui/text.c -o $@
 
 bench: $(BUILD)/bench/perf $(BUILD)/pytte
 	@for w in core conversation stream history layout editing; do ./$(BUILD)/bench/perf $$w 10 || exit 1; done
+
+$(BUILD)/bench/http: tests/bench_http.c $(LIB_SRC) $(SYS_SRC) $(CURL_SRC) src/cli/session.c $(CLI_SRC) $(wildcard include/*.h src/*/*.h) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(WARN) $(BENCH_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) $(SYS_SRC) $(CURL_SRC) src/cli/session.c $(CLI_SRC) $(CURL_LDLIBS) -pthread $(LDFLAGS) -o $@
+
+bench-http: $(BUILD)/bench/http
+	python3 scripts/bench_http.py --bin current=$(BUILD)/bench/http --directory-build current --output $(BUILD)/bench/http.json
+
+$(BUILD)/bench/http-defaults: tests/bench_http.c tests/http_curl_defaults.c $(LIB_SRC) $(SYS_SRC) $(CURL_SRC) src/cli/session.c $(CLI_SRC) $(wildcard include/*.h src/*/*.h) Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(WARN) $(BENCH_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) $(SYS_SRC) tests/http_curl_defaults.c src/cli/session.c $(CLI_SRC) $(CURL_LIBS) -pthread $(LDFLAGS) -o $@
+
+$(BUILD)/bench/tui-dns.so: tests/http_tui_dns.c Makefile
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(WARN) $(BENCH_CFLAGS) -fPIC -shared $< -ldl -pthread -o $@
+
+test-https: $(BUILD)/bench/http $(BUILD)/bench/http-defaults $(BUILD)/pytte-ai
+	python3 scripts/bench_http.py --bin current=$(BUILD)/bench/http --ai-bin current=$(BUILD)/pytte-ai --defaults-bin $(BUILD)/bench/http-defaults --verify-only --output $(BUILD)/bench/https-checks.json
 
 $(BUILD)/obj/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -89,6 +108,10 @@ TESTS       := $(patsubst tests/%.c,$(BUILD)/test/%,$(wildcard tests/test_*.c))
 $(BUILD)/test/test_http: tests/test_http.c tests/t.h $(BASE_SRC) src/drv/sys_posix.c $(CURL_SRC) $(wildcard include/*.h src/drv/*.h)
 	@mkdir -p $(dir $@)
 	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(BASE_SRC) src/drv/sys_posix.c $(CURL_SRC) $(CURL_LDLIBS) -pthread -o $@
+
+$(BUILD)/test/test_http_trust: tests/test_http_trust.c tests/t.h $(BASE_SRC) src/drv/sys_posix.c $(CURL_SRC) $(wildcard include/*.h src/drv/*.h)
+	@mkdir -p $(dir $@)
+	$(TEST_CC) $(CSTD) $(WARN) $(TEST_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(BASE_SRC) src/drv/sys_posix.c $(CURL_LDLIBS) -pthread -o $@
 
 $(BUILD)/test/%: tests/%.c tests/t.h tests/vt.c $(LIB_SRC) $(SYS_SRC) $(TUI_SRC) $(CLI_SRC) $(wildcard include/*.h src/*/*.h src/*/*.inc)
 	@mkdir -p $(dir $@)

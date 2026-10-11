@@ -3,9 +3,12 @@
 #include "drv/drv.h"
 
 #include <curl/curl.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #ifndef PT_CURL_LINKED
 #include <dlfcn.h>
@@ -138,6 +141,7 @@ typedef struct xfer {
     struct curl_slist *hdrs;
     pt_http_sink sink;
     bool head_sent;
+    bool directory_ca;
     char retry_after[32];
     char err[CURL_ERROR_SIZE];
 } xfer;
@@ -145,8 +149,121 @@ typedef struct xfer {
 typedef struct curl_drv {
     pt_http_driver vt;
     CURLM *m;
+    CURL *first; /* Trust probe becomes the first transfer's easy handle. */
     xfer *list;
+    /* Owned, contiguous trust paths; stable until the driver is freed.
+     * Environment overrides are captured once, when the driver is created. */
+    pt_buf trust;
+    const char *ca_file, *ca_path, *ca_seed, *original_path;
+    bool custom_file, custom_path;
 } curl_drv;
+
+static bool hash_cert_name(const char *name)
+{
+    unsigned i;
+    if (strlen(name) != 10 || name[8] != '.' || name[9] != '0')
+        return false;
+    for (i = 0; i < 8; i++)
+        if (!((name[i] >= '0' && name[i] <= '9') ||
+              (name[i] >= 'a' && name[i] <= 'f')))
+            return false;
+    return true;
+}
+
+static bool proxy_configured(void)
+{
+    static const char *const vars[] = {"http_proxy", "https_proxy", "HTTPS_PROXY",
+                                      "all_proxy", "ALL_PROXY"};
+    unsigned i;
+    for (i = 0; i < sizeof vars / sizeof vars[0]; i++) {
+        const char *proxy = getenv(vars[i]);
+        if (proxy && *proxy)
+            return true;
+    }
+    return false;
+}
+
+static bool trust_init(curl_drv *d, CURL *e)
+{
+    const char *file = getenv("SSL_CERT_FILE"), *path = getenv("SSL_CERT_DIR");
+    char *default_file = NULL, *default_path = NULL;
+    struct curl_tlssessioninfo *tls = NULL;
+    size_t fn, pn, size, seed_at;
+    bool directory = false;
+    d->custom_file = file && *file;
+    d->custom_path = path && *path;
+    /* version_info queries every optional dependency's version and faults
+     * otherwise unused pages. These three queries use only the easy handle. */
+    if (curl_easy_getinfo(e, CURLINFO_CAINFO, &default_file) != CURLE_OK ||
+        curl_easy_getinfo(e, CURLINFO_CAPATH, &default_path) != CURLE_OK ||
+        curl_easy_getinfo(e, CURLINFO_TLS_SSL_PTR, &tls) != CURLE_OK)
+        return false;
+    if (!d->custom_file)
+        file = default_file;
+    if (!d->custom_path)
+        path = default_path;
+#ifndef __APPLE__
+    /* Some Unix curl packages configure only the bundle, while the native
+     * OpenSSL store also has /etc/ssl/certs. Use that standard system store
+     * only for these system bundle locations, never for an explicit file. */
+    if (!d->custom_file && !d->custom_path && !path && file &&
+        (!strcmp(file, "/etc/ssl/certs/ca-certificates.crt") ||
+         !strcmp(file, "/etc/ssl/cert.pem"))) {
+        struct stat st;
+        if (stat(file, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 && access(file, R_OK) == 0)
+            path = "/etc/ssl/certs";
+    }
+    /* OpenSSL looks up hashed directory entries on demand. Preserve native
+     * trust handling on other backends/platforms and explicit CA files. */
+    directory = !d->custom_file && path && *path && tls &&
+                tls->backend == CURLSSLBACKEND_OPENSSL && !proxy_configured();
+    /* Proxy CONNECT requests can precede the origin TLS handshake. Keep
+     * the original bundle there so fallback never replays a sent request. */
+#endif
+    fn = file ? strlen(file) : 0;
+    pn = path ? strlen(path) : 0;
+    if (fn > SIZE_MAX - 2 || pn > (SIZE_MAX - fn - 2) / 2 ||
+        fn + pn * 2 + 2 > SIZE_MAX - 12)
+        return false;
+    size = fn + pn * 2 + 14;
+    /* Reserve before taking any pointers into the buffer. No trust-path
+     * allocation or directory scan occurs in the transfer/stream loop. */
+    if (!pt_buf_reserve(&d->trust, size))
+        return false;
+    pt_buf_put(&d->trust, file ? file : "", fn + 1);
+    d->ca_file = file ? d->trust.p : NULL;
+    pt_buf_put(&d->trust, path ? path : "", pn + 1);
+    d->ca_path = path ? d->trust.p + fn + 1 : NULL;
+    /* The fallback restores curl's original directory, which can be NULL.
+     * Default paths from getinfo are static; explicit paths are owned here. */
+    d->original_path = d->custom_path ? d->ca_path : default_path;
+    seed_at = d->trust.n;
+    if (directory) {
+        DIR *dir = opendir(path);
+        struct dirent *entry;
+        if (!dir)
+            return true; /* Keep libcurl's original CA configuration. */
+        while ((entry = readdir(dir))) {
+            struct stat st;
+            char *seed = d->trust.p + seed_at;
+            if (!hash_cert_name(entry->d_name))
+                continue;
+            memcpy(seed, path, pn);
+            seed[pn] = '/';
+            memcpy(seed + pn + 1, entry->d_name, 11);
+            if (stat(seed, &st) == 0 && S_ISREG(st.st_mode) && access(seed, R_OK) == 0) {
+                /* Use one certificate from the same trusted directory as
+                 * CAINFO: curl 8.22 restores its full bundle for NULL CAINFO.
+                 * All other roots remain available through CAPATH. */
+                d->ca_seed = seed;
+                d->trust.n += pn + 12;
+                break;
+            }
+        }
+        closedir(dir);
+    }
+    return true;
+}
 
 static void send_head(xfer *x)
 {
@@ -208,7 +325,8 @@ static void *start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sin
     char *h = NULL;
     if (!x)
         return NULL;
-    x->e = curl_easy_init();
+    x->e = d->first ? d->first : curl_easy_init();
+    d->first = NULL;
     if (!x->e) {
         free(x);
         return NULL;
@@ -236,10 +354,20 @@ static void *start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sin
     }
     free(h);
     h = NULL;
-    if ((curl_off_t)req->body.n < 0 || (size_t)(curl_off_t)req->body.n != req->body.n)
-        goto fail;
+    {
+        curl_off_t size = (curl_off_t)req->body.n;
+        if (size < 0 || (size_t)size != req->body.n)
+            goto fail;
+    }
 #define SET(option, value) if (curl_easy_setopt(x->e, option, value) != CURLE_OK) goto fail
     SET(CURLOPT_URL, req->url);
+    if (d->ca_seed && proxy_configured())
+        d->ca_seed = NULL; /* libcurl can read changed proxy variables later. */
+    if (d->ca_seed || d->custom_file)
+        SET(CURLOPT_CAINFO, d->ca_seed ? d->ca_seed : d->ca_file);
+    if (d->ca_seed || d->custom_path)
+        SET(CURLOPT_CAPATH, d->ca_path);
+    x->directory_ca = d->ca_seed != NULL;
     SET(CURLOPT_CUSTOMREQUEST, req->method);
     SET(CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req->body.n);
     /* The HTTP contract keeps request bytes alive until done/cancel. Curl
@@ -279,6 +407,30 @@ static void cancel(pt_http_driver *vd, void *h)
     unlink_xfer((curl_drv *)vd, (xfer *)h);
 }
 
+static bool retry_ca_file(curl_drv *d, xfer *x, CURLcode result)
+{
+    long sent = 0;
+    curl_off_t uploaded = 0;
+    if (!x->directory_ca || x->head_sent ||
+        (result != CURLE_PEER_FAILED_VERIFICATION && result != CURLE_SSL_CACERT_BADFILE))
+        return false;
+    if (curl_easy_getinfo(x->e, CURLINFO_REQUEST_SIZE, &sent) != CURLE_OK || sent ||
+        curl_easy_getinfo(x->e, CURLINFO_SIZE_UPLOAD_T, &uploaded) != CURLE_OK || uploaded)
+        return false;
+    x->directory_ca = false;
+    /* A distro's CA directory can be incomplete or stale. Retry the original
+     * bundle once, with verification still enabled. These failures occur
+     * before the HTTPS request is sent; request bytes remain borrowed. */
+    if (curl_multi_remove_handle(d->m, x->e) != CURLM_OK ||
+        curl_easy_setopt(x->e, CURLOPT_CAINFO, d->ca_file) != CURLE_OK ||
+        curl_easy_setopt(x->e, CURLOPT_CAPATH, d->original_path) != CURLE_OK ||
+        curl_multi_add_handle(d->m, x->e) != CURLM_OK)
+        return false;
+    d->ca_seed = NULL; /* Reuse verified bundle connections on later turns. */
+    x->err[0] = 0;
+    return true;
+}
+
 static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     curl_drv *d = (curl_drv *)vd;
@@ -308,18 +460,24 @@ static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfd
         return -1;
     while ((msg = curl_multi_info_read(d->m, &left))) {
         xfer *x = NULL;
+        CURLcode result;
         if (msg->msg != CURLMSG_DONE)
             continue;
+        result = msg->data.result; /* Removing a handle invalidates msg. */
         for (x = d->list; x && x->e != msg->easy_handle; x = x->next)
             ;
         if (!x)
             continue;
-        if (msg->data.result == CURLE_OK) {
+        if (retry_ca_file(d, x, result)) {
+            running++; /* The retried transfer starts on the next pump. */
+            continue;
+        }
+        if (result == CURLE_OK) {
             send_head(x);
             if (x->sink.done)
                 x->sink.done(x->sink.ud, NULL);
         } else if (x->sink.done) {
-            x->sink.done(x->sink.ud, x->err[0] ? x->err : curl_easy_strerror(msg->data.result));
+            x->sink.done(x->sink.ud, x->err[0] ? x->err : curl_easy_strerror(result));
         }
         unlink_xfer(d, x);
     }
@@ -332,6 +490,9 @@ static void drv_free(pt_http_driver *vd)
     while (d->list)
         unlink_xfer(d, d->list);
     curl_multi_cleanup(d->m);
+    if (d->first)
+        curl_easy_cleanup(d->first);
+    pt_buf_free(&d->trust);
     free(d);
     curl_release();
 }
@@ -346,8 +507,20 @@ pt_http_driver *pt_http_curl_new(void)
         curl_release();
         return NULL;
     }
+    pt_buf_init(&d->trust, pt_sys_allocator());
+    d->first = curl_easy_init();
+    if (!d->first || !trust_init(d, d->first)) {
+        if (d->first)
+            curl_easy_cleanup(d->first);
+        pt_buf_free(&d->trust);
+        free(d);
+        curl_release();
+        return NULL;
+    }
     d->m = curl_multi_init();
     if (!d->m) {
+        curl_easy_cleanup(d->first);
+        pt_buf_free(&d->trust);
         free(d);
         curl_release();
         return NULL;

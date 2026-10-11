@@ -1,5 +1,176 @@
 # Performance measurements
 
+<!-- TODO: Investigate a smaller HTTP client to reduce runtime memory use. -->
+
+### Implementation
+
+OpenSSL loads every certificate in a CA bundle into a store. Its hashed
+[CA directory](https://docs.openssl.org/3.6/man3/SSL_CTX_load_verify_locations/)
+loads certificates when needed. The system bundle and `/etc/ssl/certs` on
+this machine contain the same 121 certificate fingerprints. Pytte now
+prefers curl's configured directory, or the native `/etc/ssl/certs` directory
+for the standard Unix bundle locations documented in README.md. This is a
+change in the selected system trust source; distributions with different
+store contents should use `SSL_CERT_FILE` to select their required bundle.
+
+Curl 8.22 restores its compiled-in CA file when CAINFO is NULL. Set CAINFO
+to one readable hashed certificate from the selected directory and CAPATH
+to the directory. All directory roots remain available. If verification or
+CA-file loading fails, restore the original bundle and original CAPATH once.
+Only retry when no request headers or body bytes were sent. Subsequent turns
+use the bundle to retain connection reuse. Proxy configurations and explicit
+CA files use the normal bundle path; Apple and other TLS backends retain their
+native behavior. Verification and crypto defaults, including HTTP/2 and
+post-quantum key exchange, are unchanged.
+
+Trust paths occupy one owned `pt_buf`, reserved before pointers are taken.
+The directory is scanned once per driver. A probe easy handle supplies
+CAINFO, CAPATH and TLS-backend information, then becomes the first transfer's
+handle. This avoids an extra easy-handle allocation and avoids
+`curl_version_info`, which calls optional dependency version functions and
+added roughly 400 KiB of resident pages in the initial implementation.
+The module remains loaded for resolver-thread safety; the multi handle
+continues to reuse connections. No heap trimming or page-discard tricks are
+used. Experiments with lazy binding, smaller upload buffers and heap trimming
+gave little useful improvement on this system.
+
+### Measurements
+
+The standard build remains 64-bit. The stripped release is **375,848 bytes**
+for `pytte` and 178,688 bytes for `pytte-ai`; neither contains libcurl or TLS.
+Measured with installed libcurl 8.22.0, OpenSSL 3.6.4 and glibc 2.44 on an
+Intel i5-1035G7 running Linux x86-64. GCC 16.2.1 built both comparison versions
+with `-O2 -g`; the release uses `-Os -flto` and section garbage collection.
+
+| Actual TUI, median RSS | Before, same compiler flags | After, same compiler flags | Final 64-bit release |
+|---|---:|---:|---:|
+| After first 512-byte HTTPS reply | 13.21 MiB | 12.46 MiB | 12.45 MiB |
+| After 100 short HTTPS turns | 13.73 MiB | 13.07 MiB | 12.99 MiB |
+| After first HTTP/2 reply | 13.26 MiB | 12.58 MiB | 12.57 MiB |
+
+RSS includes resident shared-library pages. Release PSS was 7.46 MiB after
+the first reply and 8.25 MiB after 100 turns in this run; sharing with other
+processes affects those numbers. The terminal guardian's memory is recorded
+separately. The release still exceeds **4–8 MiB RSS**. This experiment saves
+roughly 0.7 MiB with system curl; it does not establish a universal minimum.
+
+DHAT measures the whole agent harness, including system curl/TLS allocations:
+
+| Optimized workload | Allocated bytes, before → after | Backing allocation blocks, before → after | Peak live bytes, before → after |
+|---|---:|---:|---:|
+| Three short HTTPS turns | 4,550,470 → 1,980,945 | 46,538 → 15,262 | 1,569,001 → 1,000,348 |
+| 100 short turns | 34,660,490 → 32,095,913 | 56,382 → 25,203 | 2,178,313 → 1,609,610 |
+| Three 64-KiB replies | 7,478,067 → 4,793,857 | 47,704 → 16,425 | 2,948,866 → 2,265,528 |
+
+The short workload has 67.2% fewer backing allocations and a 36.2% lower
+requested-byte peak. Massif independently measured 1,568,360 → 999,709 peak
+requested heap bytes, plus 269,544 → 127,227 allocator-overhead bytes at those
+snapshots. Both builds retain the same 39,660 bytes in 96 loader/library blocks
+at process exit. Core allocator live bytes reach zero after teardown.
+
+Portable-core counters are unchanged by the driver optimization. At the first
+short reply: 38 allocations, 18 reallocations, 87,952 peak bytes, 68,384 live
+bytes, 47,296 arena-capacity bytes (19,760 used), and 4,608 buffer-capacity
+bytes. At turn 100: 1,924 allocations, 1,538 reallocations, 786,024 peak bytes,
+471,072 live bytes, 355,072 arena-capacity bytes and 8,448 buffer-capacity
+bytes. With three large replies: 86 allocations, 67 reallocations, 987,048
+peak bytes, 783,632 live bytes, 634,640 arena-capacity bytes and 132,096
+buffer-capacity bytes. These are backing allocations, not arena object counts.
+
+| Transport only, median latency | Before | After |
+|---|---:|---:|
+| First short HTTPS reply, after curl initialization | 20.584 ms | 8.547 ms |
+| Third short reply, reused connection | 0.774 ms | 0.965 ms |
+| Third short reply, reconnect | 4.850 ms | 4.787 ms |
+| Third 64-KiB reply | 16.618 ms | 16.704 ms |
+
+The large fixture carries 185,541 wire bytes: about 10.6 MiB/s in both builds.
+The optimization reduces first-handshake work; reused transfers do not show a
+throughput improvement. Full TUI durable completion for the first reply was
+33.215 → 22.161 ms with the same flags. Rendered first text stayed around
+33–34 ms because of the frame schedule. Filesystem commits and scheduling
+contribute timing noise; these local results do not predict provider latency.
+Plain HTTP RSS was essentially unchanged (9,760 → 9,784 KiB in the harness).
+
+The 32-bit experiment reached 10.42 MiB RSS after one reply and 10.94 MiB
+after 100 turns, but its PSS was higher than the 64-bit build on this desktop,
+where other processes share the 64-bit libraries. It is an experiment only;
+64-bit remains the standard.
+
+Validation: strict C99 with GCC and Clang; the complete ASan/UBSan test suite;
+release CLI and PTY checks; and 38 local TLS/trust checks covering TLS 1.2/1.3,
+HTTP/2, certificate/hostname rejection, explicit overrides, fallback, proxies
+and preventing request replay. The trust checks also passed with an
+ASan/UBSan app and harness and in the separate 32-bit build. System libraries
+themselves are not sanitizer-instrumented. No Memcheck result is claimed.
+
+### Reproduction
+
+All native measurements use optimized builds without sanitizers, nine
+samples in three alternating batches, and an excluded warm-up per build and
+batch. Each fixture includes the complete system root set plus a temporary
+local root, as a bundle for the baseline and an equivalent hashed directory
+for the optimized builds. This substitutes the local fixture for the normal
+system store without changing the anchor set between builds. SHA-256 checks
+validate every response and all counted core bytes must be freed at exit.
+No real provider or credential is used.
+
+The TUI measurement runs the actual executable in an 80x24 PTY. A test-only
+DNS shim maps only `api.anthropic.com` to the local TLS server and rejects
+all other named destinations. TLS still verifies that hostname. The shim's
+ELF class must match the app, and it is excluded from distributed binaries.
+The existing terminal-restoration guardian is measured separately; it never
+loads curl. TUI completion latency means the durable run-completion record;
+first-text latency measures rendered output and includes the existing frame
+schedule. Timing runs do not overlap builds, regression tests or profilers.
+
+The baseline HTTP driver is included verbatim in the checked-in benchmark
+record. It matches `ee4225b` plus CA environment overrides solely to trust the
+local fixture. Extract it to reproduce the baseline:
+
+```sh
+python3 - <<'PYBASE'
+import json
+from pathlib import Path
+record = json.loads(Path('docs/benchmarks/system-curl.json').read_text())
+Path('build/system-curl').mkdir(parents=True, exist_ok=True)
+Path('build/system-curl/baseline_http_curl.c').write_text(record['baseline_http_source'])
+PYBASE
+make -j4 BUILD=build/system-curl/before CURL_SRC=build/system-curl/baseline_http_curl.c all build/system-curl/before/bench/http
+make -j4 BUILD=build/system-curl/after all build/system-curl/after/bench/http build/system-curl/after/bench/http-defaults build/system-curl/after/bench/tui-dns.so
+make release
+python3 scripts/bench_http.py --bin before=build/system-curl/before/bench/http after=build/system-curl/after/bench/http --directory-build after --runs 9 --output build/system-curl/http-final.json
+python3 scripts/bench_http.py --bin before=build/system-curl/before/bench/http after=build/system-curl/after/bench/http --directory-build after --transport-only --runs 9 --cases https reconnect large --output build/system-curl/transport-final.json
+python3 scripts/bench_tui_http.py --bin before=build/system-curl/before/pytte after=build/system-curl/after/pytte --directory-build after --shim build/system-curl/after/bench/tui-dns.so --runs 9 --output build/system-curl/tui-final.json
+python3 scripts/bench_http.py --bin current=build/system-curl/after/bench/http --ai-bin current=build/system-curl/after/pytte-ai --defaults-bin build/system-curl/after/bench/http-defaults --verify-only --output build/system-curl/trust-checks.json
+python3 scripts/bench_http.py --bin before=build/system-curl/before/bench/http after=build/system-curl/after/bench/http --directory-build after --profile dhat --runs 1 --cases https conversation large --output build/system-curl/dhat.json
+python3 scripts/bench_http.py --bin before=build/system-curl/before/bench/http after=build/system-curl/after/bench/http --directory-build after --profile massif --runs 1 --cases https --output build/system-curl/massif.json
+make portable
+make test
+```
+
+A separate 32-bit experiment uses existing multilib system packages. The standard
+build remains native 64-bit; there is no 32-bit release preset. Reproduce the
+experiment and its matching test-only DNS shim:
+
+```sh
+make -j4 BUILD=build/system-curl/i686 CFLAGS='-m32 -O2 -g -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64' BENCH_CFLAGS='-m32 -O2 -g -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64' LDFLAGS='-m32' all build/system-curl/i686/bench/http build/system-curl/i686/bench/http-defaults build/system-curl/i686/bench/tui-dns.so
+make -j4 BUILD=build/release32 CFLAGS='-m32 -Os -flto -ffunction-sections -fdata-sections -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64' LDFLAGS='-m32 -Wl,--gc-sections' all
+strip build/release32/pytte build/release32/pytte-ai
+python3 scripts/bench_tui_http.py --bin before=build/system-curl/before/pytte native=build/release/pytte i686=build/release32/pytte --directory-build native i686 --shim build/system-curl/after/bench/tui-dns.so --shim32 build/system-curl/i686/bench/tui-dns.so --runs 9 --output build/system-curl/tui-release.json
+PYTTE_BIN="$PWD/build/system-curl/i686/pytte" make -j4 BUILD=build/system-curl/i686 CFLAGS='-m32 -O2 -g -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64' LDFLAGS='-m32' TEST_CFLAGS='-m32 -O1 -g -D_FILE_OFFSET_BITS=64 -D_TIME_BITS=64 -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer' test
+```
+
+Full raw outputs and profiles live under ignored `build/system-curl/`.
+Selected samples, source/binary hashes, build commands, trust inventories and
+profiler totals are in `docs/benchmarks/system-curl.json`. The final warning
+cleanup names the checked `curl_off_t` conversion; the native executable and
+harness `.text` sections are byte-identical before/after that refactor, so the
+recorded native timing/memory runs remain applicable. No production stream or
+JSON parser sources changed.
+
+## Earlier core and TUI measurements (2026-10-10)
+
 Measured on 2026-10-10 against commit `0ae035f90c2f6fb83acaa108657d1734bff6adb8`,
 using the same offline inputs and GCC 16.2.1 `-O2 -g` builds without sanitizers.
 Machine: Intel i5-1035G7, 4 cores / 8 threads, Linux x86-64, powersave governor,
