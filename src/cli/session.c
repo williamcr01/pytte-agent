@@ -61,25 +61,29 @@ static bool mkdirs(const char *path)
     return mkdir(tmp, 0700) == 0 || errno == EEXIST;
 }
 
-/* YYYYMMDD-HHMMSS-xxxx: sorts by time. The first x is the time within the
- * second (in 32 ms steps), the other three are random. */
+/* YYYYMMDD-HHMMSS-xxxx: sorts by time. The first two x are the millisecond
+ * (in 32 ms steps, then the ms within the step), the other two are random:
+ * -c and log pick the newest by ID, and sessions start ms apart. Two in the
+ * same millisecond collide 1 time in 1024, and then creating one fails. */
 static void new_session_id(char *out, size_t cap)
 {
     static const char b32[] = "234567abcdefghijklmnopqrstuvwxyz"; /* in ASCII order */
-    unsigned char r[3];
+    unsigned char r[2];
     struct timespec ts;
     struct tm tm;
     size_t n;
-    int i;
+    long ms;
     clock_gettime(CLOCK_REALTIME, &ts);
     gmtime_r(&ts.tv_sec, &tm);
     n = strftime(out, cap, "%Y%m%d-%H%M%S-", &tm);
     pt_sys_random(NULL, r, sizeof r);
     if (n + 5 > cap)
         return;
-    out[n++] = b32[ts.tv_nsec / 1000000 / 32];
-    for (i = 0; i < 3; i++)
-        out[n++] = b32[r[i] & 31];
+    ms = ts.tv_nsec / 1000000;
+    out[n++] = b32[ms / 32];
+    out[n++] = b32[ms % 32];
+    out[n++] = b32[r[0] & 31];
+    out[n++] = b32[r[1] & 31];
     out[n] = 0;
 }
 

@@ -47,6 +47,14 @@ XDG_STATE_HOME=$(mktemp -d)
 XDG_CONFIG_HOME="$XDG_STATE_HOME/config"
 export XDG_STATE_HOME XDG_CONFIG_HOME
 unset PYTTE_MODEL PYTTE_EFFORT
+# Run outside any repository and home with prompt files, so this repo's
+# CLAUDE.md and the user's skills stay out of the system prompts.
+HOME=$XDG_STATE_HOME
+export HOME
+pytte=$(cd "$(dirname "$pytte")" && pwd)/$(basename "$pytte")
+mkdir "$XDG_STATE_HOME/work"
+ln -s "$(pwd)/tests" "$XDG_STATE_HOME/work/tests"
+cd "$XDG_STATE_HOME/work" || exit 1
 
 out=$("$pytte" -p -m faux/faux --script tests/faux/hello.json hi 2>/dev/null)
 check "pytte -p prints the answer" [ "$out" = "Hello from the faux provider! Nothing here touched the network." ]
@@ -98,7 +106,7 @@ fi
 
 # ---- prompt files and skills ----
 if command -v jq >/dev/null; then
-    pa=$(cd "$(dirname "$pytte")" && pwd)/$(basename "$pytte")
+    pa=$pytte
     hello=$(pwd)/tests/faux/hello.json
     old=$(pwd)/tests/faux/old_output.json
     p=$XDG_STATE_HOME/project
@@ -107,7 +115,7 @@ if command -v jq >/dev/null; then
         mkdir -p "$1/skills/$2"
         printf -- '---\nname: %s\ndescription: %s\n%b---\n%s body\n' "$2" "$3" "${4:-}" "$2" >"$1/skills/$2/SKILL.md"
     }
-    run() { (cd "$p" && HOME=$XDG_STATE_HOME "$pa" -p "$@" >/dev/null 2>&1); } # no ~/.agents
+    run() { (cd "$p" && "$pa" -p "$@" >/dev/null 2>&1); }
     mkdir -p "$p/.pytte" "$u"
     echo "user system" >"$u/SYSTEM.md"
     echo "project system" >"$p/.pytte/SYSTEM.md"
@@ -242,8 +250,7 @@ if command -v jq >/dev/null; then
     out=$("$pytte" -p -m faux/faux --script tests/faux/hello.json --output-format json hi 2>/dev/null)
     check "json prints one result object" sh -c 'printf "%s" "$1" | jq -e ".status == \"completed\" and (.result | startswith(\"Hello\"))" >/dev/null' _ "$out"
 fi
-abs=$(cd "$(dirname "$pytte")" && pwd)/$(basename "$pytte")
-(cd "$XDG_STATE_HOME" && "$abs" -p -c </dev/null >/dev/null 2>&1)
+(cd "$XDG_STATE_HOME" && "$pytte" -p -c </dev/null >/dev/null 2>&1)
 check "-c only continues sessions of this directory" [ $? -eq 1 ]
 rm -rf "$XDG_STATE_HOME"
 
