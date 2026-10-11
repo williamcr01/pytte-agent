@@ -25,6 +25,7 @@ struct tool_live {
     pt_buf snap;
     /* the result, copied: content, details, doc key, doc value */
     pt_buf result;
+    pt_arena fx_arena; /* fx payload survives durable task-record replacement */
     size_t at[4], n[4];
     bool is_error;
 };
@@ -42,6 +43,7 @@ void pt_tool_free_live(pt_agent *a, task *t)
     pt_buf_free(&tl->tail);
     pt_buf_free(&tl->snap);
     pt_buf_free(&tl->result);
+    pt_arena_free(&tl->fx_arena);
     a->al.fn(a->al.ud, tl, sizeof *tl, 0);
     t->tl = NULL;
 }
@@ -411,14 +413,21 @@ bool pt_approve(pt_agent *a, uint32_t task_id, bool yes, pt_str reason)
             return true;
     if (!pt_core_grow(a, (void **)&a->subs, &a->scap, a->nsubs + 1, sizeof(sub)))
         return false;
-    memset(&a->subs[a->nsubs], 0, sizeof(sub));
-    a->subs[a->nsubs].kind = INK_APPROVE;
-    a->subs[a->nsubs].task = task_id;
-    a->subs[a->nsubs].yes = yes;
-    a->subs[a->nsubs].text = pt_arena_dup(&a->subs_a, reason);
-    a->nsubs++;
+    {
+        sub pending;
+        memset(&pending, 0, sizeof pending);
+        pending.kind = INK_APPROVE;
+        pending.task = task_id;
+        pending.yes = yes;
+        pending.text = pt_arena_dup(&a->subs_a, reason);
+        if (a->subs_a.oom) {
+            pt_core_fail(a, PT_FATAL_OOM, "out of memory queueing approval", PT_STR_NULL);
+            return false;
+        }
+        a->subs[a->nsubs++] = pending;
+    }
     a->idle_sent = false;
-    return !a->subs_a.oom;
+    return true;
 }
 
 uint32_t pt_asks(const pt_agent *ca, pt_ask_view *out, uint32_t max)
@@ -467,7 +476,11 @@ static bool snapshot(pt_agent *a, task *t, bool force)
     fx.kind = PT_FX_LIVE;
     fx.id = pt_core_new_fx(a);
     fx.task = t->id;
-    return !tl->snap.oom && pt_core_queue(a, &fx, pt_buf_str(&tl->snap));
+    if (tl->snap.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory building tool snapshot", PT_STR_NULL);
+        return false;
+    }
+    return pt_core_queue(a, &fx, pt_buf_str(&tl->snap));
 }
 
 static bool start(pt_agent *a, task *t, const pt_block *call)
@@ -483,13 +496,18 @@ static bool start(pt_agent *a, task *t, const pt_block *call)
     pt_buf_init(&tl->tail, a->al);
     pt_buf_init(&tl->snap, a->al);
     pt_buf_init(&tl->result, a->al);
+    pt_arena_init(&tl->fx_arena, a->al, 128);
     t->tl = tl;
     memset(&fx, 0, sizeof fx);
     fx.kind = PT_FX_TOOL;
     fx.id = pt_core_new_fx(a);
     fx.task = t->id;
     fx.name = call->name;
-    fx.args = call_args(t, call);
+    fx.args = pt_arena_dup(&tl->fx_arena, call_args(t, call));
+    if (tl->fx_arena.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory retaining tool arguments", PT_STR_NULL);
+        return false;
+    }
     fx.call_id = t->call_id;
     fx.attempt = t->attempt;
     fx.replay = t->replay;
@@ -532,6 +550,10 @@ bool pt_tool_data(pt_agent *a, uint32_t fx, const void *p, size_t n)
         }
         pt_buf_put(&tl->tail, p, n);
     }
+    if (tl->tail.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory retaining tool output", PT_STR_NULL);
+        return false;
+    }
     memset(&ev, 0, sizeof ev);
     ev.kind = PT_E_TOOL_OUTPUT;
     ev.task = t->id;
@@ -551,8 +573,13 @@ void pt_fx_tool(pt_agent *a, uint32_t fx, const pt_tool_result *r)
     if (a->fatal || !(t = find_running(a, fx)))
         return;
     tl = t->tl;
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 4; i++) {
+        if (parts[i].n > SIZE_MAX - total) {
+            pt_core_fail(a, PT_FATAL_OOM, "tool result is too large", PT_STR_NULL);
+            return;
+        }
         total += parts[i].n;
+    }
     pt_buf_reset(&tl->result);
     if (!pt_buf_reserve(&tl->result, total)) {
         pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
@@ -562,6 +589,10 @@ void pt_fx_tool(pt_agent *a, uint32_t fx, const pt_tool_result *r)
         tl->at[i] = tl->result.n;
         tl->n[i] = parts[i].n;
         pt_buf_puts(&tl->result, parts[i]);
+    }
+    if (tl->result.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory copying tool result", PT_STR_NULL);
+        return;
     }
     tl->is_error = r->is_error;
     tl->finished = true;
@@ -575,10 +606,10 @@ static bool commit_result(pt_agent *a, task *t, const pt_block *call, bool abort
     pt_buf b;
     bool ok;
     memset(&e, 0, sizeof e);
-    e.content = (pt_str){tl->result.p + tl->at[0], tl->n[0]};
-    e.details = (pt_str){tl->result.p + tl->at[1], tl->n[1]};
-    e.doc_key = (pt_str){tl->result.p + tl->at[2], tl->n[2]};
-    e.doc_value = (pt_str){tl->result.p + tl->at[3], tl->n[3]};
+    e.content = tl->n[0] ? (pt_str){tl->result.p + tl->at[0], tl->n[0]} : PT_STR_NULL;
+    e.details = tl->n[1] ? (pt_str){tl->result.p + tl->at[1], tl->n[1]} : PT_STR_NULL;
+    e.doc_key = tl->n[2] ? (pt_str){tl->result.p + tl->at[2], tl->n[2]} : PT_STR_NULL;
+    e.doc_value = tl->n[3] ? (pt_str){tl->result.p + tl->at[3], tl->n[3]} : PT_STR_NULL;
     e.is_error = tl->is_error;
     if (!aborted)
         return finish(a, t, call, &e);

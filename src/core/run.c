@@ -15,16 +15,65 @@
 
 #include <string.h>
 
+static void free_run_live(pt_agent *a, run_live *rl)
+{
+    pt_ai_stream_free(rl->s);
+    pt_buf_free(&rl->snap);
+    pt_arena_free(&rl->a);
+    a->al.fn(a->al.ud, rl, sizeof *rl, 0);
+}
+
 void pt_run_free_live(pt_agent *a, task *t)
 {
     run_live *rl = t->live;
     if (!rl)
         return;
-    pt_ai_stream_free(rl->s);
-    pt_buf_free(&rl->snap);
-    pt_arena_free(&rl->a);
-    a->al.fn(a->al.ud, rl, sizeof *rl, 0);
     t->live = NULL;
+    if (rl->http_fx && !rl->http_done) {
+        /* The queued CANCEL may not be handed to the host until a later poll. */
+        rl->pending_next = a->pending_http_free;
+        a->pending_http_free = rl;
+        return;
+    }
+    free_run_live(a, rl);
+}
+
+void pt_run_free_pending(pt_agent *a)
+{
+    while (a->pending_http_free) {
+        run_live *rl = a->pending_http_free;
+        a->pending_http_free = rl->pending_next;
+        free_run_live(a, rl);
+    }
+}
+
+void pt_run_cancel_delivered(pt_agent *a, uint32_t cancelled_fx)
+{
+    run_live *rl;
+    for (rl = a->pending_http_free; rl; rl = rl->pending_next)
+        if (rl->http_fx == cancelled_fx) {
+            rl->cancel_delivered = true;
+            return;
+        }
+}
+
+static void free_cancelled_runs(pt_agent *a)
+{
+    run_live **p = &a->pending_http_free;
+    while (*p) {
+        run_live *rl = *p;
+        if (rl->cancel_delivered) {
+            *p = rl->pending_next;
+            free_run_live(a, rl);
+        } else {
+            p = &rl->pending_next;
+        }
+    }
+}
+
+void pt_run_poll_begin(pt_agent *a)
+{
+    free_cancelled_runs(a);
 }
 
 bool pt_run_resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
@@ -385,14 +434,16 @@ static bool tool_parallel(pt_agent *a, pt_str name)
 
 /* The assistant entry and a tool task per call, in one commit: a call
  * never exists without its task, or the reverse. */
-static void write_round(pt_agent *a, task *nt, const pt_msg *m, uint32_t calls)
+static bool write_round(pt_agent *a, task *nt, const pt_msg *m, uint32_t calls)
 {
     uint32_t aid = pt_core_new_id(a), i, k = 0;
-    pt_run_write_assistant(a, aid, m);
     nt->calls = (uint32_t *)pt_arena_alloc(&a->scratch, sizeof(uint32_t) * calls);
     nt->parallel = (bool *)pt_arena_alloc(&a->scratch, sizeof(bool) * calls);
-    if (!nt->calls || !nt->parallel)
-        return;
+    if (!nt->calls || !nt->parallel || a->scratch.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory building tool round", PT_STR_NULL);
+        return false;
+    }
+    pt_run_write_assistant(a, aid, m);
     for (i = 0; i < m->nblocks; i++) {
         const pt_block *b = &m->blocks[i];
         task tt;
@@ -414,6 +465,7 @@ static void write_round(pt_agent *a, task *nt, const pt_msg *m, uint32_t calls)
     nt->entry = aid;
     nt->status = ST_WAITING;
     nt->phase = PH_TOOLS;
+    return true;
 }
 
 static bool classify(pt_agent *a, task *t)
@@ -463,7 +515,8 @@ static bool classify(pt_agent *a, task *t)
             pt_core_after(a, AFTER_RUN_DONE, "failed", e->message, 0);
         }
     } else if (calls && m->stop == PT_STOP_TOOL_USE) {
-        write_round(a, &nt, m, calls);
+        if (!write_round(a, &nt, m, calls))
+            return false;
     } else if (calls && m->stop == PT_STOP_LENGTH) {
         /* A call may be cut off mid-input: run none of them. */
         pt_run_write_assistant(a, pt_core_new_id(a), m);
@@ -487,6 +540,8 @@ static bool classify(pt_agent *a, task *t)
         pt_core_after(a, AFTER_RUN_DONE, m->stop == PT_STOP_REFUSAL ? "failed" : "completed",
               m->stop == PT_STOP_REFUSAL ? PT_S("the model refused") : PT_STR_NULL, 0);
     }
+    if (a->fatal)
+        return false; /* discard this incomplete write-ahead batch */
     pt_write_task(&a->cw, &nt);
     if (in && input_changed)
         pt_write_input(&a->cw, &nin);

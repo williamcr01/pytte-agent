@@ -256,6 +256,10 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
         t->entry = getid(st, "assistant");
         if (!pt_json_is(calls, PT_J_ARR) || !pt_json_is(par, PT_J_ARR) || par->len != calls->len || !t->entry)
             return false;
+#if SIZE_MAX <= UINT32_MAX
+        if (calls->len > SIZE_MAX / sizeof(uint32_t))
+            return false;
+#endif
         t->ncalls = calls->len;
         t->calls = (uint32_t *)pt_arena_alloc(ar, sizeof(uint32_t) * (calls->len ? calls->len : 1));
         t->parallel = (bool *)pt_arena_alloc(ar, sizeof(bool) * (calls->len ? calls->len : 1));
@@ -475,7 +479,7 @@ static bool apply_tools(pt_agent *a, const pt_json *list)
         m->parallel = pt_json_truthy(pt_json_get(t, "parallel"));
         m->read_only = pt_json_truthy(pt_json_get(t, "read_only"));
         m->schema = pt_json_parse(d->schema, ea, NULL);
-        if (!d->name.n)
+        if (!d->name.n || (schema && !m->schema))
             return false;
         n++;
     }
@@ -561,8 +565,10 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
     entry *e;
     if (!lookup(pt_json_gets(r, "kind", sa), ent_names, 6, &k))
         return false;
-    if (a->nentries && id <= a->entries[a->nentries - 1].id)
-        return true; /* insert-only: never replaced */
+    if (a->nentries && id <= a->entries[a->nentries - 1].id) {
+        pt_core_seterr(a, "corrupt log: entry IDs are not strictly increasing", PT_STR_NULL);
+        return false;
+    }
     if (k == ENT_EPOCH) {
         /* A new epoch: older entries leave memory (they stay in the log). */
         if (!a->o.all_epochs) {
@@ -675,8 +681,13 @@ static bool apply_record(pt_agent *a, const pt_json *r)
         ok = apply_doc(a, r, id);
     }
     /* Other types are not needed here. */
-    if (ok && id >= a->next_id)
+    if (ok && id >= a->next_id) {
+        if (id == UINT32_MAX) {
+            pt_core_fail(a, PT_FATAL_OOM, "record ID space exhausted", PT_STR_NULL);
+            return false;
+        }
         a->next_id = id + 1;
+    }
     return ok;
 }
 
