@@ -62,19 +62,23 @@ static uint32_t add_results(pt_agent *a, uint32_t i, uint32_t cutoff, pt_msg *ms
 }
 
 /* After a compaction, the summary opens the epoch as user content (section
- * 12.3), followed by the request that was being worked on. */
+ * 12.3), followed by the request that was being worked on, or by the
+ * newest turns as they were. */
 static const char intro[] =
     "This session was compacted to fit the context window. A summary of the conversation so far:\n\n";
+static const char intro_kept[] = "This session was compacted to fit the context window. A summary of the "
+                                 "conversation before the messages that follow:\n\n";
 static const char working[] = "\n\nThe user's message being worked on when the session was compacted:\n\n";
 
-static bool summary_msg(const entry *e, pt_msg *m, pt_arena *ar)
+static bool summary_msg(const entry *e, bool kept, pt_msg *m, pt_arena *ar)
 {
-    size_t n = sizeof intro - 1 + e->summary.n + (e->request.n ? sizeof working - 1 + e->request.n : 0);
+    pt_str in = kept ? PT_S(intro_kept) : PT_S(intro);
+    size_t n = in.n + e->summary.n + (e->request.n ? sizeof working - 1 + e->request.n : 0);
     char *p = (char *)pt_arena_alloc(ar, n ? n : 1), *q = p;
     if (!p)
         return false;
-    memcpy(q, intro, sizeof intro - 1);
-    q += sizeof intro - 1;
+    memcpy(q, in.p, in.n);
+    q += in.n;
     memcpy(q, e->summary.p, e->summary.n);
     q += e->summary.n;
     if (e->request.n) {
@@ -99,7 +103,8 @@ bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena 
         if (e->kind == ENT_TOOL_RESULT || !pt_core_sent(e))
             continue; /* results are placed after their calls */
         msgs[n++] = e->msg;
-        if (e->kind == ENT_EPOCH && e->summary.n && !summary_msg(e, &msgs[n++], ar))
+        if (e->kind == ENT_EPOCH && e->summary.n &&
+            !summary_msg(e, i + 1 < a->nentries && a->entries[i + 1].kept, &msgs[n++], ar))
             return false;
         if (e->kind == ENT_ASSISTANT)
             n = add_results(a, i, cutoff, msgs, n);

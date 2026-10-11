@@ -73,6 +73,10 @@ static void write_state(pt_jw *w, const task *t)
         pt_jw_key(w, "cutoff");
         pt_jw_uint(w, t->cutoff);
     }
+    if (t->kind == TASK_COMPACT && t->keep) {
+        pt_jw_key(w, "keep");
+        pt_jw_uint(w, t->keep);
+    }
     if (t->phase == PH_REQUEST) {
         pt_jw_key(w, "params");
         pt_jw_obj(w);
@@ -225,7 +229,8 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
         return t->entry > 0 && (t->phase != PH_EXECUTE || t->attempt > 0);
     }
     t->cutoff = getid(st, "cutoff");
-    if (t->kind == TASK_COMPACT && !t->cutoff)
+    t->keep = getid(st, "keep");
+    if (t->kind == TASK_COMPACT && (!t->cutoff || t->keep > t->cutoff))
         return false;
     if (t->phase == PH_REQUEST) {
         const pt_json *p = pt_json_get(st, "params");
@@ -521,6 +526,7 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
     e->id = id;
     e->kind = (ent_kind)k;
     e->epoch = getid(r, "epoch");
+    e->kept = getid(r, "kept");
     e->raw = pt_arena_dup(ea, r->raw);
     switch (e->kind) {
     case ENT_EPOCH:

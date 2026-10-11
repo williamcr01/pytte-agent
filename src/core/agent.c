@@ -1056,5 +1056,6 @@ bool pt_entry_at(const pt_agent *a, uint32_t i, pt_entry_view *out)
     out->msg = e->kind == ENT_ERROR ? NULL : &e->msg;
     out->raw = e->raw;
     out->summary = e->summary;
+    out->kept = e->kept;
     return true;
 }

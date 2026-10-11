@@ -535,6 +535,66 @@ static void test_max_tokens_estimate(void)
     h_free(&h);
 }
 
+/* A compaction keeps the newest turns that fit in compact_keep as they
+ * are: copies in the new epoch, after the summary; only what comes before
+ * them is summarized. */
+static void test_compact_keep(void)
+{
+    static const char script[] =
+        "{\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Alpha answer\"}]},"
+        "{\"content\":[{\"type\":\"text\",\"text\":\"Beta answer\"}]},"
+        "{\"content\":[{\"type\":\"text\",\"text\":\"Gamma answer\"}]}],"
+        "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"So far: one question.\"}]}}";
+    pt_entry_view v;
+    pt_config c;
+    pt_buf want, got;
+    uint32_t two = 0, beta = 0, i;
+    host h;
+    pt_buf_init(&want, T_AL);
+    pt_buf_init(&got, T_AL);
+    h_init(&h, script);
+    h_create(&h);
+    memset(&c, 0, sizeof c);
+    c.model = PT_S("faux/faux");
+    c.live_interval_ms = 1;
+    c.compact_keep = 25; /* about 75 bytes: the second turn, not the first */
+    pt_set_config(h.a, &c);
+    h_submit(&h, "one", NULL);
+    h_run(&h);
+    h_submit(&h, "two", NULL);
+    h_run(&h);
+    for (i = 0; pt_entry_at(h.a, i, &v); i++)
+        if (strcmp(v.kind, "user") == 0 && pt_str_eqz(v.msg->text, "two"))
+            two = v.id;
+        else if (strcmp(v.kind, "assistant") == 0 && v.msg->nblocks && pt_str_eqz(v.msg->blocks[0].text, "Beta answer"))
+            beta = v.id;
+    CHECK(two && beta);
+    CHECK(pt_compact(h.a));
+    h_run(&h);
+    CHECK(pt_entry_count(h.a) == 3);
+    CHECK(pt_entry_at(h.a, 0, &v) && strcmp(v.kind, "epoch") == 0 && v.epoch == 2 && !v.kept);
+    CHECK(!has(v.raw, PT_S("\"request\""))); /* the user's message is kept */
+    CHECK(pt_entry_at(h.a, 1, &v) && strcmp(v.kind, "user") == 0 && v.kept == two &&
+          pt_str_eqz(v.msg->text, "two"));
+    CHECK(pt_entry_at(h.a, 2, &v) && strcmp(v.kind, "assistant") == 0 && v.kept == beta);
+    CHECK(has(pt_buf_str(&h.log), PT_S("\"keep\":")));
+    h_submit(&h, "three", NULL);
+    h_run(&h);
+    CHECK(h.done == 3);
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("before the messages that follow")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("Beta answer")));
+    CHECK(!has(pt_buf_str(&h.last_request), PT_S("Alpha answer")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("\"turn\":2"))); /* 1 summarized + 1 kept */
+    CHECK(pt_str_eqz(pt_buf_str(&h.text), "Gamma answer") || has(pt_buf_str(&h.text), PT_S("Gamma answer")));
+    transcript(h.a, &want);
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    transcript(h.a, &got);
+    CHECK_SAME(pt_buf_str(&got), pt_buf_str(&want));
+    h_free(&h);
+    pt_buf_free(&want);
+    pt_buf_free(&got);
+}
+
 /* A compaction asks the host for the new epoch's system prompt and tools
  * once, as it starts, and freezes them; NULL keeps the current ones. */
 static void test_epoch_materials(void)
@@ -850,6 +910,7 @@ int main(void)
     RUN(test_big_prompt);
     RUN(test_epoch_materials);
     RUN(test_max_tokens_estimate);
+    RUN(test_compact_keep);
     RUN(test_tool_call_without_tools);
     RUN(test_fatal_error);
     RUN(test_queue_and_req);

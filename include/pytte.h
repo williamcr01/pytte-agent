@@ -111,6 +111,8 @@ typedef struct pt_config {
     bool serial_tools;         /* run a round's tools one at a time even when all may run together */
     uint32_t context_window;   /* 0: the model's */
     uint32_t compact_reserve;  /* compact when fewer tokens are left; 0: 24576 (a quarter of small windows) */
+    uint32_t compact_keep;     /* tokens of the newest turns a compaction keeps as they are;
+                                * 0: 20000 (a fifth of small windows) */
 } pt_config;
 
 typedef struct pt_opts {
@@ -279,6 +281,8 @@ typedef struct pt_entry_view {
     const pt_msg *msg; /* NULL for error entries */
     pt_str raw;        /* the record */
     pt_str summary;    /* epoch after a compaction: what the model continues from */
+    uint32_t kept;     /* after a compaction: a copy of entry `kept` of the epoch
+                        * before (already shown, if the viewer saw that epoch) */
 } pt_entry_view;
 
 /* Tool calls waiting for pt_approve, in task order; returns how many

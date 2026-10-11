@@ -706,6 +706,8 @@ static void on_entries(app *a)
     if (n && pt_entry_at(a->s.a, 0, &v))
         a->shown_epoch = v.epoch;
     for (i = a->seen; i < n && pt_entry_at(a->s.a, i, &v); i++) {
+        if (v.kept) /* a compaction's copy: on screen already, as the original */
+            continue;
         if (strcmp(v.kind, "user") == 0) /* answers a key: no frame wait */
             a->urgent = true;
         if (strcmp(v.kind, "user") == 0 && a->nq) { /* a queued input was placed */

@@ -1,5 +1,6 @@
 /* The compact task (sections 8.3 and 12.3): a summary of the current epoch
- * becomes the first user content of a new one.
+ * becomes the first user content of a new one, followed by copies of the
+ * newest turns, kept as they are.
  *
  *   prepare ──► request ──► done: epoch n+1 (and the waiting run → prepare)
  *      ▲          │
@@ -14,6 +15,7 @@
 
 #define CUT 2048            /* bytes kept of each tool call's input and result */
 #define SUMMARY_TOKENS 8192 /* at most, for the summary */
+#define KEEP 20000          /* tokens of the newest turns kept as they are */
 
 static const char instructions[] =
     "You write the summary that replaces the history of a long coding session, so that the work "
@@ -34,13 +36,52 @@ static bool sent_answer(const entry *e)
     return e->kind == ENT_ASSISTANT && e->msg.stop != PT_STOP_ERROR && e->msg.stop != PT_STOP_ABORTED;
 }
 
+/* An answer of this epoch's own: a compaction right after one, with only
+ * the kept copies to summarize, would not make the context any smaller. */
 bool pt_compact_possible(pt_agent *a)
 {
     uint32_t i;
     for (i = 0; i < a->nentries; i++)
-        if (sent_answer(&a->entries[i]))
+        if (sent_answer(&a->entries[i]) && !a->entries[i].kept)
             return true;
     return false;
+}
+
+static uint64_t keep_tokens(pt_agent *a)
+{
+    const pt_config *c = &a->o.config;
+    pt_ai_target target;
+    const char *why;
+    uint64_t window = c->context_window;
+    if (c->compact_keep)
+        return c->compact_keep;
+    if (!window && pt_ai_resolve(a->o.catalog, c->model.n ? c->model : a->last_model, &target, &a->scratch, &why))
+        window = target.model.context_window;
+    return window && window / 5 < KEEP ? window / 5 : KEEP;
+}
+
+/* The first entry kept as it is (0: none): the newest turns through
+ * cutoff that fit in keep_tokens, starting at a user or assistant entry so
+ * that no tool result is parted from its call. Something before it must
+ * be left to summarize. */
+static uint32_t choose_keep(pt_agent *a, uint32_t cutoff)
+{
+    uint64_t budget = keep_tokens(a) * 3, bytes = 0; /* about 3 bytes a token */
+    uint32_t i = a->nentries, at = 0, k;
+    while (i-- > 1) { /* entries[0] is the epoch */
+        const entry *e = &a->entries[i];
+        if (e->id > cutoff || !pt_core_sent(e))
+            continue;
+        bytes += pt_core_sent_bytes(a, e);
+        if (bytes > budget)
+            break;
+        if (e->kind == ENT_USER || e->kind == ENT_ASSISTANT)
+            at = i;
+    }
+    for (k = 1; at && k < at; k++)
+        if (sent_answer(&a->entries[k]))
+            return a->entries[at].id;
+    return 0;
 }
 
 uint32_t pt_compact_write(pt_agent *a, uint32_t owner, uint32_t cutoff)
@@ -54,6 +95,7 @@ uint32_t pt_compact_write(pt_agent *a, uint32_t owner, uint32_t cutoff)
     ct.phase = PH_PREPARE;
     ct.attempt = 1;
     ct.cutoff = cutoff;
+    ct.keep = choose_keep(a, cutoff);
     pt_write_task(&a->cw, &ct);
     return ct.id;
 }
@@ -79,10 +121,11 @@ static void put_cut(pt_buf *b, pt_str s, size_t max)
     pt_buf_put(b, s.p + s.n - t, t);
 }
 
-static void transcript(pt_agent *a, uint32_t cutoff, pt_buf *b)
+/* The entries before `end` as text. */
+static void transcript(pt_agent *a, uint32_t end, pt_buf *b)
 {
     uint32_t i, k;
-    for (i = 0; i < a->nentries && a->entries[i].id <= cutoff; i++) {
+    for (i = 0; i < a->nentries && a->entries[i].id < end; i++) {
         const entry *e = &a->entries[i];
         const pt_msg *m = &e->msg;
         switch (e->kind) {
@@ -159,7 +202,7 @@ bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena
     if (budget < 16384)
         budget = 16384;
     pt_buf_init(&b, a->al);
-    transcript(a, t->cutoff, &b);
+    transcript(a, t->keep ? t->keep : t->cutoff + 1, &b);
     all = pt_buf_str(&b);
     head = all.n;
     tail = 0;
@@ -289,6 +332,48 @@ static pt_str epoch_tools(pt_agent *a)
     return pt_json_is(tools, PT_J_ARR) ? tools->raw : PT_S("[]");
 }
 
+/* Whether a user entry is among the kept ones (the run's own, if so). */
+static bool keeps_user(pt_agent *a, const task *t)
+{
+    uint32_t i;
+    for (i = 0; t->keep && i < a->nentries && a->entries[i].id <= t->cutoff; i++)
+        if (a->entries[i].id >= t->keep && a->entries[i].kind == ENT_USER)
+            return true;
+    return false;
+}
+
+/* Copies of the kept entries, after the new epoch entry: new IDs, the same
+ * data, and "kept" naming the original. */
+static bool write_kept(pt_agent *a, const task *t)
+{
+    pt_jw *w = &a->cw;
+    uint32_t i;
+    for (i = 0; t->keep && i < a->nentries && a->entries[i].id <= t->cutoff; i++) {
+        const entry *e = &a->entries[i];
+        const pt_json *r, *d;
+        if (e->id < t->keep || e->kind == ENT_EPOCH || !pt_core_sent(e))
+            continue;
+        r = pt_json_parse(e->raw, &a->scratch, NULL);
+        if (!(d = pt_json_get(r, "data")))
+            return false; /* out of memory: it was parsed once already */
+        pt_jw_obj(w);
+        pt_jw_key(w, "t");
+        pt_jw_strz(w, "entry");
+        pt_jw_key(w, "id");
+        pt_jw_uint(w, pt_core_new_id(a));
+        pt_jw_key(w, "kind");
+        pt_jw_str(w, pt_json_gets(r, "kind", &a->scratch));
+        pt_jw_key(w, "epoch");
+        pt_jw_uint(w, a->cur_epoch + 1);
+        pt_jw_key(w, "kept");
+        pt_jw_uint(w, e->id);
+        pt_jw_key(w, "data");
+        pt_jw_raw(w, d->raw);
+        pt_jw_obj_end(w);
+    }
+    return true;
+}
+
 static void end_owner(pt_agent *a, task *run, bool ok, pt_str why)
 {
     task nt;
@@ -349,13 +434,15 @@ bool pt_compact_finish(pt_agent *a, task *t)
         pt_jw_raw(w, PT_S("[]"));
         pt_jw_key(w, "summary");
         pt_jw_str(w, pt_buf_str(&summary));
-        if (in && in->text.n) {
+        if (in && in->text.n && !keeps_user(a, t)) {
             pt_jw_key(w, "request");
             pt_jw_str(w, in->text);
         }
         pt_jw_key(w, "compacted");
         pt_jw_uint(w, t->cutoff);
         pt_core_entry_end(a);
+        if (!write_kept(a, t))
+            pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
         nt.status = ST_DONE;
         nt.outcome = PT_S("completed");
         nt.result = id;

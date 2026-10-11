@@ -80,7 +80,7 @@ static uint64_t estimate(pt_agent *a, uint32_t cutoff)
         const pt_usage *u = &e->msg.usage;
         if (e->id > cutoff || !pt_core_sent(e))
             continue;
-        if (e->kind == ENT_ASSISTANT && (u->input || u->output)) {
+        if (e->kind == ENT_ASSISTANT && !e->kept && (u->input || u->output)) { /* a copy's is old */
             tokens = u->input + u->cache_read + u->cache_write + u->output;
             break;
         }

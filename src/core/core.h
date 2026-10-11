@@ -26,6 +26,7 @@ typedef struct entry {
     pt_msg msg; /* epoch: the system prompt; notes: role system */
     pt_str summary, request; /* epoch after compaction: the summary, the request being worked on */
     bool to_model;
+    uint32_t kept; /* a copy of this entry of the epoch before (section 12.3) */
     pt_str raw;
 } entry;
 
@@ -63,6 +64,7 @@ typedef struct task {
     task_status status;
     task_phase phase;
     uint32_t attempt, cutoff;
+    uint32_t keep;      /* compact: the first entry kept as it is; 0: none */
     int64_t until;                                     /* retry */
     pt_str model; pt_reasoning reasoning; uint32_t max_tokens; /* request params */
     uint32_t entry;     /* run tools, tool: the assistant entry with the calls */

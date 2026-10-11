@@ -434,7 +434,7 @@ static void outcome(world *w, pt_buf *out)
             (v.msg->stop == PT_STOP_ERROR || v.msg->stop == PT_STOP_ABORTED))
             continue; /* partial answers: never sent to the model */
         pt_buf_putz(out, v.kind);
-        pt_buf_putc(out, ':');
+        pt_buf_putz(out, v.kept ? "(kept):" : ":");
         if (v.msg->role == PT_ROLE_ASSISTANT) {
             pt_buf_putz(out, pt_stop_name(v.msg->stop));
             for (j = 0; j < v.msg->nblocks; j++) {
@@ -726,6 +726,18 @@ static const scenario scenarios[] = {
      "{\"content\":[{\"type\":\"text\",\"text\":\"Fourth, after a summary.\"}]}],"
      "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"Three questions so far.\"}]}}",
      {"first question", "second question", "third question"}, ABORT_NONE, 0, TOOLS_NONE, 300},
+    /* Between tool rounds, keeping the newest two. The window leaves room
+     * for count's longer result when a crash interrupts it. */
+    {"compact_midrun",
+     "{\"chunk\":40,\"turns\":["
+     "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG "\"},"
+     "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"a\"}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Again.\"},"
+     "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"b\"}}]},"
+     "{\"content\":[{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Looked twice and counted.\"}]}],"
+     "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"Looking at things.\"}]}}",
+     {"look around", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 440},
     {"overflow",
      "{\"chunk\":40,\"turns\":["
      "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG LONG LONG "\"}]},"

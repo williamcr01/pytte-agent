@@ -645,7 +645,7 @@ static int cmd_log(const opts *o)
         if (o->json) {
             fwrite(v.raw.p, 1, v.raw.n, stdout);
             fputc('\n', stdout);
-        } else {
+        } else if (!(o->all_epochs && v.kept)) { /* printed as the original */
             print_entry(&v, tty);
         }
     }
