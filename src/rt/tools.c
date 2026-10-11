@@ -282,8 +282,9 @@ void pt_rt_tool_output(pt_rt *rt, uint32_t fx, const void *p, size_t n)
         pt_fx_data(rt->a, fx, p, n);
 }
 
-/* The kept output: whole, or head, a marker and tail. */
-static void kept_text(const rt_call *c, bool stored, pt_buf *out)
+/* The kept output: whole, or head, a marker and tail. The marker names
+ * the file with all of it, when there is one. */
+static void kept_text(const rt_call *c, const char *path, pt_buf *out)
 {
     pt_str tail = pt_buf_str(&c->tail);
     uint64_t omitted;
@@ -303,13 +304,19 @@ static void kept_text(const rt_call *c, bool stored, pt_buf *out)
     pt_buf_puts(out, pt_buf_str(&c->head));
     pt_buf_putz(out, "\n\n…[");
     pt_buf_u64(out, omitted);
-    pt_buf_putz(out, stored ? " bytes omitted; read_output pages through them]…\n\n" : " bytes omitted]…\n\n");
+    pt_buf_putz(out, " bytes omitted");
+    if (path[0]) {
+        pt_buf_putz(out, "; the whole output is in ");
+        pt_buf_putz(out, path);
+    }
+    pt_buf_putz(out, "]…\n\n");
     pt_buf_puts(out, tail);
 }
 
-/* Seal the call's blob: true with its reference merged into details. The
- * blob is durable before the result that names it is committed. */
-static bool blob_seal(pt_rt *rt, rt_call *c, pt_str *details)
+/* Seal the call's blob: true with its reference merged into details and
+ * its file in path ("" when the store has none). The blob is durable
+ * before the result that names it is committed. */
+static bool blob_seal(pt_rt *rt, rt_call *c, pt_str *details, char *path, size_t cap)
 {
     static const char digits[] = "0123456789abcdef";
     unsigned char d[32];
@@ -333,6 +340,8 @@ static bool blob_seal(pt_rt *rt, rt_call *c, pt_str *details)
     c->blob = NULL;
     if (i != 0)
         return false;
+    if (rt->c.store->blob_path && rt->c.store->blob_path(rt->c.store, hex, path, cap) != 0)
+        path[0] = 0;
     /* {"blob":"sha256:…","size":N, and the tool's own fields} */
     pt_buf_putz(b, "{\"blob\":\"sha256:");
     pt_buf_put(b, hex, 64);
@@ -356,6 +365,7 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
     pt_tool_result res;
     pt_str details = r->details;
     size_t dn = 0;
+    char path[4200] = ""; /* the blob's file */
     bool stored;
     uint32_t i;
     if (!c)
@@ -371,10 +381,10 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
         keep(c, r->content.p, r->content.n);
     }
     /* scratch: the merged details, then the text */
-    stored = blob_seal(rt, c, &details);
+    stored = blob_seal(rt, c, &details, path, sizeof path);
     if (stored)
         dn = rt->scratch.n;
-    kept_text(c, stored, &rt->scratch);
+    kept_text(c, path, &rt->scratch);
     pt_buf_puts(&rt->scratch, r->note);
     if (rt->scratch.n == dn)
         pt_buf_putz(&rt->scratch, "(no output)");

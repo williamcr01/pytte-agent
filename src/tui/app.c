@@ -367,7 +367,6 @@ static const struct {
 } verbs[] = {
     {"bash", "Run", "Running", "Ran", "Couldn't run", CAT_COMMAND},
     {"read", "Read", "Reading", "Read", "Couldn't read", CAT_READ},
-    {"read_output", "Read output of", "Reading output of", "Read output of", "Couldn't read output of", CAT_READ},
     {"write", "Write", "Writing", "Wrote", "Couldn't write", CAT_WRITE},
     {"edit", "Edit", "Editing", "Edited", "Couldn't edit", CAT_EDIT},
 };

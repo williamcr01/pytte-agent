@@ -123,6 +123,9 @@ struct pt_store {
     void (*blob_abort)(pt_store *s, void *h);
     /* Up to cap bytes from off; *got = 0 at its end. */
     int (*blob_read)(pt_store *s, const char *hex, uint64_t off, void *p, size_t cap, size_t *got);
+    /* The committed blob's file, for tools to read: 0 with out set, or -1.
+     * NULL: blobs are not files. */
+    int (*blob_path)(pt_store *s, const char *hex, char *out, size_t cap);
     void (*close)(pt_store *s);
     char err[512];
 };

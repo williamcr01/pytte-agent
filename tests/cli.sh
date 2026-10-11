@@ -82,7 +82,7 @@ check "tool calls get an error result, then the run goes on" [ "$out" = "I'll ec
 The echo tool said: hi" ]
 
 out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/big_output.json "count" 2>/dev/null)
-check "a cut output can be paged" [ "$out" = "Paged through the output." ]
+check "a cut output runs on" [ "$out" = "Counted past the cap." ]
 if command -v jq >/dev/null; then
     id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
     results=$("$pytte" log "$id" --json | jq -c 'select(.kind == "tool_result")')
@@ -90,12 +90,7 @@ if command -v jq >/dev/null; then
     check "...its whole output is a blob" sh -c 'printf "%s" "$1" | jq -se ".[0].data.details | .blob == \"sha256:$2\" and .size == 48894 and .exit == 0" >/dev/null' _ "$results" "$sum"
     blob="$XDG_STATE_HOME/pytte/sessions/$id/blobs/$(echo "$sum" | cut -c1-2)/$(echo "$sum" | cut -c3-)"
     check "...stored under its hash" [ "$(sha256sum <"$blob" | cut -c1-64)" = "$sum" ]
-    check "...the result says how to read it" sh -c 'printf "%s" "$1" | jq -se ".[0].data.content | contains(\"read_output pages through them\")" >/dev/null' _ "$results"
-    check "...read_output returns the asked bytes" sh -c 'printf "%s" "$1" | jq -se ".[1].data.content == \"8001\n8002\n8003\n8004\n8005\n8006\n…[bytes 38893-38923 of 48894; read on with offset 38923]\"" >/dev/null' _ "$results"
-    check "...and refuses an unknown call" sh -c 'printf "%s" "$1" | jq -se ".[2].data.is_error == true" >/dev/null' _ "$results"
-    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --context-window 8000 --script tests/faux/old_output.json count >/dev/null 2>&1
-    PYTTE_PERMISSION_MODE=auto "$pytte" -p -c --context-window 8000 --script tests/faux/old_output.json "page it" >/dev/null 2>&1
-    check "read_output finds a call from before a compaction" sh -c '"$1" log --json | jq -se "(map(select(.kind == \"epoch\")) | .[0].data.n == 2) and (map(select(.kind == \"tool_result\")) | .[0].data.content == \"10000\n\")" >/dev/null' _ "$pytte"
+    check "...the result names its file" sh -c 'printf "%s" "$1" | jq -se ".[0].data.content | contains(\"bytes omitted; the whole output is in $2]\")" >/dev/null' _ "$results" "$blob"
     d=$XDG_STATE_HOME/files
     mkdir -p "$d" && seq 1 5000 >"$d/big.txt"
     printf '{"turns": [{"content": [{"type": "tool_call", "name": "write", "args": {"path": "%s/notes.txt", "content": "hi"}}]}, {"content": [{"type": "tool_call", "name": "read", "args": {"path": "%s/big.txt"}}]}, {"content": [{"type": "text", "text": "Read."}]}]}' \

@@ -111,9 +111,11 @@ typedef struct blob_tmp {
     char path[4300]; /* the store's directory plus blobs/tmp/<16 hex> */
 } blob_tmp;
 
-static void blob_path(const posix_store *s, char *out, size_t cap, const char *hex)
+/* false when it does not fit */
+static bool blob_path(const posix_store *s, char *out, size_t cap, const char *hex)
 {
-    snprintf(out, cap, "%s/blobs/%.2s/%s", s->dir, hex, hex + 2);
+    int n = snprintf(out, cap, "%s/blobs/%.2s/%s", s->dir, hex, hex + 2);
+    return n > 0 && (size_t)n < cap;
 }
 
 static void *p_blob_begin(pt_store *vs)
@@ -209,6 +211,14 @@ static int p_blob_read(pt_store *vs, const char *hex, uint64_t off, void *p, siz
     r = read_at(fd, off, p, cap, got);
     close(fd);
     return r == 0 ? 0 : fail(vs, "cannot read", src);
+}
+
+static int p_blob_path(pt_store *vs, const char *hex, char *out, size_t cap)
+{
+    if (blob_path((posix_store *)vs, out, cap, hex))
+        return 0;
+    snprintf(vs->err, sizeof vs->err, "blob path too long");
+    return -1;
 }
 
 static int p_truncate(pt_store *vs, uint64_t off)
@@ -364,6 +374,7 @@ pt_store *pt_store_posix_open(const char *dir, bool create, char *err, size_t ca
     s->vt.blob_commit = p_blob_commit;
     s->vt.blob_abort = p_blob_abort;
     s->vt.blob_read = p_blob_read;
+    s->vt.blob_path = p_blob_path;
     s->vt.truncate = p_truncate;
     s->vt.live_put = p_live_put;
     s->vt.live_del = p_live_del;

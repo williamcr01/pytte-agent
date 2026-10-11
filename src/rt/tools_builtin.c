@@ -1,5 +1,5 @@
-/* The built-in tools (section 13.3): bash, read, write, edit and
- * read_output. Search and listing go through bash.
+/* The built-in tools (section 13.3): bash, read, write and edit. Search
+ * and listing go through bash.
  *
  * read records a stamp (size, mtime, SHA-256) in the doc "reads:<path>";
  * edit refuses a file that changed since, so the model never edits text
@@ -17,7 +17,6 @@
 
 #define CHUNK 65536
 #define READ_LIMIT 2000 /* lines a read shows unless it asks for more */
-#define PAGE 16000      /* read_output's largest page: under OUT_CAP, so never cut */
 
 typedef struct job job;
 
@@ -675,180 +674,6 @@ static void bash_cancel(void *ud, pt_rt *rt, uint32_t fx)
 
 /* ---- the table ---- */
 
-/* ---- read_output ---- */
-
-/* The blob a tool_result record names, if any. */
-static bool blob_of(builtins *b, const pt_json *rec, char hex[65], uint64_t *size)
-{
-    const pt_json *d = pt_json_get(pt_json_get(rec, "data"), "details");
-    pt_str ref = pt_json_str(pt_json_get(d, "blob"), &b->ar);
-    size_t k;
-    if (ref.n != 71 || memcmp(ref.p, "sha256:", 7) != 0)
-        return false;
-    for (k = 0; k < 64; k++) {
-        char ch = ref.p[7 + k];
-        if (!((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')))
-            return false;
-        hex[k] = ch;
-    }
-    hex[64] = 0;
-    *size = (uint64_t)pt_json_geti(d, "size", 0);
-    return true;
-}
-
-/* A line of the log that may hold call_id's result: parse it and look. */
-static int log_line(builtins *b, pt_str line, pt_str needle, pt_str call_id, char hex[65], uint64_t *size)
-{
-    const pt_json *c;
-    size_t i;
-    for (i = 0; i + needle.n <= line.n; i++)
-        if (line.p[i] == '"' && memcmp(line.p + i, needle.p, needle.n) == 0)
-            break;
-    if (i + needle.n > line.n)
-        return 0;
-    c = pt_json_get(pt_json_parse(line, &b->ar, NULL), "w");
-    for (c = c ? c->child : NULL; c; c = c->next)
-        if (pt_str_eqz(pt_json_gets(c, "kind", &b->ar), "tool_result") &&
-            pt_str_eq(pt_json_gets(pt_json_get(c, "data"), "call_id", &b->ar), call_id))
-            return blob_of(b, c, hex, size) ? 1 : -1;
-    return 0;
-}
-
-/* Results of earlier epochs are not in memory: read the log in chunks
- * (memory for one chunk and the longest line). 1 found, -1 not cut, 0
- * no such call. */
-static int find_in_log(builtins *b, pt_str call_id, char hex[65], uint64_t *size)
-{
-    pt_store *st = b->rt->c.store;
-    pt_buf line, needle;
-    pt_jw w;
-    uint64_t end, off = 0;
-    int found = 0;
-    if (!st->read || st->size(st, &end) != 0)
-        return 0;
-    pt_buf_init(&line, pt_sys_allocator());
-    pt_buf_init(&needle, pt_sys_allocator());
-    pt_buf_putz(&needle, "\"call_id\":");
-    pt_jw_init(&w, &needle);
-    pt_jw_str(&w, call_id);
-    while (!found && off < end) {
-        size_t got = 0, i, from = 0;
-        if (st->read(st, off, b->io, CHUNK, &got) != 0 || !got)
-            break;
-        for (i = 0; i < got && !found; i++) {
-            if (b->io[i] != '\n')
-                continue;
-            if (line.n) {
-                pt_buf_put(&line, b->io + from, i - from);
-                found = log_line(b, pt_buf_str(&line), pt_buf_str(&needle), call_id, hex, size);
-                pt_buf_reset(&line);
-            } else {
-                found = log_line(b, (pt_str){b->io + from, i - from}, pt_buf_str(&needle), call_id, hex, size);
-            }
-            from = i + 1;
-        }
-        if (!found && from < got)
-            pt_buf_put(&line, b->io + from, got - from);
-        off += got;
-    }
-    pt_buf_free(&line);
-    pt_buf_free(&needle);
-    return found;
-}
-
-/* The blob of call_id's output, from its result: false with why set when
- * there is none. */
-static bool find_blob(builtins *b, pt_str call_id, char hex[65], uint64_t *size, const char **why)
-{
-    pt_agent *a = pt_rt_agent(b->rt);
-    uint32_t i = pt_entry_count(a);
-    *why = "That call's output was not cut: all of it is in its result.";
-    while (i--) {
-        pt_entry_view e;
-        if (!pt_entry_at(a, i, &e) || !e.msg || strcmp(e.kind, "tool_result") != 0 ||
-            !pt_str_eq(e.msg->call_id, call_id))
-            continue;
-        return blob_of(b, pt_json_parse(e.raw, &b->ar, NULL), hex, size);
-    }
-    switch (find_in_log(b, call_id, hex, size)) { /* before a compaction */
-    case 1:
-        return true;
-    case -1:
-        return false;
-    default:
-        *why = "No tool call with that ID in this conversation.";
-        return false;
-    }
-}
-
-static void t_read_output(void *ud, pt_rt *rt, const pt_fx *fx)
-{
-    builtins *b = (builtins *)ud;
-    pt_store *st = rt->c.store;
-    const pt_json *args = args_of(b, fx);
-    const char *id = arg_str(b, args, "call_id"), *why;
-    int64_t offset = pt_json_geti(args, "offset", 0), limit = pt_json_geti(args, "limit", PAGE);
-    uint64_t size, end;
-    size_t got = 0, n;
-    char hex[65];
-    if (!id) {
-        done_text(rt, fx->id, PT_S("call_id is required"), true);
-        return;
-    }
-    if (!st->blob_read || !find_blob(b, pt_strz(id), hex, &size, &why)) {
-        done_text(rt, fx->id, st->blob_read ? pt_strz(why) : PT_S("This session keeps no tool output."), true);
-        return;
-    }
-    if (offset < 0)
-        offset = 0;
-    if (limit < 1 || limit > PAGE)
-        limit = PAGE;
-    if ((uint64_t)offset >= size) {
-        pt_buf_reset(&b->out);
-        pt_buf_putz(&b->out, "(the output has ");
-        pt_buf_u64(&b->out, size);
-        pt_buf_putz(&b->out, " bytes)");
-        done_text(rt, fx->id, pt_buf_str(&b->out), true);
-        return;
-    }
-    if (st->blob_read(st, hex, (uint64_t)offset, b->io, (size_t)limit, &got) != 0) {
-        done_text(rt, fx->id, pt_strz(st->err), true);
-        return;
-    }
-    /* End on a whole UTF-8 character when more follows. */
-    n = got;
-    if ((uint64_t)offset + got < size) {
-        size_t k = n, back = 0;
-        while (k && back < 3 && ((unsigned char)b->io[k - 1] & 0xC0) == 0x80) {
-            k--;
-            back++;
-        }
-        if (k && ((unsigned char)b->io[k - 1] & 0xC0) == 0xC0) {
-            unsigned char lead = (unsigned char)b->io[k - 1];
-            size_t len = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
-            if (back + 1 < len) /* the character runs past the page */
-                n = k - 1;
-        }
-    }
-    end = (uint64_t)offset + n;
-    pt_buf_reset(&b->out);
-    pt_buf_put(&b->out, b->io, n);
-    if (end < size) {
-        if (n && b->io[n - 1] != '\n')
-            pt_buf_putc(&b->out, '\n');
-        pt_buf_putz(&b->out, "…[bytes ");
-        pt_buf_i64(&b->out, offset);
-        pt_buf_putz(&b->out, "-");
-        pt_buf_u64(&b->out, end);
-        pt_buf_putz(&b->out, " of ");
-        pt_buf_u64(&b->out, size);
-        pt_buf_putz(&b->out, "; read on with offset ");
-        pt_buf_u64(&b->out, end);
-        pt_buf_putz(&b->out, "]");
-    }
-    done_text(rt, fx->id, pt_buf_str(&b->out), false);
-}
-
 static const char bash_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"command\":{\"type\":\"string\",\"description\":\"The command line\"},"
@@ -871,13 +696,6 @@ static const char edit_schema[] =
     "\"new\":{\"type\":\"string\"},"
     "\"all\":{\"type\":\"boolean\",\"description\":\"Replace every match instead of exactly one\"}},"
     "\"required\":[\"path\",\"old\",\"new\"],\"additionalProperties\":false}";
-static const char read_output_schema[] =
-    "{\"type\":\"object\",\"properties\":{"
-    "\"call_id\":{\"type\":\"string\",\"description\":\"The ID of the tool call whose output was cut\"},"
-    "\"offset\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"First byte, from 0\"},"
-    "\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":16000,\"description\":\"Bytes to show (default 16000)\"}},"
-    "\"required\":[\"call_id\"],\"additionalProperties\":false}";
-
 static void builtins_free(void *ud)
 {
     builtins *b = (builtins *)ud;
@@ -897,7 +715,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
 {
     builtins *b = (builtins *)calloc(1, sizeof *b);
     const pt_ai_catalog *cat = pt_ai_builtin_catalog();
-    pt_rt_tool t[5];
+    pt_rt_tool t[4];
     uint32_t i, k, n = 0;
     if (!b || !(b->io = (char *)malloc(CHUNK))) {
         free(b);
@@ -913,7 +731,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     rt->builtin = b;
     rt->builtin_free = builtins_free;
     memset(t, 0, sizeof t);
-    for (i = 0; i < 5; i++) {
+    for (i = 0; i < 4; i++) {
         t[i].def.source = PT_S("builtin");
         t[i].ud = b;
     }
@@ -945,16 +763,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
         "file must have been read since it last changed.");
     t[3].def.schema = PT_S(edit_schema);
     t[3].run = t_edit;
-    t[4].def.name = PT_S("read_output");
-    t[4].def.description = PT_S(
-        "Page through the full output of an earlier tool call whose result was cut (it says bytes "
-        "were omitted), by byte offset.");
-    t[4].def.schema = PT_S(read_output_schema);
-    t[4].def.replay = PT_REPLAY_SAFE;
-    t[4].def.parallel = true;
-    t[4].def.read_only = true;
-    t[4].run = t_read_output;
-    for (i = 0; i < 5; i++)
+    for (i = 0; i < 4; i++)
         if (!pt_rt_tool_add(rt, &t[i]))
             return false;
     return true;

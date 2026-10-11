@@ -9,7 +9,7 @@ OpenAI and OpenRouter. The core (`libpytte`) commits every step to a session
 log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
 few rows at the bottom and leaves the rest to the terminal's scrollback.
-The model works with five tools (bash, read, write, edit, read_output);
+The model works with four tools (bash, read, write, edit);
 each call is a durable task, so a crash never runs an unsafe call twice.
 When the conversation nears the model's context window, pytte compacts it
 into a summary and carries on, so sessions outlive any one window.
@@ -123,8 +123,8 @@ line numbers. `write` replaces a whole file atomically. `edit` replaces
 text that must match exactly once, and refuses when the file changed since
 the model last read it. The model sees up to 16 KB of output: the first
 4 KB and the last 12 KB. Longer output is kept whole in the session's
-`blobs/` (content-addressed, SHA-256), and `read_output` pages through it
-by call ID and byte offset. A prompt of 16 KB or more (a big paste) is
+`blobs/` (content-addressed, SHA-256), and the cut result names that file
+so the model can `read` or `grep` it. A prompt of 16 KB or more (a big paste) is
 stored the same way, once, and the log refers to it. Arguments are checked against each tool's JSON
 schema before anything runs.
 
