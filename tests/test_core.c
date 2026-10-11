@@ -499,6 +499,42 @@ static void test_big_prompt(void)
     pt_buf_free(&got);
 }
 
+/* max_tokens comes from the same estimate as the compaction check: the
+ * provider's count for the last answer, not a guess from the bytes (text
+ * of about 3.8 bytes a token would make a bytes/3 guess too high, and the
+ * answer would get 1 token in a context with room to spare). */
+static void test_max_tokens_estimate(void)
+{
+    static const char script[] =
+        "{\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Read it.\"}],"
+        "\"usage\":{\"input\":13160,\"output\":10}},"
+        "{\"content\":[{\"type\":\"text\",\"text\":\"Plenty of room.\"}]}]}";
+    static char text[50001];
+    const char *mt;
+    pt_config c;
+    host h;
+    size_t i;
+    for (i = 0; i < sizeof text - 1; i++)
+        text[i] = (char)('a' + (i * 7) % 26);
+    h_init(&h, script);
+    h_create(&h);
+    memset(&c, 0, sizeof c);
+    c.model = PT_S("faux/faux");
+    c.live_interval_ms = 1;
+    c.context_window = 20000;
+    pt_set_config(h.a, &c);
+    h_submit(&h, text, NULL);
+    h_run(&h);
+    h_submit(&h, "and then?", NULL);
+    h_run(&h);
+    CHECK(h.done == 2);
+    CHECK(h.mat_asked == 0); /* 13170 + the reserve fit: no compaction */
+    pt_buf_putc(&h.last_request, '\0');
+    mt = strstr(h.last_request.p, "\"max_tokens\":");
+    CHECK(mt && strtoul(mt + 13, NULL, 10) > 2000); /* 20000 - 13170 - 4096 */
+    h_free(&h);
+}
+
 /* A compaction asks the host for the new epoch's system prompt and tools
  * once, as it starts, and freezes them; NULL keeps the current ones. */
 static void test_epoch_materials(void)
@@ -813,6 +849,7 @@ int main(void)
     RUN(test_retry);
     RUN(test_big_prompt);
     RUN(test_epoch_materials);
+    RUN(test_max_tokens_estimate);
     RUN(test_tool_call_without_tools);
     RUN(test_fatal_error);
     RUN(test_queue_and_req);

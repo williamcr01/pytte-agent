@@ -110,7 +110,7 @@ typedef struct pt_config {
     bool no_sync;              /* skip fsync: survives process crashes, not power loss */
     bool serial_tools;         /* run a round's tools one at a time even when all may run together */
     uint32_t context_window;   /* 0: the model's */
-    uint32_t compact_reserve;  /* compact when fewer tokens are left; 0: 16384 (a quarter of small windows) */
+    uint32_t compact_reserve;  /* compact when fewer tokens are left; 0: 24576 (a quarter of small windows) */
 } pt_config;
 
 typedef struct pt_opts {

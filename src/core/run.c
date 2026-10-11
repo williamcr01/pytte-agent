@@ -40,6 +40,8 @@ bool pt_run_resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
         pt_core_fail(a, PT_FATAL_CONFIG, why ? why : "out of memory", ref);
         return false;
     }
+    if (a->o.config.context_window)
+        out->model.context_window = a->o.config.context_window;
     return true;
 }
 
@@ -66,8 +68,9 @@ bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
 /* ---- prepare ---- */
 
 /* Tokens the context through cutoff takes (section 12.1): what the newest
- * answer's request and output took, and a quarter of a token per byte of
- * what came after it. */
+ * answer's request and output took, as the provider counted them, and a
+ * guess for what came after it. One estimate decides both compaction and
+ * max_tokens, so the two never disagree. */
 static uint64_t estimate(pt_agent *a, uint32_t cutoff)
 {
     uint64_t bytes = 0, tokens = 0;
@@ -75,27 +78,29 @@ static uint64_t estimate(pt_agent *a, uint32_t cutoff)
     while (i-- > 0) {
         const entry *e = &a->entries[i];
         const pt_usage *u = &e->msg.usage;
-        if (e->id > cutoff)
+        if (e->id > cutoff || !pt_core_sent(e))
             continue;
-        if (e->kind == ENT_ASSISTANT && e->msg.stop != PT_STOP_ERROR && e->msg.stop != PT_STOP_ABORTED &&
-            (u->input || u->output)) {
+        if (e->kind == ENT_ASSISTANT && (u->input || u->output)) {
             tokens = u->input + u->cache_read + u->cache_write + u->output;
             break;
         }
-        bytes += e->raw.n;
+        bytes += pt_core_sent_bytes(a, e);
     }
-    return tokens + bytes / 4;
+    return tokens + bytes / 3; /* generous: a guess too low overflows */
 }
 
+/* Room kept free for the next answer and one round of tool results. */
+#define RESERVE 24576
+
 /* Over budget: wait for a summary of the epoch instead of sending it. */
-static bool over_budget(pt_agent *a, const pt_ai_target *target, uint32_t cutoff)
+static bool over_budget(pt_agent *a, const pt_ai_target *target, uint64_t used)
 {
     const pt_config *c = &a->o.config;
-    uint64_t window = c->context_window ? c->context_window : target->model.context_window, reserve;
+    uint64_t window = target->model.context_window, reserve;
     if (!window)
         return false;
-    reserve = c->compact_reserve ? c->compact_reserve : window / 4 < 16384 ? window / 4 : 16384;
-    return estimate(a, cutoff) + reserve > window && pt_compact_possible(a);
+    reserve = c->compact_reserve ? c->compact_reserve : window / 4 < RESERVE ? window / 4 : RESERVE;
+    return used + reserve > window && pt_compact_possible(a);
 }
 
 static bool start_compaction(pt_agent *a, task *t, uint32_t cutoff)
@@ -118,12 +123,14 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     pt_credentials cred;
     entry *last = pt_core_last_entry(a);
     task nt = *t;
+    uint64_t used;
     pt_buf ref;
     bool ok;
     if (!pt_run_resolve(a, c->model, &target, sa) || !pt_run_credentials(a, target.provider, &cred))
         return false;
     nt.cutoff = last ? last->id : 0;
-    if (over_budget(a, &target, nt.cutoff))
+    used = estimate(a, nt.cutoff);
+    if (over_budget(a, &target, used))
         return start_compaction(a, t, nt.cutoff);
     if (!pt_core_context(a, nt.cutoff, &ctx, sa)) {
         pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
@@ -138,7 +145,7 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     nt.attempt = attempt;
     nt.model = pt_buf_str(&ref);
     nt.reasoning = c->reasoning;
-    nt.max_tokens = c->max_tokens ? c->max_tokens : pt_ai_auto_max_tokens(&target, &ctx, 0);
+    nt.max_tokens = c->max_tokens ? c->max_tokens : pt_ai_auto_max_tokens(&target, &ctx, used < UINT32_MAX ? (uint32_t)(used ? used : 1) : UINT32_MAX);
     pt_core_commit_begin(a, t->id);
     pt_write_task(&a->cw, &nt);
     ok = pt_core_commit_end(a);

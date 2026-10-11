@@ -108,7 +108,7 @@ a question ends the process with exit code 3 and prints the
 `pytte approve` command that answers it.
 
 Long sessions: before a request that would not fit the context window
-(less 16k tokens, or a quarter of a small window), or after the provider
+(less 24k tokens, or a quarter of a small window), or after the provider
 says the prompt is too long, the model writes a summary of the
 conversation so far and a new epoch starts from it. The log keeps everything: `pytte log --all-epochs` shows
 the earlier epochs. `/compact` compacts now. `--context-window N` pretends

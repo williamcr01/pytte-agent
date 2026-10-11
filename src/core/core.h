@@ -264,6 +264,8 @@ void pt_task_release(pt_agent *a, task *t); /* free its process-only state */
 /* ---- context.c ---- */
 /* The current epoch through entry `cutoff`, as a unified context. */
 bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena *ar);
+bool pt_core_sent(const entry *e); /* part of the requests */
+uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e);
 
 /* ---- run.c ---- */
 /* Advance a run task; true when it queued something. */

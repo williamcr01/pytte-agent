@@ -5,7 +5,7 @@
 
 #include <string.h>
 
-static bool sent(const entry *e)
+bool pt_core_sent(const entry *e)
 {
     switch (e->kind) {
     case ENT_EPOCH:
@@ -20,6 +20,21 @@ static bool sent(const entry *e)
         return false;
     }
     return false;
+}
+
+/* About what e adds to a request: its content, not its log line (which
+ * also holds ids, usage and JSON escapes). */
+uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e)
+{
+    const pt_msg *m = &e->msg;
+    uint64_t n = 16 + m->text.n + e->summary.n + e->request.n;
+    uint32_t i;
+    for (i = 0; i < m->nblocks; i++)
+        n += 16 + m->blocks[i].text.n + m->blocks[i].args.n + m->blocks[i].signature.n / 4;
+    if (e->kind == ENT_EPOCH)
+        for (i = 0; i < a->ntools; i++)
+            n += 32 + a->tools[i].name.n + a->tools[i].description.n + a->tools[i].schema.n;
+    return n;
 }
 
 /* The tool results after an assistant entry with calls, in call order
@@ -81,7 +96,7 @@ bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena 
         return false;
     for (i = 0; i < a->nentries && a->entries[i].id <= cutoff; i++) {
         const entry *e = &a->entries[i];
-        if (e->kind == ENT_TOOL_RESULT || !sent(e))
+        if (e->kind == ENT_TOOL_RESULT || !pt_core_sent(e))
             continue; /* results are placed after their calls */
         msgs[n++] = e->msg;
         if (e->kind == ENT_EPOCH && e->summary.n && !summary_msg(e, &msgs[n++], ar))

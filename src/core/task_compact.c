@@ -153,7 +153,7 @@ bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena
     size_t n, head, tail;
     if (!msgs || !pt_run_resolve(a, t->model, &target, ar))
         return false;
-    window = a->o.config.context_window ? a->o.config.context_window : target.model.context_window;
+    window = target.model.context_window;
     /* about 3 bytes per token, leaving room for the summary */
     budget = window > (uint64_t)t->max_tokens + 2048 ? (window - t->max_tokens - 2048) * 3 : 0;
     if (budget < 16384)
