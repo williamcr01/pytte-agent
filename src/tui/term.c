@@ -37,7 +37,11 @@ struct tui_term {
 };
 
 /* For the signal handlers, which can only touch these. */
-static int g_sigw = -1, g_out = -1;
+static int g_sigw = -1, g_out = -1, g_in = -1;
+static struct sigaction g_old_pipe[sizeof((int[]){SIGWINCH, SIGTSTP, SIGCONT, SIGINT, SIGTERM, SIGQUIT, SIGHUP}) / sizeof(int)];
+static struct sigaction g_old_fatal[sizeof((int[]){SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGFPE}) / sizeof(int)];
+static struct sigaction g_old_sigpipe;
+static bool g_handlers_saved;
 static volatile sig_atomic_t g_raw;
 static struct termios g_saved;
 static char g_restore[64];
@@ -135,7 +139,8 @@ static void on_fatal(int sig)
 {
     if (g_out >= 0 && g_raw) {
         (void)!write(g_out, g_restore, (size_t)g_restore_n);
-        tcsetattr(g_out, TCSANOW, &g_saved);
+        if (g_in >= 0)
+            tcsetattr(g_in, TCSANOW, &g_saved);
     }
     signal(sig, SIG_DFL);
     raise(sig);
@@ -212,11 +217,18 @@ tui_term *tui_term_new(void)
     if (tf && *tf)
         t->trace = open(tf, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     g_out = t->out;
-    signal(SIGPIPE, SIG_IGN);
-    for (i = 0; i < sizeof pipe_sigs / sizeof pipe_sigs[0]; i++)
+    g_in = t->in;
+    sigaction(SIGPIPE, NULL, &g_old_sigpipe);
+    for (i = 0; i < sizeof pipe_sigs / sizeof pipe_sigs[0]; i++) {
+        sigaction(pipe_sigs[i], NULL, &g_old_pipe[i]);
         handle(pipe_sigs[i], on_signal);
-    for (i = 0; i < sizeof fatal_sigs / sizeof fatal_sigs[0]; i++)
+    }
+    for (i = 0; i < sizeof fatal_sigs / sizeof fatal_sigs[0]; i++) {
+        sigaction(fatal_sigs[i], NULL, &g_old_fatal[i]);
         handle(fatal_sigs[i], on_fatal);
+    }
+    g_handlers_saved = true;
+    signal(SIGPIPE, SIG_IGN);
     set_restore(false);
     return t;
 }
@@ -391,8 +403,15 @@ void tui_term_free(tui_term *t)
         close(t->dog);
     g_sigw = -1;
     g_out = -1;
-    for (i = 0; i < sizeof pipe_sigs / sizeof pipe_sigs[0]; i++)
-        signal(pipe_sigs[i], SIG_DFL);
+    g_in = -1;
+    if (g_handlers_saved) {
+        sigaction(SIGPIPE, &g_old_sigpipe, NULL);
+        for (i = 0; i < sizeof pipe_sigs / sizeof pipe_sigs[0]; i++)
+            sigaction(pipe_sigs[i], &g_old_pipe[i], NULL);
+        for (i = 0; i < sizeof fatal_sigs / sizeof fatal_sigs[0]; i++)
+            sigaction(fatal_sigs[i], &g_old_fatal[i], NULL);
+        g_handlers_saved = false;
+    }
     for (i = 0; i < 2; i++)
         if (t->sig[i] >= 0)
             close(t->sig[i]);

@@ -195,17 +195,22 @@ static int emit(pt_buf *out, pt_str first, pt_str cont, int pw, pt_str text, int
     int n = 0;
     pt_buf_init(&rows, out->al);
     tui_wrap(&rows, text, width - pw > 1 ? width - pw : 1, 0, words, band);
+    if (rows.oom) {
+        pt_buf_free(&rows);
+        return -1;
+    }
     while (at < rows.n) {
         size_t e = at;
-        while (rows.p[e] != '\n')
+        while (e < rows.n && rows.p[e] != '\n')
             e++;
         pt_buf_puts(out, n ? cont : first);
-        pt_buf_put(out, rows.p + at, e - at + 1);
-        at = e + 1;
+        pt_buf_put(out, rows.p + at, e - at);
+        pt_buf_putc(out, '\n'); /* tui_wrap may leave its final row unterminated */
+        at = e < rows.n ? e + 1 : e;
         n++;
     }
     pt_buf_free(&rows);
-    return n;
+    return out->oom ? -1 : n;
 }
 
 static int plain_row(pt_buf *out, pt_str s, int base)

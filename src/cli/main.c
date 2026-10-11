@@ -292,7 +292,8 @@ static void on_stream(ui *u, const pt_ai_event *ev)
         break;
     case PT_EV_TEXT_DELTA:
         fwrite(ev->delta.p, 1, ev->delta.n, stdout);
-        u->text_nl = ev->delta.p[ev->delta.n - 1] == '\n';
+        if (ev->delta.n)
+            u->text_nl = ev->delta.p[ev->delta.n - 1] == '\n';
         u->any_text = true;
         fflush(stdout);
         break;
@@ -466,8 +467,16 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
             in.text = pt_buf_str(&text);
             break;
         }
-        if (!pt_submit(s.a, &in))
-            die(pt_error(s.a), NULL);
+        if (!pt_submit(s.a, &in)) {
+            char dir[4200];
+            fprintf(stderr, "pytte: %s\n", pt_error(s.a));
+            snprintf(dir, sizeof dir, "%s", s.dir);
+            cli_session_close(&s);
+            if (!id)
+                cli_session_discard(dir); /* discard a newly-created empty session */
+            pt_buf_free(&text);
+            return 1;
+        }
         pt_buf_free(&text);
     }
     if (o->out == OUT_TEXT)
@@ -598,8 +607,13 @@ static int load_log(pt_agent *a, const char *id, const char *path)
         size_t i, from = 0;
         if (got < 0 && errno == EINTR)
             continue;
-        if (got <= 0)
+        if (got == 0)
             break;
+        if (got < 0) {
+            fprintf(stderr, "pytte: cannot read %s: %s\n", path, strerror(errno));
+            code = 20;
+            break;
+        }
         for (i = 0; i < (size_t)got; i++) {
             pt_load_result r;
             pt_str l;
@@ -676,6 +690,10 @@ static int cmd_log(const opts *o)
     ao.blob = read_blob;
     ao.blob_ud = dir;
     a = pt_new(&ao);
+    if (!a) {
+        fprintf(stderr, "pytte: out of memory loading %s\n", path);
+        return 20;
+    }
     if ((code = load_log(a, id, path)) != 0) {
         pt_free(a);
         return code;

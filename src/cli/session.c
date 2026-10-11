@@ -555,6 +555,7 @@ cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *i
 {
     cli_open_job *job;
     const char *values[5];
+    const char *failure = "could not allocate the session I/O worker";
     size_t total = s->a ? sizeof(cli_session) : 0, i;
     if (draft.n > SIZE_MAX - total) {
         snprintf(err, cap, "session draft is too large");
@@ -595,6 +596,10 @@ cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *i
             pt_buf_put(&job->args, values[i], strlen(values[i]) + 1);
             values[i] = v;
         }
+    if (job->args.oom) {
+        failure = "out of memory copying session arguments";
+        goto fail;
+    }
     job->o = *o;
     job->o.model = values[0];
     job->o.system = values[1];
@@ -628,7 +633,7 @@ cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *i
     }
     return job;
 fail:
-    snprintf(err, cap, "could not allocate the session I/O worker");
+    snprintf(err, cap, "%s", failure);
     job_free(job);
     return NULL;
 }

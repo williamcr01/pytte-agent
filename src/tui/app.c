@@ -2996,6 +2996,35 @@ static int quit_code(int sig)
     return 128 + sig;
 }
 
+/* Startup can fail before the band/session are initialized. Release every
+ * buffer and arena initialized by tui_run, then restore/free the terminal. */
+static void startup_free(app *a)
+{
+    int i;
+    tui_term_free(a->t);
+    tui_keys_free(&a->keys);
+    tui_input_free(&a->in);
+    tui_frame_free(&a->frame);
+    pt_buf_free(&a->lines);
+    pt_buf_free(&a->tmp);
+    pt_buf_free(&a->tmp2);
+    pt_buf_free(&a->wrap);
+    pt_buf_free(&a->live_rows);
+    pt_buf_free(&a->live);
+    pt_buf_free(&a->retry_err);
+    for (i = 0; i < RUN_MAX; i++) {
+        pt_buf_free(&a->runs[i].id);
+        pt_buf_free(&a->runs[i].head);
+        pt_buf_free(&a->runs[i].out);
+    }
+    pt_buf_free(&a->diff);
+    pt_buf_free(&a->grp);
+    pt_buf_free(&a->items_buf);
+    pt_buf_free(&a->pending_history);
+    pt_buf_free(&a->command);
+    pt_arena_free(&a->ar);
+}
+
 int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prompt)
 {
     app a;
@@ -3042,7 +3071,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_init(&a.command, pt_sys_allocator());
     pt_arena_init(&a.ar, pt_sys_allocator(), 0);
     if (!tui_term_start(a.t, !term || (strncmp(term, "linux", 5) != 0 && strncmp(term, "vt", 2) != 0))) {
-        tui_term_free(a.t);
+        startup_free(&a);
         fprintf(stderr, "pytte: cannot set up the terminal\n");
         return 1;
     }
@@ -3051,7 +3080,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     if (id)
         snprintf(picked, sizeof picked, "%s", id);
     if (!open_session(&a, id ? picked : NULL)) {
-        tui_term_free(a.t);
+        startup_free(&a);
         fprintf(stderr, "pytte: %s\n", a.err);
         return a.code ? a.code : 1;
     }
