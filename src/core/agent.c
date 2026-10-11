@@ -334,7 +334,6 @@ static void build_create(pt_agent *a)
 {
     pt_jw *w = &a->cw;
     const pt_session_cfg *c = &a->create;
-    uint32_t i;
     pt_core_commit_begin(a, 0);
     pt_jw_obj(w);
     pt_jw_key(w, "t");
@@ -360,9 +359,20 @@ static void build_create(pt_agent *a)
     pt_jw_key(w, "system");
     pt_jw_str(w, c->system);
     pt_jw_key(w, "tools");
+    pt_core_write_tool_defs(w, c->tools, c->ntools);
+    pt_jw_key(w, "skills");
+    pt_jw_raw(w, PT_S("[]"));
+    pt_core_entry_end(a);
+    a->want_create = false;
+    pt_core_commit_end(a);
+}
+
+void pt_core_write_tool_defs(pt_jw *w, const pt_tool_def *defs, uint32_t n)
+{
+    uint32_t i;
     pt_jw_arr(w);
-    for (i = 0; i < c->ntools; i++) {
-        const pt_tool_def *d = &c->tools[i];
+    for (i = 0; i < n; i++) {
+        const pt_tool_def *d = &defs[i];
         pt_jw_obj(w);
         pt_jw_key(w, "name");
         pt_jw_str(w, d->name);
@@ -379,11 +389,6 @@ static void build_create(pt_agent *a)
         pt_jw_obj_end(w);
     }
     pt_jw_arr_end(w);
-    pt_jw_key(w, "skills");
-    pt_jw_raw(w, PT_S("[]"));
-    pt_core_entry_end(a);
-    a->want_create = false;
-    pt_core_commit_end(a);
 }
 
 /* What a closing owner leaves behind, for `pytte ls` (which reads only
@@ -773,6 +778,8 @@ pt_agent *pt_new(const pt_opts *o)
     pt_arena_init(&a->after_a, a->al, 1024);
     pt_buf_init(&a->commit, a->al);
     pt_buf_init(&a->live_out, a->al);
+    pt_buf_init(&a->mat_system, a->al);
+    pt_buf_init(&a->mat_tools, a->al);
     for (i = 0; i < PT_FXQ; i++)
         pt_buf_init(&a->q[i].bytes, a->al);
     a->next_id = 1;
@@ -817,6 +824,8 @@ void pt_free(pt_agent *a)
         pt_buf_free(&a->q[i].bytes);
     pt_buf_free(&a->commit);
     pt_buf_free(&a->live_out);
+    pt_buf_free(&a->mat_system);
+    pt_buf_free(&a->mat_tools);
     pt_arena_free(&a->perm);
     pt_arena_free(&a->epoch);
     pt_arena_free(&a->scratch);

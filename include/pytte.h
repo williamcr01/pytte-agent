@@ -37,7 +37,8 @@ typedef enum {
     PT_FX_GATE,       /* may this tool call run? answer with pt_fx_gate */
     PT_FX_ASK,        /* ask the user about a tool call; answered by pt_approve, no completion */
     PT_FX_TOOL,       /* run a tool: pt_fx_data for its output as it comes, then pt_fx_tool */
-    PT_FX_BLOB        /* store bytes as a blob (section 6.5); complete with pt_fx_blob */
+    PT_FX_BLOB,       /* store bytes as a blob (section 6.5); complete with pt_fx_blob */
+    PT_FX_EPOCH_MATERIALS /* a new epoch's system prompt and tools; complete with pt_fx_materials */
 } pt_fx_kind;
 
 /* What running a tool again after an unknown partial run does (section 13.4). */
@@ -49,7 +50,9 @@ typedef struct pt_fx {
     uint32_t task; /* the task it serves; 0 for session commits */
     /* COMMIT: one line with its newline, valid until completed.
      * LIVE: the snapshot, valid until the next pt_poll.
-     * BLOB: the contents, valid until completed. */
+     * BLOB: the contents, valid until completed.
+     * EPOCH_MATERIALS: the current epoch's system prompt (to keep when the
+     * host has nothing newer), valid until completed. */
     pt_str bytes;
     bool sync;                /* COMMIT */
     const pt_http_req *http;  /* HTTP: valid until completed or cancelled */
@@ -61,6 +64,7 @@ typedef struct pt_fx {
     pt_str prompt;            /* ASK */
     uint32_t attempt;         /* TOOL: 2 and up when run again after a crash */
     pt_replay replay;         /* GATE, TOOL */
+    uint32_t epoch;           /* EPOCH_MATERIALS: the new epoch's number */
 } pt_fx;
 
 /* ---- events (display only; no reply) ----------------------------------------- */
@@ -240,6 +244,17 @@ typedef struct pt_tool_result {
 
 /* A TOOL ended (also after PT_FX_CANCEL: with what it produced). Copied. */
 void pt_fx_tool(pt_agent *a, uint32_t fx, const pt_tool_result *r);
+
+/* What a new epoch freezes (section 12.3): built by the host when the
+ * core asks. Copied. */
+typedef struct pt_materials {
+    pt_str system;
+    const pt_tool_def *tools;
+    uint32_t ntools;
+} pt_materials;
+
+/* The answer to EPOCH_MATERIALS; NULL keeps the current epoch's. */
+void pt_fx_materials(pt_agent *a, uint32_t fx, const pt_materials *m);
 
 /* A BLOB is durable: ref is "sha256:<hex>" (copied), or empty when it
  * could not be stored (the bytes then stay inline in the log). */

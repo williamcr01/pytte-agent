@@ -438,6 +438,15 @@ static void handle(pt_rt *rt, const pt_fx *fx)
     case PT_FX_BLOB:
         start_io(rt, fx);
         break;
+    case PT_FX_EPOCH_MATERIALS: {
+        /* The tools as registered now; the session's system prompt (prompt
+         * files join it in M5). */
+        pt_materials m;
+        m.system = fx->bytes;
+        m.tools = pt_rt_tool_defs(rt, &m.ntools);
+        pt_fx_materials(rt->a, fx->id, &m);
+        break;
+    }
     case PT_FX_GATE:
         pt_rt_gate(rt, fx);
         break;

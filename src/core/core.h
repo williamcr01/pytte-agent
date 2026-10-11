@@ -179,6 +179,11 @@ struct pt_agent {
     /* requested session writes */
     bool want_create, want_open, want_close, closing, closed;
     bool want_compact; /* pt_compact: commit a compact task when no run is active */
+    /* The next epoch's materials (PT_FX_EPOCH_MATERIALS), for the compact
+     * task mat_task: asked for once its request is about to start. */
+    uint32_t mat_task, mat_fx;
+    bool mat_ready, mat_keep; /* keep: the host had nothing newer */
+    pt_buf mat_system, mat_tools; /* tools: a JSON array, as frozen */
     pt_session_cfg create;
     pt_identity me;
     pt_str my_token, takeover;
@@ -288,6 +293,9 @@ bool pt_run_sleep(pt_agent *a, task *t);
 void pt_run_write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int64_t retry_at);
 /* Record the tokens of a message in the usage doc (in the open commit). */
 void pt_run_add_usage(pt_agent *a, const pt_msg *m, pt_str model);
+
+/* The tools array of an epoch entry (agent.c). */
+void pt_core_write_tool_defs(pt_jw *w, const pt_tool_def *defs, uint32_t n);
 
 /* ---- task_compact.c ---- */
 /* True when the epoch holds an answer from the model, so a summary can

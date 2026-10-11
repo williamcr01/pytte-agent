@@ -233,6 +233,54 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     return ok;
 }
 
+typedef enum { MAT_READY, MAT_ASKED, MAT_WAITING } mat_state;
+
+/* The next epoch's materials for t (section 12.3), asked for once: when
+ * the compaction starts its request, so they are as of this moment. */
+static mat_state want_materials(pt_agent *a, task *t)
+{
+    pt_fx fx;
+    if (a->mat_task == t->id && a->mat_ready)
+        return MAT_READY;
+    if (a->mat_task == t->id && a->mat_fx)
+        return MAT_WAITING;
+    a->mat_task = t->id;
+    a->mat_ready = false;
+    memset(&fx, 0, sizeof fx);
+    fx.kind = PT_FX_EPOCH_MATERIALS;
+    fx.id = a->mat_fx = pt_core_new_fx(a);
+    fx.task = t->id;
+    fx.epoch = a->cur_epoch + 1;
+    fx.bytes = a->nentries ? a->entries[0].msg.text : PT_STR_NULL;
+    pt_core_queue(a, &fx, PT_STR_NULL);
+    return MAT_ASKED;
+}
+
+void pt_fx_materials(pt_agent *a, uint32_t fx, const pt_materials *m)
+{
+    pt_jw w;
+    if (!fx || fx != a->mat_fx)
+        return; /* the compaction ended meanwhile */
+    a->mat_fx = 0;
+    a->mat_ready = true;
+    a->mat_keep = !m;
+    pt_buf_reset(&a->mat_system);
+    pt_buf_reset(&a->mat_tools);
+    if (m) {
+        pt_buf_puts(&a->mat_system, m->system);
+        pt_jw_init(&w, &a->mat_tools);
+        pt_core_write_tool_defs(&w, m->tools, m->ntools);
+        if (a->mat_system.oom || a->mat_tools.oom)
+            a->mat_keep = true; /* the current epoch's, then */
+    }
+}
+
+static void materials_done(pt_agent *a)
+{
+    a->mat_task = a->mat_fx = 0;
+    a->mat_ready = false;
+}
+
 /* The tools array of the current epoch, as it was frozen. */
 static pt_str epoch_tools(pt_agent *a)
 {
@@ -289,13 +337,14 @@ bool pt_compact_finish(pt_agent *a, task *t)
     pt_core_commit_begin(a, t->id);
     if ((m->stop == PT_STOP_STOP || m->stop == PT_STOP_LENGTH) && summary.n) {
         uint32_t id = pt_core_new_id(a);
+        bool fresh = a->mat_task == t->id && a->mat_ready && !a->mat_keep;
         pt_core_entry_head(a, id, "epoch", a->cur_epoch + 1);
         pt_jw_key(w, "n");
         pt_jw_uint(w, a->cur_epoch + 1);
         pt_jw_key(w, "system");
-        pt_jw_str(w, a->nentries ? a->entries[0].msg.text : PT_STR_NULL);
+        pt_jw_str(w, fresh ? pt_buf_str(&a->mat_system) : a->nentries ? a->entries[0].msg.text : PT_STR_NULL);
         pt_jw_key(w, "tools");
-        pt_jw_raw(w, epoch_tools(a));
+        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_tools) : epoch_tools(a));
         pt_jw_key(w, "skills");
         pt_jw_raw(w, PT_S("[]"));
         pt_jw_key(w, "summary");
@@ -338,6 +387,8 @@ bool pt_compact_finish(pt_agent *a, task *t)
     }
     pt_run_add_usage(a, m, t->model);
     ok = !summary.oom && !why.oom && pt_core_commit_end(a);
+    if (nt.status == ST_DONE)
+        materials_done(a);
     pt_buf_free(&summary);
     pt_buf_free(&why);
     if (!rl->http_done)
@@ -360,6 +411,9 @@ bool pt_compact_step(pt_agent *a, task *t)
     case PH_REQUEST:
         if (!t->live) {
             pt_event ev;
+            mat_state ms = want_materials(a, t);
+            if (ms != MAT_READY)
+                return ms == MAT_ASKED;
             memset(&ev, 0, sizeof ev);
             ev.kind = PT_E_COMPACT;
             ev.task = t->id;
@@ -384,5 +438,7 @@ uint32_t pt_compact_abort(pt_agent *a, task *t)
     nt.reason = PT_S("interrupted by the user");
     nt.result = 0;
     pt_write_task(&a->cw, &nt);
+    if (a->mat_task == t->id)
+        materials_done(a);
     return fx;
 }

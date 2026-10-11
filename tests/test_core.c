@@ -36,6 +36,8 @@ typedef struct host {
     pt_buf blob;              /* the one blob this host keeps, and its ref */
     char blob_ref[72];
     bool no_blobs;            /* a store without blobs */
+    const pt_materials *mat;  /* the answer to EPOCH_MATERIALS (NULL: keep) */
+    uint32_t mat_asked, mat_epoch;
 } host;
 
 static bool h_blob(void *ud, pt_str ref, pt_arena *ar, pt_str *out)
@@ -201,6 +203,12 @@ static bool h_run(host *h)
             break;
         case PT_FX_CANCEL:
             h->cancelled = fx.cancel;
+            break;
+        case PT_FX_EPOCH_MATERIALS:
+            h->mat_asked++;
+            h->mat_epoch = fx.epoch;
+            CHECK(pt_str_eqz(fx.bytes, "You are a test."));
+            pt_fx_materials(h->a, fx.id, h->mat);
             break;
         case PT_FX_BLOB:
             if (h->no_blobs) {
@@ -491,6 +499,52 @@ static void test_big_prompt(void)
     pt_buf_free(&got);
 }
 
+/* A compaction asks the host for the new epoch's system prompt and tools
+ * once, as it starts, and freezes them; NULL keeps the current ones. */
+static void test_epoch_materials(void)
+{
+    static const char script[] =
+        "{\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First.\"}]},"
+        "{\"content\":[{\"type\":\"text\",\"text\":\"Second.\"}]}],"
+        "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"So far: one question.\"}]}}";
+    pt_tool_def def;
+    pt_materials m;
+    pt_entry_view v;
+    host h;
+    int round;
+    memset(&def, 0, sizeof def);
+    def.name = PT_S("newtool");
+    def.description = PT_S("Registered after the session began.");
+    def.schema = PT_S("{\"type\":\"object\"}");
+    def.replay = PT_REPLAY_SAFE;
+    def.source = PT_S("builtin");
+    m.system = PT_S("Rebuilt.");
+    m.tools = &def;
+    m.ntools = 1;
+    for (round = 0; round < 2; round++) {
+        h_init(&h, script);
+        h.mat = round == 0 ? &m : NULL;
+        h_create(&h);
+        h_submit(&h, "one", NULL);
+        h_run(&h);
+        CHECK(h.mat_asked == 0); /* only compactions ask */
+        CHECK(pt_compact(h.a));
+        h_run(&h);
+        CHECK(h.mat_asked == 1);
+        CHECK(h.mat_epoch == 2);
+        CHECK(pt_entry_at(h.a, 0, &v) && strcmp(v.kind, "epoch") == 0 && v.epoch == 2);
+        CHECK(pt_str_eqz(v.msg->text, round == 0 ? "Rebuilt." : "You are a test."));
+        CHECK(has(v.raw, PT_S("\"newtool\"")) == (round == 0));
+        h_submit(&h, "two", NULL); /* the model is offered the new tools */
+        h_run(&h);
+        CHECK(has(pt_buf_str(&h.last_request), round == 0 ? PT_S("\"tools\":1") : PT_S("\"tools\":0")));
+        CHECK(has(pt_buf_str(&h.last_request), PT_S("Rebuilt.")) == (round == 0));
+        CHECK(h_reload(&h) == PT_LOAD_OK); /* and it loads back the same */
+        CHECK(pt_entry_at(h.a, 0, &v) && pt_str_eqz(v.msg->text, round == 0 ? "Rebuilt." : "You are a test."));
+        h_free(&h);
+    }
+}
+
 static void test_retry(void)
 {
     static const char script[] =
@@ -758,6 +812,7 @@ int main(void)
     RUN(test_torn_tail);
     RUN(test_retry);
     RUN(test_big_prompt);
+    RUN(test_epoch_materials);
     RUN(test_tool_call_without_tools);
     RUN(test_fatal_error);
     RUN(test_queue_and_req);
