@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 /* Where prompt files and skills are looked up, in order: a later root wins. */
 enum { R_HOME, R_CONFIG, R_CWD };
@@ -22,6 +23,9 @@ static const struct {
     {R_CWD, "/.pytte", true},
 };
 #define NROOTS (sizeof roots / sizeof roots[0])
+
+#define AGENTS_CAP 32768 /* bytes of AGENTS.md files; the outermost are cut first */
+#define AGENTS_MAX 64    /* files: the user's, then directories from the git root down */
 
 #define SKILL_OPEN "<skill name=\""
 #define SKILL_CLOSE "\n</skill>"
@@ -280,7 +284,7 @@ const pt_rt_skill *pt_rt_skills(pt_rt *rt, bool rescan, uint32_t *n)
     return rt->skills;
 }
 
-/* ---- the system prompt ---- */
+/* ---- AGENTS.md ---- */
 
 static void put_part(pt_buf *b, pt_str part)
 {
@@ -291,6 +295,95 @@ static void put_part(pt_buf *b, pt_str part)
         pt_buf_putz(b, "\n\n");
     pt_buf_puts(b, part);
 }
+
+
+typedef struct agents_file {
+    char path[4200];
+    char *text;
+    size_t n, keep;
+} agents_file;
+
+/* dir's AGENTS.md, else its CLAUDE.md. */
+static bool read_agents(agents_file *f, const char *dir, size_t dn)
+{
+    static const char *const names[] = {"AGENTS.md", "CLAUDE.md"};
+    size_t i;
+    for (i = 0; i < 2; i++) {
+        int k = snprintf(f->path, sizeof f->path, "%.*s/%s", (int)dn, dir, names[i]);
+        if (k > 0 && (size_t)k < sizeof f->path && (f->text = pt_sys_read_file(f->path, &f->n)))
+            return true;
+    }
+    return false;
+}
+
+/* The length of cwd's prefix that holds .git, or of cwd itself outside a
+ * repository. */
+static size_t git_root(pt_str cwd)
+{
+    char path[4200];
+    size_t n = cwd.n;
+    struct stat st;
+    while (n) {
+        int k = snprintf(path, sizeof path, "%.*s/.git", (int)n, cwd.p);
+        if (k > 0 && (size_t)k < sizeof path && stat(path, &st) == 0)
+            return n;
+        while (n && cwd.p[n - 1] != '/')
+            n--;
+        if (n) /* the slash: "/a/b" -> "/a"; the root "/" is not walked into */
+            n--;
+    }
+    return cwd.n;
+}
+
+/* The user's AGENTS.md, then each directory's from the git root down to
+ * cwd, each under its path. Over AGENTS_CAP the outermost are cut first:
+ * the nearest instructions matter most. */
+static void put_agents(pt_rt *rt, pt_str cwd, pt_buf *b)
+{
+    agents_file *files = (agents_file *)calloc(AGENTS_MAX, sizeof *files);
+    size_t nf = 0, at, left = AGENTS_CAP, i;
+    char dir[4096];
+    if (!files)
+        return;
+    if (rt->prompt.config_dir && *rt->prompt.config_dir) {
+        snprintf(dir, sizeof dir, "%s", rt->prompt.config_dir);
+        if (read_agents(&files[nf], dir, strlen(dir)))
+            nf++;
+    }
+    for (at = git_root(cwd); nf < AGENTS_MAX; at++) {
+        if ((at == cwd.n || cwd.p[at] == '/') && read_agents(&files[nf], cwd.p, at))
+            nf++;
+        if (at >= cwd.n)
+            break;
+    }
+    for (i = nf; i-- > 0;) {
+        files[i].keep = files[i].n < left ? files[i].n : left;
+        while (files[i].keep && files[i].keep < files[i].n &&
+               ((unsigned char)files[i].text[files[i].keep] & 0xC0) == 0x80)
+            files[i].keep--; /* not inside a UTF-8 character */
+        left -= files[i].keep;
+    }
+    for (i = 0; i < nf; i++) {
+        if (!i)
+            put_part(b, PT_S("# Instructions from AGENTS.md files\n\n"
+                             "From the user's file, then from the project's outermost directory to "
+                             "the innermost: where they disagree, the later one wins."));
+        pt_buf_putz(b, "\n\n## ");
+        pt_buf_putz(b, files[i].path);
+        pt_buf_putz(b, "\n\n");
+        pt_buf_puts(b, pt_str_trim((pt_str){files[i].text, files[i].keep}));
+        if (files[i].keep < files[i].n) {
+            char note[120];
+            snprintf(note, sizeof note, "\n\n[cut to %zu of %zu bytes: AGENTS.md files are limited to %u KiB]",
+                     files[i].keep, files[i].n, AGENTS_CAP / 1024);
+            pt_buf_putz(b, note);
+        }
+        free(files[i].text);
+    }
+    free(files);
+}
+
+/* ---- the system prompt ---- */
 
 bool pt_rt_build_prompt(pt_rt *rt, pt_str cwd, pt_str prompt, pt_buf *system, pt_buf *skills)
 {
@@ -318,6 +411,7 @@ bool pt_rt_build_prompt(pt_rt *rt, pt_str cwd, pt_str prompt, pt_buf *system, pt
         put_part(system, (pt_str){file, n});
         free(file);
     }
+    put_agents(rt, cwd, system);
     put_part(system, append);
     pt_arena_free(&ar);
 

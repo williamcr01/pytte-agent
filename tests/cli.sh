@@ -142,7 +142,26 @@ if command -v jq >/dev/null; then
     PYTTE_PERMISSION_MODE=auto run -c --context-window 8000 --script "$old" "page it"
     check "a compaction reads the prompt files and skills again, keeping the flags" \
         epoch -1 '(.n == 2) and (.system | startswith("project system\n\nchanged append\n\nflag append")) and (.skills | map(.name) | index("fresh"))'
-    rm -rf "$p" "$u/SYSTEM.md" "$u/APPEND_SYSTEM.md" "$u/skills"
+    r=$XDG_STATE_HOME/repo
+    mkdir -p "$r/.git" "$r/src/tui"
+    echo "above the repo" >"$XDG_STATE_HOME/AGENTS.md"
+    echo "user agents" >"$u/AGENTS.md"
+    echo "root agents" >"$r/AGENTS.md"
+    echo "claude in src" >"$r/src/CLAUDE.md"
+    echo "tui agents" >"$r/src/tui/AGENTS.md"
+    echo "not this claude" >"$r/src/tui/CLAUDE.md"
+    rm -rf "$p"
+    p=$r/src/tui
+    run -m faux/faux --script "$hello" hi
+    check "AGENTS.md: the user's, then from the git root down, CLAUDE.md where there is none" \
+        epoch 0 '.system | test("user agents\n\n## '"$r"'/AGENTS.md\n\nroot agents\n\n## '"$r"'/src/CLAUDE.md\n\nclaude in src\n\n## '"$p"'/AGENTS.md\n\ntui agents")'
+    check "...and nothing from above the repository" epoch 0 '.system | (contains("above the repo") or contains("not this claude")) | not'
+    head -c 40000 /dev/zero | tr '\0' x >"$r/AGENTS.md"
+    run -m faux/faux --script "$hello" hi
+    check "...over 32 KiB the outermost are cut first" \
+        epoch 0 '.system | contains("[cut to ") and (contains("user agents") | not)'
+    check "...and the nearest are kept whole" epoch 0 '.system | contains("tui agents")'
+    rm -rf "$r" "$XDG_STATE_HOME/AGENTS.md" "$u/AGENTS.md" "$u/SYSTEM.md" "$u/APPEND_SYSTEM.md" "$u/skills"
 fi
 
 printf '%s' '{"turns": [[{"status": 529}, {"status": 400, "body": {"message": "bad request"}}]]}' \
@@ -164,14 +183,12 @@ check "a missing key exits with 1" [ $? -eq 1 ]
 env -u ANTHROPIC_API_KEY "$pytte" -p -c -m faux/faux --script tests/faux/hello.json </dev/null >/dev/null 2>&1
 check "...and the session resumes with another model" [ $? -eq 0 ]
 
-n=$(ls "$XDG_STATE_HOME/pytte/sessions" | wc -l)
 "$pytte" -p -m faux/faux --script tests/faux/slow.json "list" >/dev/null 2>&1 &
 owner=$!
-for i in $(seq 50); do # until the owner has made its session (slow under load)
-    [ "$(ls "$XDG_STATE_HOME/pytte/sessions" | wc -l)" -gt "$n" ] && break
+for i in $(seq 50); do # until the owner has committed its session (slow under load)
+    "$pytte" ls | grep -q "running (pid $owner)" && break
     sleep 0.1
 done
-sleep 0.2
 err=$("$pytte" -p -c --script tests/faux/slow.json </dev/null 2>&1 >/dev/null)
 case $err in *"in use by"*"pid $owner"*) ok=0 ;; *) ok=1 ;; esac
 check "a second process is refused, naming the owner" [ $ok -eq 0 ]

@@ -854,14 +854,21 @@ static void test_blocked_settings(void)
 int main(void)
 {
     char tmpl[] = "/tmp/pytte-pty-XXXXXX";
-    char cmd[300];
+    char cmd[4200], repo[4096];
+    static char bin_path[4096];
     const char *dir;
     bin = getenv("PYTTE_BIN") ? getenv("PYTTE_BIN") : "build/pytte";
     if (access(bin, X_OK) != 0) {
         fprintf(stderr, "test_pty: %s not built; skipped\n", bin);
         return 0;
     }
-    if (!(dir = mkdtemp(tmpl)))
+    if (!(dir = mkdtemp(tmpl)) || !realpath(bin, bin_path) || !getcwd(repo, sizeof repo))
+        return 1;
+    /* Run from outside any repository, so this one's AGENTS.md and
+     * CLAUDE.md stay out of the system prompt; tests/ is linked in. */
+    bin = bin_path;
+    snprintf(cmd, sizeof cmd, "%s/tests", repo);
+    if (chdir(dir) != 0 || symlink(cmd, "tests") != 0)
         return 1;
     snprintf(state_dir, sizeof state_dir, "%s/state", dir);
     snprintf(config_dir, sizeof config_dir, "%s/config", dir);

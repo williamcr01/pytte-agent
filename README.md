@@ -107,7 +107,10 @@ or `<project>/.pytte/`; a project skill replaces a user skill of the same
 name. The model sees each skill's name, description and path, and reads the
 file when a task matches (`skills.auto` off, or `/settings skills off`, stops
 that). `$name` anywhere in a message, or `/skill:name ...`, sends the skill's
-instructions with it; typing `$` lists the skills. The files are read when a
+instructions with it; typing `$` lists the skills. `AGENTS.md` files are
+added too: `~/.config/pytte/AGENTS.md`, then one from each directory from the
+git root down to the working directory (`CLAUDE.md` where a directory has
+none), up to 32 KiB, the outermost cut first. The files are read when a
 session starts and again at each compaction.
 
 Tools: `bash` runs a command line in its own process group (stdin empty,
