@@ -3,12 +3,12 @@
     {
       "content": [
         {"type": "text", "text": "Starting it."},
-        {"type": "tool_call", "id": "bg", "name": "bash", "args": {"command": "echo first; sleep 2; echo second; exit 3", "yield": 1}}
+        {"type": "tool_call", "id": "bg", "name": "bash", "args": {"command": "echo first; sleep 8.5; echo second; exit 3", "yield": 1}}
       ]
     },
     {
       "content": [
-        {"type": "tool_call", "id": "now", "name": "bash_poll", "args": {"session": 8, "wait": 0}}
+        {"type": "tool_call", "id": "now", "name": "bash_poll", "args": {"session": 8, "wait": 1}}
       ]
     },
     {
@@ -24,7 +24,8 @@
     },
     {
       "content": [
-        {"type": "tool_call", "id": "stop", "name": "bash_poll", "args": {"session": 19, "stop": true}}
+        {"type": "tool_call", "id": "stop", "name": "bash_poll", "args": {"session": 19, "stop": true}},
+        {"type": "tool_call", "id": "left", "name": "bash", "args": {"command": "echo left; sleep 100", "yield": 1}}
       ]
     },
     {

@@ -53,8 +53,26 @@ typedef struct pt_rt_tool {
 
 /* Copied (strings must outlive rt). False when out of memory. */
 bool pt_rt_tool_add(pt_rt *rt, const pt_rt_tool *t);
-/* bash, read, write, edit (tools_builtin.c). */
+/* bash, bash_poll, read, write, edit (tools_builtin.c). */
 bool pt_rt_add_builtins(pt_rt *rt);
+
+/* A bash command that went to the background. command lives until the
+ * next call into rt. */
+typedef struct pt_rt_background {
+    uint32_t session;
+    const char *command;
+    int64_t started; /* ms */
+    bool ended;      /* ...and not read since */
+    int status;      /* when ended: the exit code */
+} pt_rt_background;
+
+/* The background sessions, newest first; returns how many there are
+ * (up to max are written). */
+uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max);
+/* Stop every background session still running (SIGTERM, then SIGKILL
+ * two seconds later); a later bash_poll reads what they printed.
+ * Returns how many. */
+uint32_t pt_rt_backgrounds_stop(pt_rt *rt);
 /* The registered tools, for a new session's epoch. */
 const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n);
 

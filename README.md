@@ -73,7 +73,7 @@ Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft (twice
 on an empty one quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/status`,
-`/thinking`, `/compact`, `/usage`, `/settings`, `/help`, `/quit`. Settings are saved to
+`/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/help`, `/quit`. Settings are saved to
 `~/.config/pytte/config.json`.
 
 The footer shows the selected model, effort and context use of the model's
@@ -121,7 +121,9 @@ Tools: `bash` runs a command line in its own process group (stdin empty,
 stdout and stderr together, an optional timeout). A command still running
 after `yield` seconds (default 10) goes on in the background as a session,
 and the model works on; `bash_poll` reads what it printed since, waits for
-it to end, or stops it. Background sessions end when pytte does. `read` shows a file with
+it to end (at least 5 seconds per poll), or stops it. The footer counts
+the ones still running, `/ps` lists them and `/stop` stops them; they
+end when pytte does. `read` shows a file with
 line numbers. `write` replaces a whole file atomically. `edit` replaces
 text that must match exactly once, and refuses when the file changed since
 the model last read it. The model sees up to 16 KB of output: the first

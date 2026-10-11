@@ -95,7 +95,7 @@ if command -v jq >/dev/null; then
     results=$("$pytte" log --json | jq -c 'select(.kind == "tool_result") | .data')
     bg() { sh -c 'printf "%s" "$1" | jq -se "$2" >/dev/null' _ "$results" "$1"; }
     check "a command past its yield goes to the background" bg '.[0] | (.content == "first\n\n[still running as session 8; bash_poll reads on]") and .details.session == 8 and (.is_error | not)'
-    check "...a poll with no wait returns at once" bg '.[1].content == "\n[still running as session 8]"'
+    check "...a poll waits at least 5s" bg '.[1] | .content == "\n[still running as session 8]" and .details.ms >= 5000'
     check "...a poll waits for the end and its exit code" bg '.[2] | .content == "second\n\n[exit code 3]" and .details.exit == 3 and .is_error'
     check "...an ended session read once is gone" bg '.[3] | (.content | startswith("No session 8:")) and .is_error'
     check "...a stopped session is no error" bg '.[5] | .content == "\n[stopped]" and (.is_error | not)'

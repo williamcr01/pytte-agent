@@ -520,18 +520,33 @@ static void test_background(void)
     pty_start(&p, 30, 100, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
-    CHECK(wait_for(&p, "Done.", 8000));
+    CHECK(wait_for(&p, "· 1 in background (/ps)", 3000)); /* the footer */
+    CHECK(wait_for(&p, "Done.", 20000));
     CHECK(has(&p, "Starting it.\n\n"
-                  "● 6 tool calls · 6 commands · 2 failed\n"
-                  "├ Started echo first; sleep 2; echo second; exit 3 · still running as session 8\n"
+                  "● 7 tool calls · 7 commands · 2 failed\n"
+                  "├ Started echo first; sleep 8.5; echo second; exit 3 · still running as session 8\n"
                   "├ Checked session 8 · still running\n"
-                  "├ Exited 3 session 8 · 1s\n"
+                  "├ Exited 3 session 8 · 2s\n"
                   "│   second\n"
                   "├ Couldn't check session 8\n"));
-    CHECK(has(&p, "├ Started echo up; sleep 100 · still running as session 19\n"
-                  "└ Checked session 19 (stop)\n"));
+    CHECK(has(&p, "├ Started echo up; sleep 100 · still running as session 19\n"));
+    CHECK(has(&p, "├ Checked session 19 (stop)\n") || has(&p, "└ Checked session 19 (stop)\n"));
+    CHECK(has(&p, "Started echo left; sleep 100 · still running as session 24\n"));
     CHECK(!has(&p, "[still running"));
     CHECK(wait_idle(&p, 3000));
+    /* one left running: the footer counts it, /ps lists it, /stop ends it */
+    CHECK(wait_for(&p, "· 1 in background (/ps)", 2000));
+    keys(&p, "/ps\r");
+    CHECK(wait_for(&p, "session 24 · running ", 2000));
+    CHECK(has(&p, "· echo left; sleep 100"));
+    keys(&p, "/stop\r");
+    CHECK(wait_for(&p, "stopping 1 background command\n", 2000));
+    pump(&p, 300);
+    CHECK(!has(&p, "in background (/ps)"));
+    keys(&p, "/ps\r");
+    CHECK(wait_for(&p, "session 24 · ended (exit 143), not read yet · echo left; sleep 100", 2000));
+    keys(&p, "/stop\r");
+    CHECK(wait_for(&p, "no background commands running", 2000));
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
     pty_free(&p);
@@ -669,11 +684,11 @@ static void test_commands(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
-    CHECK(wait_for(&p, "▸ /model     set the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/11", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "▸ /model    set the model", 1000)); /* descriptions in a column */
+    CHECK(wait_for(&p, "enter run · esc close · 1/13", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "▸ /quit", 1000));
-    CHECK(wait_for(&p, "11/11", 1000));
+    CHECK(wait_for(&p, "13/13", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "▸ /model", 1000));
     keys(&p, "th\t");

@@ -25,6 +25,7 @@
 #define READ_LIMIT 2000 /* lines a read shows unless it asks for more */
 #define YIELD_S 10        /* seconds a bash call waits before it goes to the background */
 #define POLL_S 10         /* seconds a bash_poll waits for the process to end */
+#define POLL_MIN_S 5      /* ...at least, as in Codex: polling in a loop costs a request each */
 #define HELD_MAX (1 << 20) /* output kept while no call reads it: the newest bytes */
 #define BACKGROUND_MAX 16 /* processes in the background; past it, bash calls wait */
 
@@ -48,11 +49,13 @@ struct job {
     uint32_t timer;   /* the timeout, then the SIGKILL after a stop */
     uint32_t yield;   /* when the reading call ends while it runs on */
     pt_proc *p;
+    char *command;
     int out_fd, exit_fd;
     int64_t started, read_at; /* read_at: when the reading call began */
     uint32_t timeout_s;
     int status;
     bool timed_out, stopped, eof, ended;
+    bool background; /* it went to the background once */
     bool polled;  /* the reading call is a bash_poll */
     bool told;    /* a bash_poll asked it to stop: not an error */
     pt_buf held;  /* output while in the background */
@@ -545,6 +548,7 @@ static void job_free(job *j)
         pt_rt_timer_cancel(j->b->rt, j->yield);
     pt_proc_free(j->p);
     pt_buf_free(&j->held);
+    free(j->command);
     free(j);
 }
 
@@ -566,6 +570,7 @@ static void job_report(job *j)
     note[0] = 0;
     memset(&r, 0, sizeof r);
     if (!j->ended) {
+        j->background = true;
         k += (size_t)snprintf(note, sizeof note,
                               j->polled ? "\n[still running as session %u]"
                                         : "\n[still running as session %u; bash_poll reads on]",
@@ -718,10 +723,12 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
         done_text(rt, fx->id, PT_S("command is required"), true);
         return;
     }
-    if (!(j = (job *)calloc(1, sizeof *j))) {
+    if (!(j = (job *)calloc(1, sizeof *j)) || !(j->command = (char *)malloc(strlen(cmd) + 1))) {
+        free(j);
         done_text(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
+    memcpy(j->command, cmd, strlen(cmd) + 1);
     argv[0] = shell();
     argv[1] = "-c";
     argv[2] = cmd;
@@ -735,6 +742,7 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     add[3] = NULL;
     j->p = pt_proc_spawn(argv, cwd.n ? pt_arena_cstr(&b->ar, cwd) : NULL, b->unset, add, err, sizeof err);
     if (!j->p) {
+        free(j->command);
         free(j);
         done_text(rt, fx->id, pt_strz(err), true);
         return;
@@ -824,11 +832,44 @@ static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
     } else if (stop) { /* ends within two seconds */
         j->stopped = j->told = true;
         stop_job(j);
-    } else if (wait <= 0) {
-        job_report(j);
     } else {
-        j->yield = pt_rt_timer(rt, j->read_at + (wait > 86400 ? 86400 : wait) * 1000, on_yield, j);
+        wait = wait < POLL_MIN_S ? POLL_MIN_S : wait > 86400 ? 86400 : wait;
+        j->yield = pt_rt_timer(rt, j->read_at + wait * 1000, on_yield, j);
     }
+}
+
+uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max)
+{
+    builtins *b = (builtins *)rt->builtin;
+    const job *j;
+    uint32_t n = 0;
+    for (j = b ? b->jobs : NULL; j; j = j->next) {
+        if (!j->background)
+            continue;
+        if (n < max) {
+            out[n].session = j->session;
+            out[n].command = j->command;
+            out[n].started = j->started;
+            out[n].ended = j->ended;
+            out[n].status = j->status;
+        }
+        n++;
+    }
+    return n;
+}
+
+uint32_t pt_rt_backgrounds_stop(pt_rt *rt)
+{
+    builtins *b = (builtins *)rt->builtin;
+    job *j;
+    uint32_t n = 0;
+    for (j = b ? b->jobs : NULL; j; j = j->next)
+        if (j->background && !j->ended && !j->stopped) {
+            j->stopped = j->told = true;
+            stop_job(j);
+            n++;
+        }
+    return n;
 }
 
 /* ---- the table ---- */
@@ -843,7 +884,7 @@ static const char bash_schema[] =
 static const char bash_poll_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"session\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"The session a bash call left running\"},"
-    "\"wait\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Seconds to wait for it to end (default 10; 0: return at once)\"},"
+    "\"wait\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Seconds to wait for it to end (default 10, at least 5)\"},"
     "\"stop\":{\"type\":\"boolean\",\"description\":\"Stop it (SIGTERM, then SIGKILL after 2s)\"}},"
     "\"required\":[\"session\"],\"additionalProperties\":false}";
 static const char read_schema[] =
@@ -939,7 +980,9 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[4].def.name = PT_S("bash_poll");
     t[4].def.description = PT_S(
         "Read what a background bash session printed since it was last read, waiting up to wait "
-        "seconds for it to end; or stop it. Its result says whether it still runs.");
+        "seconds for it to end; or stop it. Its result says whether it still runs. Before you end "
+        "your turn, poll the sessions you started until they end, unless they are meant to keep "
+        "running (a server, a watcher); then say that they still run.");
     t[4].def.schema = PT_S(bash_poll_schema);
     t[4].def.replay = PT_REPLAY_SAFE;
     t[4].def.parallel = true;

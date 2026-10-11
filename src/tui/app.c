@@ -51,6 +51,8 @@ static const struct {
     {"resume", " [id]", "open another session from this directory"},
     {"status", "", "session, model, context and terminal"},
     {"compact", "", "summarize the conversation to free the context"},
+    {"ps", "", "background commands"},
+    {"stop", "", "stop the background commands"},
     {"usage", "", "tokens used in this session, per model"},
     {"thinking", " [mode]", "how thinking is shown: collapsed, full, hidden"},
     {"settings", "", "user settings (saved)"},
@@ -193,6 +195,7 @@ typedef struct app {
     char ask_prefix[128]; /* what "allow this session" allows: "git", or "" for the whole tool */
     uint64_t ctx_used;
     uint32_t ctx_window;
+    uint32_t nbg; /* background commands still running, in the footer */
     queued_input *queue;
     uint32_t nq, qcap;
     /* the menu */
@@ -1505,8 +1508,10 @@ static void status_row(app *a, int64_t now, int total, int sel)
             char used[16], all[16];
             tokens_short(used, sizeof used, a->ctx_used);
             tokens_short(all, sizeof all, a->ctx_window);
-            snprintf(line + n, sizeof line - (size_t)n, " · %s/%s", used, all);
+            n += snprintf(line + n, sizeof line - (size_t)n, " · %s/%s", used, all);
         }
+        if (a->nbg)
+            snprintf(line + n, sizeof line - (size_t)n, " · %u in background (/ps)", a->nbg);
         pt_buf_putz(&a->tmp, line);
     }
     row(a, pt_buf_str(&a->tmp));
@@ -2191,6 +2196,37 @@ static void pager(app *a)
 
 /* ---- commands ---- */
 
+/* Background commands still running. */
+static uint32_t bg_running(app *a)
+{
+    pt_rt_background v[32];
+    uint32_t n = a->open ? pt_rt_backgrounds(a->s.rt, v, 32) : 0, i, k = 0;
+    for (i = 0; i < n && i < 32; i++)
+        k += !v[i].ended;
+    return k;
+}
+
+/* "session 8 · running 1m 4s · make dev", newest first. */
+static void cmd_ps(app *a)
+{
+    pt_rt_background v[32];
+    uint32_t n = a->open ? pt_rt_backgrounds(a->s.rt, v, 32) : 0, i;
+    char line[300], took[32];
+    if (!n) {
+        out_z(a, TUI_DIM, "no background commands");
+        return;
+    }
+    for (i = 0; i < n && i < 32; i++) {
+        secs_short(took, sizeof took, pt_sys_now_ms() - v[i].started);
+        if (v[i].ended)
+            snprintf(line, sizeof line, "session %u · ended (exit %d), not read yet · %.200s", v[i].session,
+                     v[i].status, v[i].command);
+        else
+            snprintf(line, sizeof line, "session %u · running %s · %.200s", v[i].session, took, v[i].command);
+        out_text(a, &a->lines, TUI_DIM, NULL, 0, pt_strz(line), 2);
+    }
+}
+
 static void cmd_status(app *a)
 {
     char line[5000];
@@ -2327,6 +2363,14 @@ static void run_command(app *a, pt_str line)
             out_z(a, TUI_DIM, "nothing to compact yet");
     } else if (pt_str_eqz(cmd, "usage")) {
         cmd_usage(a);
+    } else if (pt_str_eqz(cmd, "ps")) {
+        cmd_ps(a);
+    } else if (pt_str_eqz(cmd, "stop")) {
+        uint32_t n = a->open ? pt_rt_backgrounds_stop(a->s.rt) : 0;
+        char said[64];
+        snprintf(said, sizeof said, n ? "stopping %u background command%s" : "no background commands running", n,
+                 n == 1 ? "" : "s");
+        out_z(a, TUI_DIM, said);
     } else if (pt_str_eqz(cmd, "thinking")) {
         if (arg.n) {
             if (!valid_setting(find_setting(PT_S("thinking")), v)) {
@@ -3042,6 +3086,13 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
             a.urgent = true;
         }
         now = pt_sys_now_ms();
+        {
+            uint32_t bg = bg_running(&a);
+            if (bg != a.nbg) {
+                a.nbg = bg;
+                set_dirty(&a);
+            }
+        }
         a.running = a.open && !pt_idle(a.s.a) && !pt_fatal(a.s.a);
         if (a.running != was) {
             set_dirty(&a);
