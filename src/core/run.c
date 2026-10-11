@@ -5,7 +5,7 @@
  *      │          │  └──► retry (sleep) ──► prepare, attempt + 1
  *      │          ▼
  *      ├──── tools (waiting on one tool task per call, task_tool.c)
- *      └──── compact_wait (waiting on a compact task, compact.c): when the
+ *      └──── compact_wait (waiting on a compact task, task_compact.c): when the
  *            context is over budget, or the server says it is too long
  *
  * prepare is pure; it pins the request's parameters in one commit.

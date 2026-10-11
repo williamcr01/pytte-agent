@@ -267,7 +267,7 @@ bool pt_run_http_done(pt_agent *a, uint32_t fx, const char *error);
 void pt_run_write_tool_error(pt_agent *a, uint32_t id, pt_str call_id, pt_str name, pt_str text);
 void pt_run_write_assistant(pt_agent *a, uint32_t id, const pt_msg *m);
 
-/* Shared with compact.c: the model, its key, the backoff, and requests. */
+/* Shared with task_compact.c: the model, its key, the backoff, and requests. */
 bool pt_run_resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar);
 bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred);
 int64_t pt_run_backoff(pt_agent *a, uint32_t attempt, int64_t retry_after_ms);
@@ -280,7 +280,7 @@ void pt_run_write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int
 /* Record the tokens of a message in the usage doc (in the open commit). */
 void pt_run_add_usage(pt_agent *a, const pt_msg *m, pt_str model);
 
-/* ---- compact.c ---- */
+/* ---- task_compact.c ---- */
 /* True when the epoch holds an answer from the model, so a summary can
  * make it smaller (and compaction cannot repeat without progress). */
 bool pt_compact_possible(pt_agent *a);
