@@ -1924,6 +1924,8 @@ static void out_tail(app *a)
     for (i = from; i < n && pt_entry_at(a->s.a, i, &v); i++)
         show_entry(a, &v);
     a->seen = n;
+    if (n && pt_entry_at(a->s.a, 0, &v)) /* else the next commit looks like a new epoch */
+        a->shown_epoch = v.epoch;
 }
 
 static void reset_display(app *a)

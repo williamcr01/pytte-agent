@@ -464,6 +464,7 @@ static void test_tool_rendering(void)
 {
     pty p;
     const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/render.json", "--permission-mode", "auto", NULL};
+    const char *again[] = {"-m", "faux/faux", "--script", "tests/faux/render.json", "-c", NULL};
     remove("build/test/render.c");
     pty_start(&p, 30, 100, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
@@ -496,6 +497,15 @@ static void test_tool_rendering(void)
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
+    pty_free(&p);
+    /* resumed, the log gives the same group, once */
+    pty_start(&p, 30, 100, again);
+    CHECK(wait_for(&p, "└ Edited build/test/render.c +1 / -1\n    - int up = cur;\n", 3000));
+    CHECK(wait_for(&p, "faux · ", 3000));
+    pump(&p, 300);
+    CHECK(!has(&p, "Fixed.\n\n┃ go"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
     pty_free(&p);
     remove("build/test/render.c");
 }
