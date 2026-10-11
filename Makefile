@@ -70,10 +70,10 @@ $(BUILD)/obj/%.o: %.c
 	$(CC) $(CSTD) $(WARN) $(CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) -pthread -MMD -MP -c $< -o $@
 
 $(BUILD)/libpytte-ai.a: $(AI_OBJ)
-	$(AR) rcs $@ $^
+	rm -f $@ && $(AR) rcs $@ $^
 
 $(BUILD)/libpytte.a: $(LIB_OBJ)
-	$(AR) rcs $@ $^
+	rm -f $@ && $(AR) rcs $@ $^
 
 $(BUILD)/pytte-ai: $(PYTTE_AI_OBJ) $(BUILD)/libpytte-ai.a
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
