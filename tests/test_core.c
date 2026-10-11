@@ -741,6 +741,41 @@ static void test_queue_and_req(void)
     pt_buf_free(&t);
 }
 
+/* A note (pytte's input, not the user's) runs like any other, queued or
+ * not, and keeps "from" in its input record and entry across a reload. */
+static void test_note(void)
+{
+    static const char script[] = "{\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"one\"}]},"
+                                 "{\"content\":[{\"type\":\"text\",\"text\":\"two\"}]}]}";
+    host h;
+    pt_input in;
+    pt_entry_view v;
+    pt_buf t;
+    uint32_t i, notes = 0, users = 0;
+    pt_buf_init(&t, T_AL);
+    h_init(&h, script);
+    h_create(&h);
+    h_submit(&h, "first", NULL);
+    memset(&in, 0, sizeof in);
+    in.text = PT_S("a command ended");
+    in.note = true;
+    CHECK(pt_submit(h.a, &in)); /* queued behind the first run */
+    h_run(&h);
+    CHECK(h.done == 2);
+    CHECK(has(pt_buf_str(&h.log), PT_S("\"kind\":\"user\",\"from\":\"pytte\""))); /* the queued input */
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    transcript(h.a, &t);
+    CHECK_STR(pt_buf_str(&t), "epoch:You are a test.\nuser:first\nassistant/stop:one\nuser:a command ended\nassistant/stop:two\n");
+    for (i = 0; i < pt_entry_count(h.a) && pt_entry_at(h.a, i, &v); i++)
+        if (strcmp(v.kind, "user") == 0) {
+            users++;
+            notes += has(v.raw, PT_S("\"from\":\"pytte\""));
+        }
+    CHECK(users == 2 && notes == 1);
+    h_free(&h);
+    pt_buf_free(&t);
+}
+
 static void test_resend_is_identical(void)
 {
     host h;
@@ -930,6 +965,7 @@ int main(void)
     RUN(test_tool_call_without_tools);
     RUN(test_fatal_error);
     RUN(test_queue_and_req);
+    RUN(test_note);
     RUN(test_resend_is_identical);
     RUN(test_claims);
     RUN(test_abort);

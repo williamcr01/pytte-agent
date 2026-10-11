@@ -56,6 +56,7 @@ struct job {
     int status;
     bool timed_out, stopped, eof, ended;
     bool background; /* it went to the background once */
+    bool noted;      /* its end is told, or need not be */
     bool polled;  /* the reading call is a bash_poll */
     bool told;    /* a bash_poll asked it to stop: not an error */
     pt_buf held;  /* output while in the background */
@@ -838,6 +839,46 @@ static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
     }
 }
 
+/* Idle, with background commands ended and unread: submit a note that
+ * starts a turn, so the model reads them and carries on without the
+ * user asking. It is an input like any other, committed before it runs,
+ * so a crash cannot lose or repeat it. */
+static bool builtins_idle(void *ud)
+{
+    builtins *b = (builtins *)ud;
+    pt_buf *t = &b->out;
+    pt_input in;
+    char line[400], req[48];
+    job *j;
+    uint32_t n = 0, first = 0;
+    bool ok;
+    pt_buf_reset(t);
+    pt_buf_putz(t, "[pytte] Background commands you started have ended (the user did not write this "
+                   "message):\n");
+    for (j = b->jobs; j; j = j->next) {
+        if (!j->background || !j->ended || j->noted || j->fx)
+            continue;
+        j->noted = true;
+        if (!n++ || j->session < first)
+            first = j->session;
+        snprintf(line, sizeof line, "- session %u ended with %s %d: %.300s%s\n", j->session,
+                 j->timed_out ? "a timeout, exit code" : "exit code", j->status, j->command,
+                 strlen(j->command) > 300 ? "…" : "");
+        pt_buf_putz(t, line);
+    }
+    if (!n)
+        return false;
+    pt_buf_putz(t, "Read what they printed with bash_poll, then carry on with what they were for. If "
+                   "nothing is left to do, say so in a sentence.");
+    snprintf(req, sizeof req, "background:%u", first);
+    memset(&in, 0, sizeof in);
+    in.text = pt_buf_str(t);
+    in.req = pt_strz(req);
+    in.note = true;
+    ok = !t->oom && pt_submit(pt_rt_agent(b->rt), &in);
+    return ok;
+}
+
 uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max)
 {
     builtins *b = (builtins *)rt->builtin;
@@ -865,7 +906,7 @@ uint32_t pt_rt_backgrounds_stop(pt_rt *rt)
     uint32_t n = 0;
     for (j = b ? b->jobs : NULL; j; j = j->next)
         if (j->background && !j->ended && !j->stopped) {
-            j->stopped = j->told = true;
+            j->stopped = j->told = j->noted = true; /* the user stopped it: no note */
             stop_job(j);
             n++;
         }
@@ -942,6 +983,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
             b->unset[n++] = cat->providers[i].key_env[k];
     rt->builtin = b;
     rt->builtin_free = builtins_free;
+    rt->builtin_idle = builtins_idle;
     memset(t, 0, sizeof t);
     for (i = 0; i < 5; i++) {
         t[i].def.source = PT_S("builtin");

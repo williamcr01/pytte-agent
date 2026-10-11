@@ -123,7 +123,10 @@ after `yield` seconds (default 10) goes on in the background as a session,
 and the model works on; `bash_poll` reads what it printed since, waits for
 it to end (at least 5 seconds per poll), or stops it. The footer counts
 the ones still running, `/ps` lists them and `/stop` stops them; they
-end when pytte does. `read` shows a file with
+end when pytte does. When one ends and nothing has read it by the time
+the model is idle, pytte starts a turn with a note saying so (shown as
+`✻ session 8 ended with exit code 0: make test`), and the model reads it
+and carries on; a command the user stopped with `/stop` gets no note. `read` shows a file with
 line numbers. `write` replaces a whole file atomically. `edit` replaces
 text that must match exactly once, and refuses when the file changed since
 the model last read it. The model sees up to 16 KB of output: the first

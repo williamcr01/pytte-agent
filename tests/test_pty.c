@@ -511,6 +511,37 @@ static void test_tool_rendering(void)
     remove("build/test/render.c");
 }
 
+/* A background command that ends while the agent is idle: pytte tells
+ * the model in a note of its own, and the model carries on. */
+static void test_background_note(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/notify.json", "--permission-mode", "auto", NULL};
+    char *log;
+    size_t n;
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "go\r");
+    CHECK(wait_for(&p, "It runs in the background.", 5000));
+    CHECK(wait_for(&p, "It printed built.", 8000));
+    CHECK(has(&p, "It runs in the background.\n\n"
+                  "Worked for "));
+    CHECK(has(&p, "Worked for 1s\n\n"
+                  "✻ session 8 ended with exit code 0: sleep 2; echo built\n\n"
+                  "● Checked session 8\n\n"
+                  "It printed built."));
+    CHECK(!has(&p, "[pytte]")); /* the note is not shown as typed */
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    /* the log: a user entry from pytte, and the poll read the output */
+    log = last_log(&n);
+    CHECK(log && strstr(log, "\"from\":\"pytte\"") != NULL);
+    CHECK(log && strstr(log, "built\\n\\n[ended]") != NULL);
+    free(log);
+}
+
 /* A command past its yield runs on in the background; polls name it by
  * session, and say whether it still runs. */
 static void test_background(void)
@@ -936,6 +967,7 @@ int main(void)
     RUN(test_approval);
     RUN(test_tool_rendering);
     RUN(test_background);
+    RUN(test_background_note);
     RUN(test_compaction);
     RUN(test_resize_while_streaming);
     RUN(test_commands);

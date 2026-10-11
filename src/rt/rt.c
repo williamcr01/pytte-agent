@@ -621,7 +621,7 @@ static pt_rt_result status(pt_rt *rt)
     if (pt_fatal(rt->a))
         return PT_RT_FATAL;
     if (pt_idle(rt->a))
-        return PT_RT_IDLE;
+        return !rt->closing && rt->builtin_idle && rt->builtin_idle(rt->builtin) ? PT_RT_BUSY : PT_RT_IDLE;
     if (!rt->nreqs && !rt->nsleeps && !rt->io_pending && !rt->ncalls && !rt->ntimers && !rt->nwatches)
         return pt_asks(rt->a, NULL, 0) ? PT_RT_ASK : PT_RT_STUCK;
     return PT_RT_BUSY;

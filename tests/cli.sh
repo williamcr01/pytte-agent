@@ -100,6 +100,11 @@ if command -v jq >/dev/null; then
     check "...an ended session read once is gone" bg '.[3] | (.content | startswith("No session 8:")) and .is_error'
     check "...a stopped session is no error" bg '.[5] | .content == "\n[stopped]" and (.is_error | not)'
     check "...and nothing outlives pytte" sh -c '! pgrep -f "^sh -c echo up; sleep 100" >/dev/null && ! pgrep -xf "sleep 100" >/dev/null'
+    out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/notify_later.json go 2>/dev/null)
+    check "a background command that ended unread starts a turn" [ "$(printf '%s\n' "$out" | tail -1)" = "Read it." ]
+    log=$("$pytte" log --json)
+    check "...from a note by pytte, once" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | length == 1 and (.[0].data.content | contains(\"- session 8 ended with exit code 0: sleep 1.5; echo late\"))" >/dev/null' _ "$log"
+    check "...and the model reads it" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[-1].data.content == \"late\\n\\n[ended]\"" >/dev/null' _ "$log"
     d=$XDG_STATE_HOME/files
     mkdir -p "$d" && seq 1 5000 >"$d/big.txt"
     printf '{"turns": [{"content": [{"type": "tool_call", "name": "write", "args": {"path": "%s/notes.txt", "content": "hi"}}]}, {"content": [{"type": "tool_call", "name": "read", "args": {"path": "%s/big.txt"}}]}, {"content": [{"type": "text", "text": "Read."}]}]}' \

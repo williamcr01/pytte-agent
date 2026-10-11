@@ -204,6 +204,7 @@ bool pt_closed(const pt_agent *a);
 typedef struct pt_input {
     pt_str text;
     pt_str req; /* optional request ID: submitting it twice is a no-op */
+    bool note;  /* pytte wrote it, not the user: its entry says "from":"pytte" */
 } pt_input;
 
 bool pt_submit(pt_agent *a, const pt_input *in);

@@ -1,0 +1,25 @@
+{
+  "turns": [
+    {
+      "content": [
+        {"type": "text", "text": "Starting it."},
+        {"type": "tool_call", "id": "bg", "name": "bash", "args": {"command": "sleep 2; echo built", "yield": 1}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "It runs in the background."}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "read", "name": "bash_poll", "args": {"session": 8}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "It printed built."}
+      ]
+    }
+  ]
+}

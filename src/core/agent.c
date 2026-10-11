@@ -521,6 +521,10 @@ static void write_placement(pt_agent *a, input *in)
     }
     pt_jw_key(w, "input");
     pt_jw_uint(w, in->id);
+    if (in->note) {
+        pt_jw_key(w, "from");
+        pt_jw_strz(w, "pytte");
+    }
     pt_core_entry_end(a);
     memset(&t, 0, sizeof t);
     t.id = run_id;
@@ -556,6 +560,7 @@ static bool build_submit(pt_agent *a)
     in.req = s.req;
     in.task = s.task;
     in.yes = s.yes;
+    in.note = s.note;
     in.blob = s.blob;
     in.status = IN_QUEUED;
     if (place && s.kind == INK_USER)
@@ -1034,6 +1039,7 @@ bool pt_submit(pt_agent *a, const pt_input *in)
     memset(&a->subs[a->nsubs], 0, sizeof(sub));
     a->subs[a->nsubs].text = pt_arena_dup(&a->subs_a, in->text);
     a->subs[a->nsubs].req = pt_arena_dup(&a->subs_a, in->req);
+    a->subs[a->nsubs].note = in->note;
     a->nsubs++;
     a->idle_sent = false;
     return !a->subs_a.oom;

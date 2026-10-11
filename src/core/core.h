@@ -102,6 +102,7 @@ typedef struct input {
     input_status status;
     uint32_t task; /* approve: the tool task */
     bool yes;      /* approve: the answer */
+    bool note;     /* user: from pytte, not the user */
     pt_str req, text; /* approve: text is the reason */
     pt_str blob;      /* "sha256:…" when the log holds text as a blob */
     pt_arena a;
@@ -136,6 +137,7 @@ typedef struct sub { /* a submission waiting for its commit */
     pt_str text, req;
     uint32_t task; /* approve */
     bool yes;
+    bool note;        /* from pytte, not the user */
     pt_str blob;      /* the stored text's ref, once PT_FX_BLOB completed */
     uint32_t blob_fx; /* the PT_FX_BLOB in flight */
     bool blob_tried;  /* done storing (blob empty: it failed; keep the text inline) */

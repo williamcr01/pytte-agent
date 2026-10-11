@@ -81,6 +81,9 @@ struct pt_rt {
     bool closing;
     void *builtin; /* tools_builtin.c's state */
     void (*builtin_free)(void *ud);
+    /* The agent is idle: true when it submitted something (a note that
+     * background commands ended), so there is work again. */
+    bool (*builtin_idle)(void *ud);
     /* prompt.c */
     pt_rt_prompt prompt;
     bool have_prompt;

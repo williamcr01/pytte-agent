@@ -881,6 +881,20 @@ static pt_str error_message(app *a, pt_str raw)
     return pt_json_gets(pt_json_get(j, "data"), "message", &a->ar);
 }
 
+/* A user entry pytte wrote (a note that background commands ended). The
+ * key cannot come from the text: quotes in a JSON string are escaped. */
+static bool is_note(const pt_entry_view *v)
+{
+    static const char key[] = "\"from\":\"pytte\"";
+    size_t i, k = sizeof key - 1;
+    if (strcmp(v->kind, "user") != 0)
+        return false;
+    for (i = 0; i + k <= v->raw.n; i++)
+        if (memcmp(v->raw.p + i, key, k) == 0)
+            return true;
+    return false;
+}
+
 /* An entry from its record: on start, for entries not streamed, and in
  * the full view (Ctrl-O). */
 static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
@@ -897,6 +911,20 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->summary, 0);
         if (full && v->files.n)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->files, 0);
+    } else if (is_note(v) && !full) { /* its "- session ..." lines */
+        pt_str text = m->text;
+        char line[400];
+        size_t at = 0, e;
+        out_blank(out);
+        while (at < text.n) {
+            for (e = at; e < text.n && text.p[e] != '\n'; e++)
+                ;
+            if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ') {
+                snprintf(line, sizeof line, "%s %.*s", a->sy->think, (int)(e - at - 2), text.p + at + 2);
+                out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
+            }
+            at = e + 1;
+        }
     } else if (strcmp(v->kind, "user") == 0) {
         pt_str text = m->text, name;
         char line[120];
@@ -1085,7 +1113,7 @@ static void on_entries(app *a)
             continue;
         if (strcmp(v.kind, "user") == 0) /* answers a key: no frame wait */
             a->urgent = true;
-        if (strcmp(v.kind, "user") == 0 && a->nq) { /* a queued input was placed */
+        if (strcmp(v.kind, "user") == 0 && a->nq && !is_note(&v)) { /* a queued input was placed */
             queued_input first = a->queue[0];
             memmove(a->queue, a->queue + 1, (a->nq - 1) * sizeof *a->queue);
             a->queue[--a->nq] = first;
