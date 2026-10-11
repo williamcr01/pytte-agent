@@ -283,14 +283,15 @@ static void read_usage(pt_msg *m, const pt_json *u)
     int64_t reasoning = pt_json_geti(cd, "reasoning_tokens", 0);
     if (!pt_json_is(u, PT_J_OBJ))
         return;
-    if (cached < 0)
-        cached = 0;
-    if (written < 0)
-        written = 0;
-    m->usage.input = prompt > cached + written ? (uint64_t)(prompt - cached - written) : 0;
+    {
+        uint64_t p = prompt > 0 ? (uint64_t)prompt : 0;
+        uint64_t c = cached > 0 ? (uint64_t)cached : 0;
+        uint64_t w = written > 0 ? (uint64_t)written : 0;
+        m->usage.input = p > c && p - c > w ? p - c - w : 0;
+        m->usage.cache_read = c;
+        m->usage.cache_write = w;
+    }
     m->usage.output = out > 0 ? (uint64_t)out : 0;
-    m->usage.cache_read = (uint64_t)cached;
-    m->usage.cache_write = (uint64_t)written;
     m->usage.reasoning = reasoning > 0 ? (uint64_t)reasoning : 0;
 }
 

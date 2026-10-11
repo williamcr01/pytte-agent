@@ -52,6 +52,7 @@ typedef struct pt_sha256 {
 } pt_sha256;
 
 void pt_sha256_init(pt_sha256 *s);
+/* p may be NULL when n == 0. */
 void pt_sha256_update(pt_sha256 *s, const void *p, size_t n);
 void pt_sha256_final(pt_sha256 *s, unsigned char out[32]);
 /* Lowercase hex of n bytes into out (2n chars, no NUL). */
@@ -165,7 +166,8 @@ void pt_jw_uint(pt_jw *w, uint64_t v);
 void pt_jw_bool(pt_jw *w, bool v);
 void pt_jw_null(pt_jw *w);
 void pt_jw_raw(pt_jw *w, pt_str json); /* already valid JSON, written as is */
-/* Quoted, escaped string. Invalid UTF-8 becomes U+FFFD. */
+/* Quoted, escaped string. Invalid UTF-8 becomes U+FFFD. s may borrow b's
+ * storage; the input is preserved across buffer growth. */
 void pt_json_quote(pt_buf *b, pt_str s);
 
 /* ---- JSON Schema (a subset) ------------------------------------------------

@@ -521,8 +521,16 @@ bool pt_json_truthy(const pt_json *v)
 void pt_json_quote(pt_buf *b, pt_str s)
 {
     static const char hex[] = "0123456789abcdef";
-    size_t i = 0, run = 0;
-    pt_buf_reserve(b, s.n + 2);
+    size_t i = 0, run = 0, off = 0;
+    bool alias = b->p && (uintptr_t)s.p >= (uintptr_t)b->p &&
+                 (uintptr_t)s.p - (uintptr_t)b->p <= b->cap &&
+                 s.n <= b->cap - ((uintptr_t)s.p - (uintptr_t)b->p);
+    if (alias)
+        off = (size_t)((uintptr_t)s.p - (uintptr_t)b->p);
+    if (s.n <= SIZE_MAX - 2)
+        pt_buf_reserve(b, s.n + 2);
+    if (alias)
+        s.p = b->p + off;
     pt_buf_putc(b, '"');
     while (i < s.n) {
         unsigned char c = (unsigned char)s.p[i];

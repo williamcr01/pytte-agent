@@ -98,8 +98,10 @@ static bool same_value(sctx *c, const pt_json *x, const pt_json *y)
 {
     if (x->type != y->type)
         return false;
-    if (x->type == PT_J_STR)
-        return pt_str_eq(pt_json_str(x, c->a), pt_json_str(y, c->a));
+    if (x->type == PT_J_STR) {
+        bool equal = pt_str_eq(pt_json_str(x, c->a), pt_json_str(y, c->a));
+        return !c->a->oom && equal;
+    }
     return pt_str_eq(x->raw, y->raw);
 }
 
@@ -215,7 +217,11 @@ bool pt_schema_check(const pt_json *schema, const pt_json *value, pt_arena *a, c
         err[0] = 0;
     if (!value)
         return fail(&c, "no value", PT_STR_NULL);
-    return check(&c, schema, value);
+    if (!check(&c, schema, value))
+        return false;
+    if (a->oom)
+        return fail(&c, "out of memory", PT_STR_NULL);
+    return true;
 }
 
 const char *pt_json_type_name(const pt_json *v)

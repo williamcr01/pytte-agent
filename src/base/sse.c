@@ -21,6 +21,8 @@ void pt_sse_free(pt_sse *s)
 static int dispatch(pt_sse *s, pt_sse_cb cb, void *ud)
 {
     int r = 0;
+    if (s->line.oom || s->data.oom || s->event.oom || s->id.oom)
+        return -1;
     if (s->has_data) {
         pt_sse_event ev;
         ev.event = pt_buf_str(&s->event);
@@ -88,7 +90,7 @@ int pt_sse_feed(pt_sse *s, const char *p, size_t n, pt_sse_cb cb, void *ud)
             j++;
         if (j == n) { /* incomplete line: keep it for the next chunk */
             pt_buf_put(&s->line, p + i, n - i);
-            return 0;
+            return s->line.oom ? -1 : 0;
         }
         if (s->line.n) {
             pt_buf_put(&s->line, p + i, j - i);
@@ -103,6 +105,8 @@ int pt_sse_feed(pt_sse *s, const char *p, size_t n, pt_sse_cb cb, void *ud)
         if (p[j] == '\r')
             s->cr = true;
         i = j + 1;
+        if (s->line.oom || s->data.oom || s->event.oom || s->id.oom)
+            return -1;
         if (r)
             return r;
     }
@@ -113,6 +117,8 @@ int pt_sse_finish(pt_sse *s, pt_sse_cb cb, void *ud)
 {
     int r = 0;
     s->cr = false;
+    if (s->line.oom || s->data.oom || s->event.oom || s->id.oom)
+        return -1;
     if (s->line.n) {
         r = on_line(s, pt_buf_str(&s->line), cb, ud);
         pt_buf_reset(&s->line);

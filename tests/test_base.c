@@ -37,6 +37,21 @@ static void test_buf(void)
     pt_buf_putc(&b, ' ');
     pt_buf_u64(&b, UINT64_MAX);
     CHECK_STR(pt_buf_str(&b), "0 -42 -9223372036854775808 18446744073709551615");
+    pt_buf_reset(&b);
+    pt_buf_reserve(&b, 64);
+    memset(b.p, 'x', 63);
+    b.n = 63;
+    {
+        pt_str self = {b.p, b.n};
+        pt_buf_puts(&b, self);
+    }
+    CHECK(b.n == 126 && memcmp(b.p, "xxxxxxxx", 8) == 0 && memcmp(b.p, b.p + 63, 63) == 0);
+    pt_buf_reset(&b);
+    pt_buf_reserve(&b, 64);
+    memset(b.p, '"', 40);
+    b.n = 40;
+    pt_json_quote(&b, (pt_str){b.p, b.n});
+    CHECK(b.n == 122 && b.p[40] == '"' && b.p[41] == '\\' && b.p[42] == '"');
     pt_buf_free(&b);
 }
 
@@ -236,6 +251,12 @@ static void test_sha256(void)
 {
     char h[65], big[1000];
     size_t i;
+    {
+        pt_sha256 s;
+        pt_sha256_init(&s);
+        pt_sha256_update(&s, NULL, 0);
+        pt_sha256_final(&s, (unsigned char[32]){0});
+    }
     sha_hex("", 0, 0, h);
     CHECK(strcmp(h, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0);
     sha_hex("abc", 3, 1, h);

@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+#define PT_AI_ERROR_BODY_MAX (64u * 1024u)
+
 typedef struct sblock {
     pt_buf text; /* text, thinking, or tool call arguments */
     pt_buf sig;
@@ -27,7 +29,7 @@ struct pt_ai_stream {
     int status;
     int64_t retry_after_ms;
     pt_buf errbody;
-    bool started, finished;
+    bool started, finished, oom;
     int64_t t0, now;
     pt_ai_error err;
 };
@@ -116,15 +118,29 @@ void pt_emit_start(pt_ai_stream *s)
     emit(s, PT_EV_START, 0, PT_STR_NULL);
 }
 
+static bool size_mul(size_t a, size_t b, size_t *out)
+{
+    if (a && b > SIZE_MAX / a)
+        return false;
+    *out = a * b;
+    return true;
+}
+
 static bool grow(pt_ai_stream *s)
 {
-    uint32_t ncap = s->cap ? s->cap * 2 : 8;
+    uint32_t ncap;
+    size_t block_bytes, scratch_bytes;
+    if (s->cap > UINT32_MAX / 2)
+        return false;
+    ncap = s->cap ? s->cap * 2 : 8;
+    if (!size_mul((size_t)ncap, sizeof(pt_block), &block_bytes) ||
+        !size_mul((size_t)ncap, sizeof(sblock), &scratch_bytes))
+        return false;
     pt_block *nb;
     sblock *ns;
     uint32_t i;
     if (s->bcap < ncap) {
-        nb = (pt_block *)s->al.fn(s->al.ud, s->blocks, sizeof(pt_block) * s->bcap,
-                                  sizeof(pt_block) * ncap);
+        nb = (pt_block *)s->al.fn(s->al.ud, s->blocks, sizeof(pt_block) * s->bcap, block_bytes);
         if (!nb)
             return false;
         s->blocks = nb;
@@ -132,7 +148,7 @@ static bool grow(pt_ai_stream *s)
         s->msg.blocks = nb;
     }
     nb = s->blocks;
-    ns = (sblock *)s->al.fn(s->al.ud, s->sb, sizeof(sblock) * s->cap, sizeof(sblock) * ncap);
+    ns = (sblock *)s->al.fn(s->al.ud, s->sb, sizeof(sblock) * s->cap, scratch_bytes);
     if (!ns)
         return false;
     s->sb = ns;
@@ -160,14 +176,18 @@ long pt_emit_block(pt_ai_stream *s, pt_block_kind kind, pt_str id, pt_str name)
     if (s->finished)
         return -1;
     pt_emit_start(s);
-    if (s->msg.nblocks == s->cap && !grow(s))
+    if (s->msg.nblocks == s->cap && !grow(s)) {
+        s->oom = true;
         return -1;
+    }
     i = s->msg.nblocks++;
     b = &s->blocks[i];
     memset(b, 0, sizeof *b);
     b->kind = kind;
     b->id = pt_arena_dup(s->a, id);
     b->name = pt_arena_dup(s->a, name);
+    if (s->a->oom)
+        s->oom = true;
     s->sb[i].open = true;
     pt_buf_reset(&s->sb[i].text);
     pt_buf_reset(&s->sb[i].sig);
@@ -201,6 +221,10 @@ void pt_emit_delta(pt_ai_stream *s, long idx, pt_str delta)
         return;
     b = &s->blocks[idx];
     pt_buf_puts(&s->sb[idx].text, delta);
+    if (s->sb[idx].text.oom) {
+        s->oom = true;
+        return;
+    }
     sync_block(s, (uint32_t)idx);
     k = b->kind == PT_BLOCK_THINKING ? PT_EV_THINKING_DELTA
         : b->kind == PT_BLOCK_TOOL_CALL ? PT_EV_TOOLCALL_DELTA
@@ -213,6 +237,10 @@ void pt_emit_signature(pt_ai_stream *s, long idx, pt_str sig)
     if (s->finished || !pt_emit_is_open(s, idx))
         return;
     pt_buf_puts(&s->sb[idx].sig, sig);
+    if (s->sb[idx].sig.oom) {
+        s->oom = true;
+        return;
+    }
     sync_block(s, (uint32_t)idx);
 }
 
@@ -222,6 +250,10 @@ void pt_emit_set_content(pt_ai_stream *s, long idx, pt_str content)
         return;
     pt_buf_reset(&s->sb[idx].text);
     pt_buf_puts(&s->sb[idx].text, content);
+    if (s->sb[idx].text.oom) {
+        s->oom = true;
+        return;
+    }
     sync_block(s, (uint32_t)idx);
 }
 
@@ -236,6 +268,8 @@ static void settle_block(pt_ai_stream *s, uint32_t i)
         b->text = pt_arena_dup(s->a, b->text);
     if (b->kind == PT_BLOCK_THINKING && !b->redacted)
         b->signature = pt_arena_dup(s->a, b->signature);
+    if (s->a->oom || s->sb[i].text.oom || s->sb[i].sig.oom)
+        s->oom = true;
     s->sb[i].open = false;
 }
 
@@ -287,15 +321,25 @@ static void settle(pt_ai_stream *s)
 {
     uint32_t i;
     pt_block *final;
+    if (s->oom || s->a->oom) {
+        s->oom = true;
+        return;
+    }
     for (i = 0; i < s->msg.nblocks; i++)
         if (s->sb[i].open)
             settle_block(s, i);
+    if (s->oom || s->a->oom) {
+        s->oom = true;
+        return;
+    }
     final = (pt_block *)pt_arena_alloc(s->a, sizeof(pt_block) * (s->msg.nblocks ? s->msg.nblocks : 1));
     if (final && s->msg.nblocks)
         memcpy(final, s->blocks, sizeof(pt_block) * s->msg.nblocks);
     s->msg.blocks = final;
-    if (!final)
+    if (!final) {
         s->msg.nblocks = 0;
+        s->oom = true;
+    }
     s->msg.duration_ms = s->now - s->t0;
     s->finished = true;
 }
@@ -307,6 +351,11 @@ void pt_emit_done(pt_ai_stream *s)
     pt_emit_start(s);
     pt_emit_end_all(s);
     settle(s);
+    if (s->oom || s->a->oom) {
+        s->oom = true;
+        pt_emit_fail(s, PT_ERR_FATAL, PT_S("out of memory"));
+        return;
+    }
     s->err.cls = PT_ERR_NONE;
     emit(s, PT_EV_DONE, 0, PT_STR_NULL);
 }
@@ -316,8 +365,17 @@ void pt_emit_fail(pt_ai_stream *s, pt_err_class cls, pt_str message)
     if (s->finished)
         return;
     settle(s);
+    s->finished = true;
     s->msg.stop = cls == PT_ERR_ABORTED ? PT_STOP_ABORTED : PT_STOP_ERROR;
-    s->msg.error = pt_arena_dup(s->a, message);
+    if (s->oom || s->a->oom) {
+        s->msg.blocks = NULL;
+        s->msg.nblocks = 0;
+        s->msg.error = PT_S("out of memory");
+    } else {
+        s->msg.error = pt_arena_dup(s->a, message);
+    }
+    if (s->a->oom)
+        s->msg.error = PT_S("out of memory");
     s->err.cls = cls;
     s->err.message = s->msg.error;
     s->err.status = s->status;
@@ -346,6 +404,8 @@ static int on_sse(void *ud, const pt_sse_event *ev)
     int r;
     pt_arena_reset(&s->scratch);
     r = s->t.api->feed(s, s->api_state, ev);
+    if (s->oom || s->a->oom || s->own.oom)
+        return 1;
     return s->finished ? 1 : r;
 }
 
@@ -355,10 +415,22 @@ void pt_ai_stream_body(pt_ai_stream *s, const char *p, size_t n, int64_t now_ms)
         return;
     s->now = now_ms;
     if (!ok_status(s->status)) {
-        pt_buf_put(&s->errbody, p, n);
+        size_t keep = s->errbody.n < PT_AI_ERROR_BODY_MAX ? PT_AI_ERROR_BODY_MAX - s->errbody.n : 0;
+        if (keep > n)
+            keep = n;
+        pt_buf_put(&s->errbody, p, keep); /* bounded diagnostic prefix */
+        if (s->errbody.oom)
+            s->oom = true;
         return;
     }
-    pt_sse_feed(&s->sse, p, n, on_sse, s);
+    {
+        int r = pt_sse_feed(&s->sse, p, n, on_sse, s);
+        if ((!s->finished && r != 0) || s->sse.line.oom || s->sse.data.oom || s->sse.event.oom ||
+            s->sse.id.oom)
+            s->oom = true;
+    }
+    if (s->oom || s->a->oom || s->own.oom)
+        pt_emit_fail(s, PT_ERR_FATAL, PT_S("out of memory"));
 }
 
 void pt_ai_stream_end(pt_ai_stream *s, const char *transport_error, int64_t now_ms)
@@ -366,6 +438,11 @@ void pt_ai_stream_end(pt_ai_stream *s, const char *transport_error, int64_t now_
     if (s->finished)
         return;
     s->now = now_ms;
+    if (s->oom || s->a->oom || s->own.oom || s->errbody.oom) {
+        s->oom = true;
+        pt_emit_fail(s, PT_ERR_FATAL, PT_S("out of memory"));
+        return;
+    }
     if (transport_error) {
         pt_buf msg;
         pt_buf_init(&msg, s->al);
@@ -386,7 +463,18 @@ void pt_ai_stream_end(pt_ai_stream *s, const char *transport_error, int64_t now_
         pt_emit_fail(s, e.cls, e.message);
         return;
     }
-    if (pt_sse_finish(&s->sse, on_sse, s) == 0 && !s->finished)
+    {
+        int r = pt_sse_finish(&s->sse, on_sse, s);
+        if ((!s->finished && r != 0) || s->sse.line.oom || s->sse.data.oom || s->sse.event.oom ||
+            s->sse.id.oom)
+            s->oom = true;
+    }
+    if (s->oom || s->a->oom || s->own.oom) {
+        s->oom = true;
+        pt_emit_fail(s, PT_ERR_FATAL, PT_S("out of memory"));
+        return;
+    }
+    if (!s->finished)
         s->t.api->finish(s, s->api_state);
     if (!s->finished)
         pt_emit_fail(s, PT_ERR_RETRYABLE, PT_S("stream ended before the response was complete"));

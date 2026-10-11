@@ -52,7 +52,10 @@ void pt_sha256_init(pt_sha256 *s)
 void pt_sha256_update(pt_sha256 *s, const void *data, size_t n)
 {
     const unsigned char *p = (const unsigned char *)data;
-    size_t used = (size_t)(s->n & 63);
+    size_t used;
+    if (!n)
+        return;
+    used = (size_t)(s->n & 63);
     s->n += n;
     if (used) {
         size_t take = 64 - used < n ? 64 - used : n;

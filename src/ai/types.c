@@ -202,6 +202,14 @@ static uint64_t getu(const pt_json *o, const char *k)
     return v > 0 ? (uint64_t)v : 0;
 }
 
+static bool size_mul(size_t x, size_t y, size_t *out)
+{
+    if (x && y > SIZE_MAX / x)
+        return false;
+    *out = x * y;
+    return true;
+}
+
 static bool read_block(const pt_json *v, pt_block *b, pt_arena *a)
 {
     pt_str type = pt_json_gets(v, "type", a);
@@ -237,6 +245,7 @@ bool pt_msg_read_json(const pt_json *v, pt_msg *m, pt_arena *a)
     unsigned r;
     const pt_json *content, *usage, *c;
     uint32_t i = 0;
+    size_t block_bytes;
     memset(m, 0, sizeof *m);
     if (!pt_json_is(v, PT_J_OBJ) || !lookup(pt_json_gets(v, "role", a), role_names, 4, &r))
         return false;
@@ -266,9 +275,10 @@ bool pt_msg_read_json(const pt_json *v, pt_msg *m, pt_arena *a)
     m->usage.cache_write = getu(usage, "cache_write");
     m->usage.reasoning = getu(usage, "reasoning");
     content = pt_json_get(v, "content");
-    if (!pt_json_is(content, PT_J_ARR))
+    if (!pt_json_is(content, PT_J_ARR) ||
+        !size_mul((size_t)(content->len ? content->len : 1), sizeof(pt_block), &block_bytes))
         return false;
-    m->blocks = (pt_block *)pt_arena_zalloc(a, sizeof(pt_block) * (content->len ? content->len : 1));
+    m->blocks = (pt_block *)pt_arena_zalloc(a, block_bytes);
     if (!m->blocks)
         return false;
     for (c = content->child; c; c = c->next)

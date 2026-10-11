@@ -42,9 +42,22 @@ bool pt_buf_reserve(pt_buf *b, size_t extra)
 
 void pt_buf_put(pt_buf *b, const void *p, size_t n)
 {
-    if (!n || !pt_buf_reserve(b, n))
+    size_t off = 0;
+    bool alias = false;
+    if (!n)
         return;
-    memcpy(b->p + b->n, p, n);
+    /* Integer address comparisons avoid undefined relational pointer comparisons. */
+    if (b->p && (uintptr_t)p >= (uintptr_t)b->p &&
+        (uintptr_t)p - (uintptr_t)b->p <= b->cap &&
+        n <= b->cap - ((uintptr_t)p - (uintptr_t)b->p)) {
+        alias = true;
+        off = (size_t)((uintptr_t)p - (uintptr_t)b->p);
+    }
+    if (!pt_buf_reserve(b, n))
+        return;
+    if (alias)
+        p = b->p + off;
+    memmove(b->p + b->n, p, n);
     b->n += n;
 }
 

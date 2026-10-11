@@ -179,8 +179,12 @@ static int feed(pt_ai_stream *s, void *vst, const pt_sse_event *ev)
         m->raw_stop = pt_arena_dup(fa, stop);
         if (!lookup_stop(stop, &m->stop))
             m->stop = PT_STOP_STOP;
-        m->usage.input = (uint64_t)pt_json_geti(u, "input", 0);
-        m->usage.output = (uint64_t)pt_json_geti(u, "output", 0);
+        {
+            int64_t input = pt_json_geti(u, "input", 0);
+            int64_t output = pt_json_geti(u, "output", 0);
+            m->usage.input = input > 0 ? (uint64_t)input : 0;
+            m->usage.output = output > 0 ? (uint64_t)output : 0;
+        }
         pt_emit_done(s);
     } else if (pt_str_eqz(e, "error")) {
         pt_emit_fail(s, lookup_class(pt_json_gets(d, "class", sa)), pt_json_gets(d, "message", sa));
