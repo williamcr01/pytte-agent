@@ -102,6 +102,7 @@ typedef void (*pt_event_fn)(void *ud, const pt_event *ev);
 /* Settings read live: they apply whenever a run next prepares a request. */
 typedef struct pt_config {
     pt_str model; /* "provider/model-id" or "provider"; empty: the session's last */
+    pt_str compact_model; /* the model that writes summaries; empty: model */
     pt_reasoning reasoning;
     uint32_t max_tokens;       /* 0: the model's maximum that fits the context */
     uint32_t retry_base_ms;    /* first backoff delay; 0: 1000 */

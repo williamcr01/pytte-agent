@@ -558,6 +558,8 @@ static void test_compact_keep(void)
     c.model = PT_S("faux/faux");
     c.live_interval_ms = 1;
     c.compact_keep = 25; /* about 75 bytes: the second turn, not the first */
+    c.compact_model = PT_S("faux/summarizer");
+    c.reasoning = PT_REASON_HIGH;
     pt_set_config(h.a, &c);
     h_submit(&h, "one", NULL);
     h_run(&h);
@@ -572,6 +574,8 @@ static void test_compact_keep(void)
     CHECK(pt_compact(h.a));
     h_run(&h);
     CHECK(has(pt_buf_str(&h.last_request), PT_S("Write the summary"))); /* the compaction's */
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("\"model\":\"summarizer\"")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("\"reasoning\":\"low\""))); /* little is needed */
     CHECK(!has(pt_buf_str(&h.last_request), PT_S("<previous-summary>")));
     CHECK(has(pt_buf_str(&h.last_request), PT_S("Alpha answer")));
     CHECK(!has(pt_buf_str(&h.last_request), PT_S("Beta answer"))); /* kept, not summarized */
@@ -589,6 +593,8 @@ static void test_compact_keep(void)
     CHECK(has(pt_buf_str(&h.last_request), PT_S("Beta answer")));
     CHECK(!has(pt_buf_str(&h.last_request), PT_S("Alpha answer")));
     CHECK(has(pt_buf_str(&h.last_request), PT_S("\"turn\":2"))); /* 1 summarized + 1 kept */
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("\"model\":\"faux\"")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("\"reasoning\":\"high\"")));
     CHECK(pt_str_eqz(pt_buf_str(&h.text), "Gamma answer") || has(pt_buf_str(&h.text), PT_S("Gamma answer")));
     transcript(h.a, &want);
     CHECK(h_reload(&h) == PT_LOAD_OK);

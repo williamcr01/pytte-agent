@@ -41,6 +41,8 @@ static const char usage[] =
     "                          file; else the session's last, or " DEFAULT_MODEL ")\n"
     "  --effort LEVEL          off, minimal, low, medium, high, xhigh, max ($PYTTE_EFFORT)\n"
     "                          starts at medium unless configured otherwise\n"
+    "  --compact-model REF     the model that writes compaction summaries (default:\n"
+    "                          $PYTTE_COMPACT_MODEL, the config file, else the model)\n"
     "  --max-tokens N          default: the model's maximum that fits the context\n"
     "  --context-window N      compact as if the model's window were N tokens\n"
     "  --system-prompt TEXT    system prompt of a new session\n"
@@ -62,7 +64,7 @@ enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 typedef struct opts {
     cli_opts c;
     const char *cmd_log, *cmd_approve, *cmd_ls, *id, *prompt, *task, *answer;
-    bool print, cont, resume, json, all_epochs, model_flag, effort_flag, perm_flag;
+    bool print, cont, resume, json, all_epochs, model_flag, compact_flag, effort_flag, perm_flag;
     int out;
 } opts;
 
@@ -112,6 +114,9 @@ static void parse_args(int argc, char **argv, opts *o)
         } else if (TAKES("-m") || TAKES("--model")) {
             o->c.model = v;
             o->model_flag = true;
+        } else if (TAKES("--compact-model")) {
+            o->c.compact_model = v;
+            o->compact_flag = true;
         } else if (TAKES("--system-prompt")) {
             o->c.system = v;
         } else if (TAKES("--append-system-prompt")) {
@@ -178,6 +183,24 @@ static void parse_args(int argc, char **argv, opts *o)
         o->c.script = getenv("PYTTE_FAUX_SCRIPT");
 }
 
+/* An unknown model stops pytte before a session exists to leave behind. */
+static void check_model(const char *ref, const char *src)
+{
+    pt_arena a;
+    pt_ai_target t;
+    const char *why;
+    bool ok;
+    if (!ref || !*ref)
+        return;
+    pt_arena_init(&a, pt_sys_allocator(), 0);
+    ok = pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(ref), &t, &a, &why);
+    pt_arena_free(&a);
+    if (!ok) {
+        fprintf(stderr, "pytte: model %s (from %s): %s, e.g. %s\n", ref, src, why, DEFAULT_MODEL);
+        exit(1);
+    }
+}
+
 /* Model: a flag, else the environment; config files set new sessions'
  * defaults (an existing one keeps its last model). Effort: a flag, else
  * the layered settings, starting at an explicit medium. */
@@ -205,20 +228,12 @@ static void apply_config(opts *o, cli_config *cfg, bool create)
                 cfg->src[CFG_PERMS]);
         exit(1);
     }
-    if (o->c.model && *o->c.model) { /* before a session exists to leave behind */
-        pt_arena a;
-        pt_ai_target t;
-        const char *why;
-        bool ok;
-        pt_arena_init(&a, pt_sys_allocator(), 0);
-        ok = pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(o->c.model), &t, &a, &why);
-        pt_arena_free(&a);
-        if (!ok) {
-            fprintf(stderr, "pytte: model %s (from %s): %s, e.g. %s\n", o->c.model,
-                    o->c.model == cfg->val[CFG_MODEL] ? cfg->src[CFG_MODEL] : "flag", why, DEFAULT_MODEL);
-            exit(1);
-        }
-    }
+    if (o->compact_flag)
+        cli_config_set(cfg, CFG_COMPACT_MODEL, o->c.compact_model, "flag");
+    else if (cfg->val[CFG_COMPACT_MODEL][0])
+        o->c.compact_model = cfg->val[CFG_COMPACT_MODEL];
+    check_model(o->c.model, o->c.model == cfg->val[CFG_MODEL] ? cfg->src[CFG_MODEL] : "flag");
+    check_model(o->c.compact_model, cfg->src[CFG_COMPACT_MODEL]);
 }
 
 /* ---- print mode ---- */

@@ -264,7 +264,9 @@ bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena
 
 /* ---- the steps ---- */
 
-/* Pin the model and how long the summary may be. Pure, like a run's. */
+/* Pin the model and how long the summary may be. Pure, like a run's.
+ * The summary is written by compact_model, else the run's model, with
+ * little reasoning: summarizing needs little. */
 static bool prepare(pt_agent *a, task *t, uint32_t attempt)
 {
     pt_arena *sa = &a->scratch;
@@ -274,7 +276,8 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     task nt = *t;
     pt_buf ref;
     bool ok;
-    if (!pt_run_resolve(a, c->model, &target, sa) || !pt_run_credentials(a, target.provider, &cred))
+    if (!pt_run_resolve(a, c->compact_model.n ? c->compact_model : c->model, &target, sa) ||
+        !pt_run_credentials(a, target.provider, &cred))
         return false;
     pt_buf_init(&ref, a->al);
     pt_buf_putz(&ref, target.provider->id);
@@ -284,7 +287,7 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     nt.phase = PH_REQUEST;
     nt.attempt = attempt;
     nt.model = pt_buf_str(&ref);
-    nt.reasoning = c->reasoning;
+    nt.reasoning = c->reasoning == PT_REASON_OFF || c->reasoning == PT_REASON_MINIMAL ? c->reasoning : PT_REASON_LOW;
     nt.max_tokens = target.model.max_tokens && target.model.max_tokens < SUMMARY_TOKENS
                         ? target.model.max_tokens
                         : SUMMARY_TOKENS;

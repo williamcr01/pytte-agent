@@ -111,7 +111,12 @@ Long sessions: before a request that would not fit the context window
 (less 24k tokens, or a quarter of a small window), or after the provider
 says the prompt is too long, the model writes a summary of the
 conversation so far and a new epoch starts from it, followed by the newest
-turns as they were (about 20k tokens). The log keeps everything: `pytte log --all-epochs` shows
+turns as they were (about 20k tokens). The summary has fixed sections (goal,
+progress, decisions, next steps, ...), is updated rather than rewritten at the
+next compaction, and is followed by the files read and modified, which code
+keeps. It is written with low effort by the session's model, or by
+`--compact-model REF` (`$PYTTE_COMPACT_MODEL`, `compaction.model` in the config,
+`/settings compact-model`). The log keeps everything: `pytte log --all-epochs` shows
 the earlier epochs. `/compact` compacts now. `--context-window N` pretends
 the window is N tokens, which is handy for trying it. Token usage per model
 is recorded with each answer; `/usage` shows it with an estimated cost.

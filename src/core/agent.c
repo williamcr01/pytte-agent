@@ -788,6 +788,7 @@ pt_agent *pt_new(const pt_opts *o)
         pt_buf_init(&a->q[i].bytes, a->al);
     a->next_id = 1;
     a->o.config.model = pt_arena_dup(&a->perm, o->config.model);
+    a->o.config.compact_model = pt_arena_dup(&a->perm, o->config.compact_model);
     if (a->perm.oom) {
         pt_free(a);
         return NULL;
@@ -842,15 +843,18 @@ void pt_free(pt_agent *a)
 
 void pt_set_config(pt_agent *a, const pt_config *c)
 {
-    pt_str model = a->o.config.model;
+    pt_str model = a->o.config.model, cm = a->o.config.compact_model;
     if (!pt_str_eq(model, c->model))
         model = pt_arena_dup(&a->perm, c->model);
+    if (!pt_str_eq(cm, c->compact_model))
+        cm = pt_arena_dup(&a->perm, c->compact_model);
     if (a->perm.oom) {
         pt_core_fail(a, PT_FATAL_OOM, "out of memory setting configuration", PT_STR_NULL);
         return;
     }
     a->o.config = *c;
     a->o.config.model = model;
+    a->o.config.compact_model = cm;
 }
 
 bool pt_create(pt_agent *a, const pt_session_cfg *c)

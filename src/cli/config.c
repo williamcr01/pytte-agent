@@ -13,8 +13,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char *const keys[CFG_N] = {"model", "reasoning", "tui.thinking", "tui.symbols",
-                                        "tui.pager", "permissions.mode"};
+static const char *const keys[CFG_N] = {"model",     "reasoning",        "tui.thinking",    "tui.symbols",
+                                        "tui.pager", "permissions.mode", "compaction.model"};
 
 const char *cli_config_key(int k)
 {
@@ -106,6 +106,8 @@ void cli_config_load(cli_config *c, char *warn, size_t cap)
     load_file(c, ".pytte/config.json", "project", warn, cap);
     if ((e = getenv("PYTTE_MODEL")) && *e)
         cli_config_set(c, CFG_MODEL, e, "env");
+    if ((e = getenv("PYTTE_COMPACT_MODEL")) && *e)
+        cli_config_set(c, CFG_COMPACT_MODEL, e, "env");
     if ((e = getenv("PYTTE_EFFORT")) && *e)
         cli_config_set(c, CFG_REASONING, e, "env");
     if ((e = getenv("PYTTE_PERMISSION_MODE")) && *e)

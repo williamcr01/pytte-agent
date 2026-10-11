@@ -71,7 +71,8 @@ static const struct {
                 {CFG_MODEL, "model"},
                 {CFG_REASONING, "reasoning"},
                 {CFG_PAGER, "pager"},
-                {CFG_PERMS, "permissions"}};
+                {CFG_PERMS, "permissions"},
+                {CFG_COMPACT_MODEL, "compact-model"}};
 #define NSETTINGS (sizeof settings / sizeof settings[0])
 
 typedef struct item {
@@ -1499,7 +1500,8 @@ static bool save_setting(app *a, int k, const char *v)
     pt_ai_target t;
     const char *why = NULL;
     pt_arena_reset(&a->ar);
-    if (k == CFG_MODEL && !pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(v), &t, &a->ar, &why)) {
+    if ((k == CFG_MODEL || (k == CFG_COMPACT_MODEL && *v)) &&
+        !pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(v), &t, &a->ar, &why)) {
         snprintf(err, sizeof err, "%s: %s", v, why ? why : "unknown");
         out_z(a, TUI_RED, err);
         return false;
@@ -1532,6 +1534,10 @@ static bool save_setting(app *a, int k, const char *v)
         apply_symbols(a);
     if (k == CFG_PERMS && pt_perm_parse(pt_strz(a->cfg->val[k]), &a->o.perm) && a->open)
         pt_rt_set_perm(a->s.rt, a->o.perm);
+    if (k == CFG_COMPACT_MODEL) {
+        a->o.compact_model = a->cfg->val[k][0] ? a->cfg->val[k] : NULL;
+        set_config(a);
+    }
     if (k == CFG_REASONING) {
         pt_reasoning r;
         if (cli_effort_parse(pt_strz(a->cfg->val[k]), &r)) {
@@ -1574,6 +1580,7 @@ static void set_config(app *a)
     pt_config c;
     memset(&c, 0, sizeof c);
     c.model = a->o.model ? pt_strz(a->o.model) : PT_STR_NULL;
+    c.compact_model = a->o.compact_model ? pt_strz(a->o.compact_model) : PT_STR_NULL;
     c.reasoning = a->o.reasoning;
     c.max_tokens = a->o.max_tokens;
     c.retry_base_ms = a->o.retry_base_ms;
@@ -1949,7 +1956,7 @@ static void run_command(app *a, pt_str line)
         }
         s = find_setting((pt_str){arg.p, sp2 >= 0 ? (size_t)sp2 : arg.n});
         if (s < 0) {
-            out_z(a, TUI_RED, "settings: thinking, symbols, model, reasoning, pager");
+            out_z(a, TUI_RED, "settings: thinking, symbols, model, reasoning, pager, permissions, compact-model");
             return;
         }
         if (sp2 >= 0) {
@@ -2279,7 +2286,7 @@ static void settings_key(app *a, const tui_ev *ev)
         for (i = 0; i < nv && strcmp(a->cfg->val[k], vals[i]) != 0; i++)
             ;
         save_setting(a, k, vals[((i < nv ? i : 0) + dir + nv) % nv]);
-    } else { /* model, pager: edit as a command */
+    } else { /* model, pager, compact-model: edit as a command */
         snprintf(d, sizeof d, "/settings %s %s", settings[a->set_sel].name, k == CFG_PAGER ? a->cfg->val[k] : "");
         a->menu = MENU_NONE;
         a->menu_closed = false;

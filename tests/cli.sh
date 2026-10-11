@@ -98,6 +98,9 @@ fi
 
 printf '%s' '{"turns": [[{"status": 529}, {"status": 400, "body": {"message": "bad request"}}]]}' \
     >"$XDG_STATE_HOME/fail.json"
+"$pytte" -p -m faux/faux --compact-model nope/none x >/dev/null 2>&1
+check "an unknown compaction model is refused" [ $? -eq 1 ]
+
 "$pytte" -p -m faux/faux --script "$XDG_STATE_HOME/fail.json" --retry-base-ms 1 x >/dev/null 2>&1
 check "a run that fails after a retry exits with 10" [ $? -eq 10 ]
 
