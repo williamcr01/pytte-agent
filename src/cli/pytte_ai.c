@@ -163,7 +163,8 @@ static void on_event(void *ud, const pt_ai_event *ev)
         break;
     case PT_EV_TEXT_DELTA:
         out_str(stdout, ev->delta);
-        u->text_nl = ev->delta.p[ev->delta.n - 1] == '\n';
+        if (ev->delta.n)
+            u->text_nl = ev->delta.p[ev->delta.n - 1] == '\n';
         u->any_text = true;
         fflush(stdout);
         break;
@@ -426,6 +427,11 @@ static pt_tool *load_tools(const char *path, uint32_t *n, pt_arena *a)
         exit(1);
     }
     tools = (pt_tool *)pt_arena_zalloc(a, sizeof(pt_tool) * (v->len ? v->len : 1));
+    if (!tools) {
+        free(src);
+        fprintf(stderr, "pytte-ai: out of memory loading tools from %s\n", path);
+        exit(1);
+    }
     for (c = v->child; c; c = c->next, i++) {
         const pt_json *schema = pt_json_get(c, "parameters");
         if (!schema)
@@ -546,6 +552,12 @@ int main(int argc, char **argv)
 
     cap = 16;
     msgs = (pt_msg *)calloc(cap, sizeof *msgs);
+    if (!msgs) {
+        fputs("pytte-ai: out of memory allocating messages\n", stderr);
+        http->free(http);
+        pt_arena_free(&session);
+        return 1;
+    }
     if (o.system) {
         msgs[nmsgs].role = PT_ROLE_SYSTEM;
         msgs[nmsgs++].text = pt_strz(o.system);
@@ -625,10 +637,19 @@ int main(int argc, char **argv)
         pt_arena_free(&scratch);
 
         if (nmsgs + m.nblocks + 1 >= cap) {
-            cap = (nmsgs + m.nblocks + 1) * 2;
-            msgs = (pt_msg *)realloc(msgs, cap * sizeof *msgs);
-            if (!msgs)
-                die("out of memory", NULL);
+            uint32_t new_cap = (nmsgs + m.nblocks + 1) * 2;
+            pt_msg *new_msgs = (pt_msg *)realloc(msgs, new_cap * sizeof *msgs);
+            if (!new_msgs) {
+                fputs("pytte-ai: out of memory growing messages\n", stderr);
+                http->free(http);
+                pt_buf_free(&u.line);
+                pt_buf_free(&u.thinking);
+                free(msgs);
+                pt_arena_free(&session);
+                return 1;
+            }
+            msgs = new_msgs;
+            cap = new_cap;
         }
         msgs[nmsgs++] = m;
         if (m.stop == PT_STOP_ERROR || m.stop == PT_STOP_ABORTED) {

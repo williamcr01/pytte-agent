@@ -200,6 +200,10 @@ bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *
             pt_buf_putc(out, '}');
         pt_buf_put(out, src.p + at, src.n - at);
     }
+    if (out->oom) {
+        snprintf(err, cap, "out of memory building setting");
+        goto done;
+    }
     ok = true;
 done:
     pt_arena_free(&ar);

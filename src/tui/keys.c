@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define TUI_PASTE_MAX (128u * 1024u)
+
 static void *al_fn(void *ud, void *p, size_t old, size_t n)
 {
     (void)ud;
@@ -273,6 +275,17 @@ static int do_csi(tui_keys *k, const csi *c, tui_ev *ev)
     return 0;
 }
 
+/* Preserve a valid prefix of each paste up to TUI_PASTE_MAX; excess bytes
+ * are discarded while scanning continues through the terminal's end marker. */
+static void paste_put(tui_keys *k, const char *p, size_t n)
+{
+    size_t room = k->pasted.n < TUI_PASTE_MAX ? TUI_PASTE_MAX - k->pasted.n : 0;
+    if (n > room)
+        n = room;
+    if (n)
+        pt_buf_put(&k->pasted, p, n);
+}
+
 /* Inside a paste: collect up to the end marker, which may be split. */
 static bool do_paste(tui_keys *k, tui_ev *ev)
 {
@@ -286,11 +299,11 @@ static bool do_paste(tui_keys *k, tui_ev *ev)
         keep = n < 5 ? n : 5;
         while (keep && memcmp(s + n - keep, end, keep) != 0)
             keep--;
-        pt_buf_put(&k->pasted, s, n - keep);
+        paste_put(k, s, n - keep);
         k->at += n - keep;
         return false;
     }
-    pt_buf_put(&k->pasted, s, i);
+    paste_put(k, s, i);
     k->at += i + 6;
     k->paste = false;
     /* \r\n and a lone \r are newlines, then clean as any outside text */

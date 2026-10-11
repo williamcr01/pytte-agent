@@ -320,6 +320,32 @@ static void test_keys(void)
     KEYS("a\xff" "b", "T[a\xef\xbf\xbd" "b] ");
 }
 
+static void test_paste_limit(void)
+{
+    enum { LIMIT = 128 * 1024 };
+    tui_keys k;
+    tui_ev ev;
+    char *body = (char *)malloc(LIMIT + 1024);
+    size_t i;
+    CHECK(body != NULL);
+    if (!body)
+        return;
+    memset(body, 'x', LIMIT + 1024);
+    tui_keys_init(&k);
+    tui_keys_feed(&k, "\x1b[200~", 6);
+    CHECK(tui_keys_next(&k, &ev, false) == false);
+    tui_keys_feed(&k, body, LIMIT + 1024);
+    tui_keys_feed(&k, "\x1b[201~", 6);
+    CHECK(tui_keys_next(&k, &ev, false) && ev.kind == TE_PASTE);
+    CHECK(ev.text.n == LIMIT);
+    for (i = 0; i < ev.text.n; i++)
+        if (ev.text.p[i] != 'x')
+            break;
+    CHECK(i == LIMIT);
+    tui_keys_free(&k);
+    free(body);
+}
+
 static void test_keys_esc_wait(void)
 {
     tui_keys k;
@@ -525,6 +551,7 @@ int main(void)
     RUN(test_wrap);
     RUN(test_keys);
     RUN(test_keys_esc_wait);
+    RUN(test_paste_limit);
     RUN(test_md);
     RUN(test_input);
     RUN(test_config_set);
