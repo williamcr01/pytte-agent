@@ -73,6 +73,12 @@ void pt_buf_putz(pt_buf *b, const char *z)
 
 void pt_buf_putc(pt_buf *b, char c)
 {
+    if (b->n < b->cap) {
+        /* No reserve needed, and a single stack-local byte cannot alias
+         * the buffer's allocation. */
+        b->p[b->n++] = c;
+        return;
+    }
     pt_buf_put(b, &c, 1);
 }
 
