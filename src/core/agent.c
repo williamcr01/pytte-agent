@@ -52,7 +52,13 @@ int64_t pt_core_now(pt_agent *a)
 
 uint32_t pt_core_new_id(pt_agent *a)
 {
-    return a->next_id++;
+    uint32_t id;
+    if (!a->next_id || a->next_id == UINT32_MAX) {
+        pt_core_fail(a, PT_FATAL_OOM, "record ID space exhausted", PT_STR_NULL);
+        return 0;
+    }
+    id = a->next_id++;
+    return id;
 }
 
 uint32_t pt_core_new_fx(pt_agent *a)
@@ -86,20 +92,28 @@ bool pt_core_grow(pt_agent *a, void **arr, uint32_t *cap, uint32_t need, size_t 
 
 task *pt_core_task(pt_agent *a, uint32_t id)
 {
-    uint32_t i;
-    for (i = 0; i < a->ntasks; i++)
-        if (a->tasks[i]->id == id)
-            return a->tasks[i];
-    return NULL;
+    uint32_t lo = 0, hi = a->ntasks;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (a->tasks[mid]->id < id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < a->ntasks && a->tasks[lo]->id == id ? a->tasks[lo] : NULL;
 }
 
 input *pt_core_input(pt_agent *a, uint32_t id)
 {
-    uint32_t i;
-    for (i = 0; i < a->ninputs; i++)
-        if (a->inputs[i]->id == id)
-            return a->inputs[i];
-    return NULL;
+    uint32_t lo = 0, hi = a->ninputs;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2;
+        if (a->inputs[mid]->id < id)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo < a->ninputs && a->inputs[lo]->id == id ? a->inputs[lo] : NULL;
 }
 
 entry *pt_core_last_entry(pt_agent *a)
@@ -698,6 +712,7 @@ static bool step(pt_agent *a)
 int pt_poll(pt_agent *a, pt_fx *out)
 {
     queued_fx *q;
+    pt_run_poll_begin(a);
     if (a->fatal)
         return 0;
     if (!a->qlen)
@@ -718,7 +733,9 @@ int pt_poll(pt_agent *a, pt_fx *out)
     a->qhead = (a->qhead + 1) % PT_FXQ;
     a->qlen--;
     *out = q->fx;
-    if (out->kind == PT_FX_LIVE) {
+    if (out->kind == PT_FX_CANCEL)
+        pt_run_cancel_delivered(a, out->cancel);
+    if (out->kind == PT_FX_LIVE) { /* display-only snapshot: failure is best effort */
         pt_buf_reset(&a->live_out);
         pt_buf_puts(&a->live_out, pt_buf_str(&q->bytes));
         out->bytes = pt_buf_str(&a->live_out);
@@ -829,6 +846,7 @@ void pt_free(pt_agent *a)
     uint32_t i;
     if (!a)
         return;
+    pt_run_free_pending(a);
     for (i = 0; i < a->ntasks; i++) {
         task *t = a->tasks[i];
         pt_task_release(a, t);
@@ -836,6 +854,7 @@ void pt_free(pt_agent *a)
         pt_buf_free(&t->rescued);
         pt_buf_free(&t->gate_text);
     }
+    pt_run_free_pending(a);
     while (a->free_tasks) {
         task *t = a->free_tasks;
         a->free_tasks = t->next_free;
@@ -906,8 +925,10 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
     if (c->ntools) {
         pt_tool_def *d = (pt_tool_def *)pt_arena_alloc(&a->reqs, sizeof(pt_tool_def) * c->ntools);
         uint32_t i;
-        if (!d)
+        if (!d) {
+            pt_core_fail(a, PT_FATAL_OOM, "out of memory creating session", PT_STR_NULL);
             return false;
+        }
         for (i = 0; i < c->ntools; i++) {
             d[i] = c->tools[i];
             d[i].name = pt_arena_dup(&a->reqs, c->tools[i].name);
@@ -918,11 +939,15 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
         a->create.tools = d;
         a->create.ntools = c->ntools;
     }
+    if (a->reqs.oom || a->perm.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory creating session", PT_STR_NULL);
+        return false;
+    }
     a->want_create = true;
     a->loaded = true;
     a->have_session = true;
     a->cur_epoch = 1;
-    return !a->reqs.oom && !a->perm.oom;
+    return true;
 }
 
 pt_load_result pt_load_line(pt_agent *a, pt_str line, bool complete, bool last)
@@ -1036,13 +1061,20 @@ bool pt_submit(pt_agent *a, const pt_input *in)
     }
     if (!pt_core_grow(a, (void **)&a->subs, &a->scap, a->nsubs + 1, sizeof(sub)))
         return false;
-    memset(&a->subs[a->nsubs], 0, sizeof(sub));
-    a->subs[a->nsubs].text = pt_arena_dup(&a->subs_a, in->text);
-    a->subs[a->nsubs].req = pt_arena_dup(&a->subs_a, in->req);
-    a->subs[a->nsubs].note = in->note;
-    a->nsubs++;
+    {
+        sub pending;
+        memset(&pending, 0, sizeof pending);
+        pending.text = pt_arena_dup(&a->subs_a, in->text);
+        pending.req = pt_arena_dup(&a->subs_a, in->req);
+        pending.note = in->note;
+        if (a->subs_a.oom) {
+            pt_core_fail(a, PT_FATAL_OOM, "out of memory queueing submission", PT_STR_NULL);
+            return false;
+        }
+        a->subs[a->nsubs++] = pending;
+    }
     a->idle_sent = false;
-    return !a->subs_a.oom;
+    return true;
 }
 
 bool pt_compact(pt_agent *a)

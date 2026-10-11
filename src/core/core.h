@@ -52,7 +52,8 @@ struct run_live {
     pt_http_req req;
     pt_ai_stream *s;
     uint32_t http_fx;
-    bool http_done, finished;
+    bool http_done, finished, cancel_delivered;
+    struct run_live *pending_next;
     int64_t last_live;
     bool dirty; /* content arrived since the last snapshot */
     pt_buf snap;
@@ -214,6 +215,7 @@ struct pt_agent {
     queued_fx q[PT_FXQ];
     uint32_t qhead, qlen;
     uint32_t next_fx;
+    run_live *pending_http_free; /* requests retained until their cancel is delivered */
     pt_buf live_out; /* the LIVE snapshot handed out by pt_poll */
 
     uint32_t abort_run; /* pt_abort: the run to stop */
@@ -279,6 +281,9 @@ uint64_t pt_core_estimate(const pt_agent *a, uint32_t cutoff);
 /* Advance a run task; true when it queued something. */
 bool pt_run_step(pt_agent *a, task *t);
 void pt_run_free_live(pt_agent *a, task *t);
+void pt_run_cancel_delivered(pt_agent *a, uint32_t cancelled_fx);
+void pt_run_free_pending(pt_agent *a);
+void pt_run_poll_begin(pt_agent *a);
 /* Commit the end of an interrupted run; true when it queued the commit.
  * False when the answer is complete: it is kept, and the abort waits for
  * what comes after it (the run may be done then). */
