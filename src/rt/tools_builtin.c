@@ -921,8 +921,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[0].def.description = PT_S(
         "Run a command line in the user's shell, in the session's directory, and return its output "
         "(stdout and stderr together). Each call starts fresh: cd and export do not carry over. stdin "
-        "is empty, so nothing can prompt. Use it for searching (grep, find), listing (ls), builds, "
-        "tests and git.");
+        "is empty, so nothing can prompt.");
     t[0].def.schema = PT_S(bash_schema);
     t[0].run = t_bash;
     t[0].cancel = bash_cancel;

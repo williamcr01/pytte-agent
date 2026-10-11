@@ -34,9 +34,8 @@ struct cli_open_job {
 static void job_free(cli_open_job *job);
 
 const char cli_default_system[] =
-    "You are pytte, a small coding agent running in a terminal. Be concise. Use the tools to look "
-    "before you answer about files, and read a file before editing it. Prefer small, reviewable "
-    "changes.";
+    "You are an expert assistant operating inside pytte, a agent harness. You help users with their "
+    "requests with the tools you have at your disposal.";
 
 void cli_sessions_dir(char *out, size_t cap)
 {
