@@ -190,6 +190,8 @@ void pt_rt_run_tool(pt_rt *rt, const pt_fx *fx)
     c->total = 0;
     c->blob = NULL;
     c->nospill = false;
+    c->output_oom = false;
+    c->head.oom = c->tail.oom = false;
     pt_buf_reset(&c->head);
     pt_buf_reset(&c->tail);
     rt->tools[k].run(rt->tools[k].ud, rt, fx);
@@ -278,6 +280,8 @@ void pt_rt_tool_output(pt_rt *rt, uint32_t fx, const void *p, size_t n)
         return;
     spill(rt, c, (const char *)p, n);
     keep(c, (const char *)p, n);
+    if (c->head.oom || c->tail.oom)
+        c->output_oom = true;
     if (!rt->closing)
         pt_fx_data(rt->a, fx, p, n);
 }
@@ -386,12 +390,14 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
         dn = rt->scratch.n;
     kept_text(c, path, &rt->scratch);
     pt_buf_puts(&rt->scratch, r->note);
+    if (c->head.oom || c->tail.oom)
+        c->output_oom = true;
     if (rt->scratch.n == dn)
         pt_buf_putz(&rt->scratch, "(no output)");
     memset(&res, 0, sizeof res);
-    res.content = rt->scratch.oom ? PT_S("out of memory keeping the output")
-                                  : (pt_str){rt->scratch.p + dn, rt->scratch.n - dn};
-    res.is_error = r->is_error || rt->scratch.oom;
+    res.content = rt->scratch.oom || c->output_oom ? PT_S("out of memory keeping the output")
+                                                   : (pt_str){rt->scratch.p + dn, rt->scratch.n - dn};
+    res.is_error = r->is_error || rt->scratch.oom || c->output_oom;
     res.details = stored && !rt->scratch.oom ? (pt_str){rt->scratch.p, dn} : r->details;
     res.doc_key = r->doc_key;
     res.doc_value = r->doc_value;
@@ -402,21 +408,23 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
     rt->calls[rt->ncalls] = done;
     if (!rt->closing)
         pt_fx_tool(rt->a, fx, &res);
+    else if (rt->free_waiting && !rt->ncalls)
+        pt_rt_free(rt); /* finish deferred destruction after the last late completion */
 }
 
 void pt_rt_tools_stop(pt_rt *rt)
 {
-    /* A tool's cancel ends its call at once while closing. */
-    while (rt->ncalls) {
+    uint32_t i = 0;
+    while (i < rt->ncalls) {
         uint32_t before = rt->ncalls;
-        pt_rt_cancel_tool(rt, rt->calls[0].fx);
-        if (rt->ncalls == before) { /* a tool that cannot stop: drop the call */
-            rt_call done;
-            blob_abort(rt, &rt->calls[0]);
-            done = rt->calls[0];
-            rt->calls[0] = rt->calls[--rt->ncalls];
-            rt->calls[rt->ncalls] = done;
+        rt_call *c = &rt->calls[i];
+        if (!c->cancel_requested) {
+            c->cancel_requested = true;
+            pt_rt_cancel_tool(rt, c->fx);
         }
+        /* A synchronous completion swaps a different call into this slot. */
+        if (rt->ncalls == before)
+            i++;
     }
 }
 

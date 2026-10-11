@@ -24,7 +24,8 @@ typedef struct pt_rt_cfg {
 
 pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a);
 /* Cancels outstanding requests and closes the store. The HTTP driver
- * stays the caller's to free (after this). */
+ * stays the caller's to free (after this). If an async tool does not finish
+ * synchronously on cancel, destruction is deferred until its done callback. */
 void pt_rt_free(pt_rt *rt);
 pt_http_driver *pt_rt_http(const pt_rt *rt);
 /* Borrow an idle worker to perform durable writes/live snapshots. I/O
@@ -46,7 +47,9 @@ typedef struct pt_rt_tool {
     pt_tool_def def;
     void (*run)(void *ud, pt_rt *rt, const pt_fx *call);
     /* Stop a running call (abort, exit). It must still end with
-     * pt_rt_tool_done, now or later. NULL: calls finish inside run. */
+     * pt_rt_tool_done, now or later. During pt_rt_free, outstanding calls
+     * keep the runtime state alive until their completion arrives. NULL:
+     * calls finish inside run. */
     void (*cancel)(void *ud, pt_rt *rt, uint32_t fx);
     void *ud;
 } pt_rt_tool;

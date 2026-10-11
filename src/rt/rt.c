@@ -59,8 +59,15 @@ bool pt_rt_grow(void **arr, uint32_t *cap, uint32_t need, size_t elem)
     void *p;
     if (need <= *cap)
         return true;
-    while (ncap < need)
+    while (ncap < need) {
+        if (ncap > UINT32_MAX / 2) {
+            ncap = need;
+            break;
+        }
         ncap *= 2;
+    }
+    if (elem && (size_t)ncap > SIZE_MAX / elem)
+        return false;
     if (!(p = realloc(*arr, (size_t)ncap * elem)))
         return false;
     *arr = p;
@@ -98,6 +105,9 @@ bool pt_rt_watch(pt_rt *rt, int fd, pt_rt_fn fn, void *ud)
         return false;
     w = &rt->watches[rt->nwatches++];
     w->fd = fd;
+    w->generation = ++rt->watch_generation;
+    if (!w->generation)
+        w->generation = ++rt->watch_generation;
     w->fn = fn;
     w->ud = ud;
     return true;
@@ -143,10 +153,20 @@ void pt_rt_free(pt_rt *rt)
 {
     if (!rt)
         return;
-    finish_io(rt, true);
-    while (rt->nreqs)
-        drop_req(rt, 0);
-    rt->closing = true;
+    if (!rt->closing) {
+        finish_io(rt, true);
+        while (rt->nreqs)
+            drop_req(rt, 0);
+        rt->closing = true;
+    }
+    pt_rt_tools_stop(rt);
+    if (rt->ncalls) {
+        /* Async tool completions still borrow rt. Keep its state alive until
+         * the final pt_rt_tool_done arrives; callbacks are no longer pumped. */
+        rt->free_waiting = true;
+        return;
+    }
+    rt->free_waiting = false;
     pt_rt_tools_free(rt);
     pt_rt_prompt_free(rt);
     free(rt->reqs);
@@ -186,7 +206,7 @@ bool pt_rt_recover(pt_rt *rt, char *err, size_t cap)
     pt_store *st = rt->c.store;
     char *chunk = (char *)malloc(READ_CHUNK);
     pt_buf line; /* a line that spans chunks */
-    uint64_t size, off = 0, start = 0; /* start: where the current line begins */
+    uint64_t size = 0, off = 0, start = 0; /* start: where the current line begins */
     unsigned long lineno = 1;
     bool ok = true, torn = false;
     pt_buf_init(&line, pt_sys_allocator());
@@ -197,6 +217,8 @@ bool pt_rt_recover(pt_rt *rt, char *err, size_t cap)
     if (st->size(st, &size) != 0) {
         snprintf(err, cap, "%s", st->err);
         ok = false;
+    } else {
+        rt->log_end = size;
     }
     while (ok && !torn && off < size) {
         size_t got, i, from = 0;
@@ -241,7 +263,6 @@ bool pt_rt_recover(pt_rt *rt, char *err, size_t cap)
     }
     free(chunk);
     pt_buf_free(&line);
-    rt->log_end = size;
     if (ok && start < size) { /* a torn last line: the commit never happened */
         if (st->truncate(st, start) != 0) {
             snprintf(err, cap, "%s", st->err);
@@ -550,7 +571,8 @@ static void http_failed(pt_rt *rt)
 
 /* Watches whose fd is ready: called after the wait, by fd, since a
  * callback may change the list. */
-static void fire_watches(pt_rt *rt, const pt_waitfd *all, unsigned from, unsigned to)
+static void fire_watches(pt_rt *rt, const pt_waitfd *all, const uint64_t *generations, unsigned from,
+                         unsigned to)
 {
     unsigned i;
     uint32_t j;
@@ -558,7 +580,7 @@ static void fire_watches(pt_rt *rt, const pt_waitfd *all, unsigned from, unsigne
         if (!all[i].ready)
             continue;
         for (j = 0; j < rt->nwatches; j++)
-            if (rt->watches[j].fd == all[i].fd) {
+            if (rt->watches[j].fd == all[i].fd && rt->watches[j].generation == generations[i]) {
                 rt->watches[j].fn(rt->watches[j].ud, rt);
                 break;
             }
@@ -571,6 +593,7 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     int64_t now = rt->c.now(rt->c.clock_ud), until, wait = timeout_ms;
     pt_waitfd all[MAX_FDS];
+    uint64_t watch_generations[MAX_FDS] = {0};
     unsigned i, total = nfds, first_watch;
     uint32_t j;
     if (total > MAX_FDS / 2)
@@ -586,6 +609,7 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
     first_watch = total;
     for (j = 0; j < rt->nwatches && total < MAX_FDS; j++) {
         all[total].fd = rt->watches[j].fd;
+        watch_generations[total] = rt->watches[j].generation;
         all[total++].ready = false;
     }
     if (wake(rt, now) + fire_timers(rt, now))
@@ -606,7 +630,7 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
         for (i = 0; i < nfds && i < MAX_FDS / 2; i++)
             fds[i].ready = all[i].ready;
         sweep(rt);
-        fire_watches(rt, all, first_watch, total);
+        fire_watches(rt, all, watch_generations, first_watch, total);
     } else if ((rt->nsleeps || rt->ntimers) && wait > 0) {
         rt->c.sleep(rt->c.clock_ud, (uint32_t)wait);
     }

@@ -4,6 +4,7 @@
 
 #include <curl/curl.h>
 #include <dirent.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -434,12 +435,19 @@ static bool retry_ca_file(curl_drv *d, xfer *x, CURLcode result)
 static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     curl_drv *d = (curl_drv *)vd;
-    struct curl_waitfd w[32];
-    int running = 0, left;
+    struct curl_waitfd stack[32], *w = stack;
+    int running = 0, left, pump_result = -1;
     unsigned i;
     CURLMsg *msg;
-    if (nfds > 32)
-        nfds = 32;
+    if (nfds > sizeof stack / sizeof stack[0]) {
+#if SIZE_MAX <= UINT_MAX
+        if ((size_t)nfds > SIZE_MAX / sizeof *w)
+            return -1;
+#endif
+        w = (struct curl_waitfd *)malloc((size_t)nfds * sizeof *w);
+        if (!w)
+            return -1;
+    }
     if (timeout_ms < 0) /* no limit: curl_multi_poll takes no -1 */
         timeout_ms = 3600 * 1000;
     for (i = 0; i < nfds; i++) {
@@ -449,15 +457,15 @@ static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfd
         fds[i].ready = false;
     }
     if (curl_multi_perform(d->m, &running) != CURLM_OK)
-        return -1;
+        goto done;
     /* With no transfers, curl_multi_poll (7.66+) still waits on the extra
      * fds and the timeout. */
     if ((running || nfds) && curl_multi_poll(d->m, nfds ? w : NULL, nfds, timeout_ms, NULL) != CURLM_OK)
-        return -1;
+        goto done;
     for (i = 0; i < nfds; i++)
         fds[i].ready = (w[i].revents & CURL_WAIT_POLLIN) != 0;
     if (curl_multi_perform(d->m, &running) != CURLM_OK)
-        return -1;
+        goto done;
     while ((msg = curl_multi_info_read(d->m, &left))) {
         xfer *x = NULL;
         CURLcode result;
@@ -481,7 +489,11 @@ static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfd
         }
         unlink_xfer(d, x);
     }
-    return running;
+    pump_result = running;
+done:
+    if (w != stack)
+        free(w);
+    return pump_result;
 }
 
 static void drv_free(pt_http_driver *vd)

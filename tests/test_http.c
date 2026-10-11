@@ -90,6 +90,55 @@ static void done(void *ud, const char *err)
     o->request_body = NULL;
 }
 
+static void test_many_waitfds(void)
+{
+    int idle[2], ready[2];
+    pt_waitfd sys_fds[65], curl_fds[33];
+    pt_http_driver *d;
+    unsigned i;
+    if (pipe(idle) != 0) {
+        CHECK(false);
+        return;
+    }
+    if (pipe(ready) != 0) {
+        CHECK(false);
+        close(idle[0]); close(idle[1]);
+        return;
+    }
+    for (i = 0; i < 64; i++)
+        sys_fds[i] = (pt_waitfd){idle[0], false};
+    sys_fds[64] = (pt_waitfd){ready[0], false};
+    for (i = 0; i < 32; i++)
+        curl_fds[i] = (pt_waitfd){idle[0], false};
+    curl_fds[32] = (pt_waitfd){ready[0], false};
+    CHECK(write(ready[1], "r", 1) == 1);
+    CHECK(pt_sys_wait(sys_fds, 65, 0) == 1);
+    for (i = 0; i < 64; i++)
+        CHECK(!sys_fds[i].ready);
+    CHECK(sys_fds[64].ready);
+    {
+        pt_waitfd invalid;
+        int bad = dup(idle[0]);
+        CHECK(bad >= 0);
+        if (bad >= 0) {
+            close(bad);
+            invalid = (pt_waitfd){bad, false};
+            CHECK(pt_sys_wait(&invalid, 1, 0) == 1 && invalid.ready);
+        }
+    }
+    d = pt_http_curl_new();
+    CHECK(d != NULL);
+    if (d) {
+        CHECK(d->pump(d, 0, curl_fds, 33) == 0);
+        for (i = 0; i < 32; i++)
+            CHECK(!curl_fds[i].ready);
+        CHECK(curl_fds[32].ready);
+        d->free(d);
+    }
+    close(idle[0]); close(idle[1]);
+    close(ready[0]); close(ready[1]);
+}
+
 static void test_http(void)
 {
     server s;
@@ -170,6 +219,7 @@ static void test_http(void)
 
 int main(void)
 {
+    RUN(test_many_waitfds);
     RUN(test_http);
     return t_done("test_http");
 }

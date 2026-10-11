@@ -11,6 +11,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,12 +52,227 @@ static int sync_fd(int fd)
 
 static int sync_dir(const char *dir)
 {
-    int fd = open(dir, O_RDONLY), r;
+    struct stat st;
+    int fd = open(dir, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK), r, error;
     if (fd < 0)
         return -1;
+    if (fstat(fd, &st) != 0) {
+        error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        close(fd);
+        errno = ENOTDIR;
+        return -1;
+    }
     r = fsync(fd);
-    close(fd);
+    error = errno;
+    if (close(fd) != 0 && r == 0) {
+        r = -1;
+        error = errno;
+    }
+    if (r != 0)
+        errno = error;
     return r;
+}
+
+/* Sync the containing directory after creating dir. Trim trailing slashes
+ * first, so "session/" syncs ".", not the new session itself. */
+static int sync_parent_dir(const char *dir)
+{
+    char parent[4096];
+    size_t n = strlen(dir);
+    char *slash;
+    if (n >= sizeof parent) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(parent, dir, n + 1);
+    while (n > 1 && parent[n - 1] == '/')
+        parent[--n] = 0;
+    slash = strrchr(parent, '/');
+    if (!slash)
+        return sync_dir(".");
+    if (slash == parent)
+        slash[1] = 0;
+    else
+        *slash = 0;
+    return sync_dir(parent);
+}
+
+/* 1: created, 0: already an actual directory, -1: error. */
+static int ensure_directory(const char *dir)
+{
+    struct stat st;
+    if (mkdir(dir, 0700) == 0)
+        return 1;
+    if (errno != EEXIST)
+        return -1;
+    if (lstat(dir, &st) != 0)
+        return -1;
+    if (!S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+    return 0;
+}
+
+static int require_regular_file(int fd)
+{
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+        return -1;
+    if (!S_ISREG(st.st_mode)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+static bool valid_blob_name(const char *hex)
+{
+    size_t i;
+    if (!hex || strlen(hex) != 64)
+        return false;
+    for (i = 0; i < 64; i++)
+        if (!((hex[i] >= '0' && hex[i] <= '9') || (hex[i] >= 'a' && hex[i] <= 'f')))
+            return false;
+    return hex[64] == 0;
+}
+
+static bool checked_offset(uint64_t off, off_t *out)
+{
+    off_t pos = (off_t)off;
+    if (pos < 0 || (uint64_t)pos != off) {
+        errno = EOVERFLOW;
+        return false;
+    }
+    *out = pos;
+    return true;
+}
+
+/* POSIX leaves counts greater than SSIZE_MAX implementation-defined. */
+static int write_all(int fd, const void *p, size_t n)
+{
+    const char *c = (const char *)p;
+    while (n) {
+        size_t count = n > (size_t)SSIZE_MAX ? (size_t)SSIZE_MAX : n;
+        ssize_t w = write(fd, c, count);
+        if (w < 0 && errno == EINTR)
+            continue;
+        if (w < 0)
+            return -1;
+        if (w == 0) {
+            errno = EIO;
+            return -1;
+        }
+        c += (size_t)w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+/* Read only regular live snapshots, refusing symlinks at the final component. */
+static char *read_live_file_at(int dirfd, const char *name, size_t *out_n)
+{
+    int fd = openat(dirfd, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    struct stat st;
+    char *p;
+    size_t len = 0, cap;
+    int error;
+    if (fd < 0)
+        return NULL;
+    if (fstat(fd, &st) != 0)
+        goto fail;
+    if (!S_ISREG(st.st_mode) || st.st_size < 0 || (uintmax_t)st.st_size >= (uintmax_t)SIZE_MAX) {
+        errno = EINVAL;
+        goto fail;
+    }
+    cap = (size_t)st.st_size;
+    if (cap < 4096)
+        cap = 4096;
+    p = (char *)malloc(cap + 1);
+    if (!p) {
+        errno = ENOMEM;
+        goto fail;
+    }
+    for (;;) {
+        ssize_t got;
+        if (len == cap) {
+            char c;
+            char *np;
+            size_t next;
+            do got = read(fd, &c, 1); while (got < 0 && errno == EINTR);
+            if (got < 0)
+                goto fail_buf;
+            if (!got)
+                break;
+            if (cap > (SIZE_MAX - 1) / 2) {
+                errno = EOVERFLOW;
+                goto fail_buf;
+            }
+            next = cap * 2;
+            np = (char *)realloc(p, next + 1);
+            if (!np) {
+                errno = ENOMEM;
+                goto fail_buf;
+            }
+            p = np;
+            cap = next;
+            p[len++] = c;
+        }
+        {
+            size_t count = cap - len;
+            if (count > 65536)
+                count = 65536;
+            if (count > (size_t)SSIZE_MAX)
+                count = (size_t)SSIZE_MAX;
+            do got = read(fd, p + len, count); while (got < 0 && errno == EINTR);
+        }
+        if (got < 0)
+            goto fail_buf;
+        len += (size_t)got;
+        if (!got)
+            break;
+    }
+    close(fd);
+    p[len] = 0;
+    *out_n = len;
+    return p;
+fail_buf:
+    error = errno;
+    free(p);
+    errno = error;
+fail:
+    error = errno;
+    close(fd);
+    errno = error;
+    return NULL;
+}
+
+static bool live_name(const char *name, uint32_t *task, bool *temporary)
+{
+    const unsigned char *p = (const unsigned char *)name;
+    uint32_t value = 0;
+    if (*p++ != 't' || *p < '0' || *p > '9')
+        return false;
+    do {
+        uint32_t digit = (uint32_t)(*p - '0');
+        if (value > (UINT32_MAX - digit) / 10u)
+            return false;
+        value = value * 10u + digit;
+        p++;
+    } while (*p >= '0' && *p <= '9');
+    if (strcmp((const char *)p, ".json.tmp") == 0)
+        *temporary = true;
+    else if (strcmp((const char *)p, ".json") == 0)
+        *temporary = false;
+    else
+        return false;
+    *task = value;
+    return true;
 }
 
 static int p_size(pt_store *vs, uint64_t *out)
@@ -65,6 +281,10 @@ static int p_size(pt_store *vs, uint64_t *out)
     struct stat st;
     if (fstat(s->log_fd, &st) != 0)
         return fail(vs, "cannot stat", "log.jsonl");
+    if (st.st_size < 0) {
+        errno = EOVERFLOW;
+        return fail(vs, "cannot stat", "log.jsonl");
+    }
     *out = (uint64_t)st.st_size;
     return 0;
 }
@@ -73,6 +293,10 @@ static int p_append(pt_store *vs, const void *p, size_t n, bool sync)
 {
     posix_store *s = (posix_store *)vs;
     ssize_t w;
+    if (n > (size_t)SSIZE_MAX) {
+        errno = EOVERFLOW;
+        return fail(vs, "cannot append to", "log.jsonl");
+    }
     do
         w = write(s->log_fd, p, n);
     while (w < 0 && errno == EINTR);
@@ -90,9 +314,13 @@ static int p_append(pt_store *vs, const void *p, size_t n, bool sync)
 
 static int read_at(int fd, uint64_t off, void *p, size_t cap, size_t *got)
 {
+    off_t pos;
+    size_t count = cap > (size_t)SSIZE_MAX ? (size_t)SSIZE_MAX : cap;
     ssize_t r;
+    if (!checked_offset(off, &pos))
+        return -1;
     do
-        r = pread(fd, p, cap, (off_t)off);
+        r = pread(fd, p, count, pos);
     while (r < 0 && errno == EINTR);
     *got = r > 0 ? (size_t)r : 0;
     return r < 0 ? -1 : 0;
@@ -114,8 +342,32 @@ typedef struct blob_tmp {
 /* false when it does not fit */
 static bool blob_path(const posix_store *s, char *out, size_t cap, const char *hex)
 {
-    int n = snprintf(out, cap, "%s/blobs/%.2s/%s", s->dir, hex, hex + 2);
-    return n > 0 && (size_t)n < cap;
+    int n;
+    if (!valid_blob_name(hex)) {
+        errno = EINVAL;
+        return false;
+    }
+    n = snprintf(out, cap, "%s/blobs/%.2s/%s", s->dir, hex, hex + 2);
+    if (n < 0 || (size_t)n >= cap) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return true;
+}
+
+static bool shard_dir_path(char *out, size_t cap, const char *root, const char *hex)
+{
+    size_t n = strlen(root);
+    if (cap < 4 || n > cap - 4) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    memcpy(out, root, n);
+    out[n++] = '/';
+    out[n++] = hex[0];
+    out[n++] = hex[1];
+    out[n] = 0;
+    return true;
 }
 
 static void *p_blob_begin(pt_store *vs)
@@ -129,13 +381,24 @@ static void *p_blob_begin(pt_store *vs)
         return NULL;
     }
     path(s, dir, sizeof dir, "blobs");
-    mkdir(dir, 0700);
+    {
+        int made = ensure_directory(dir);
+        if (made < 0 || (made && sync_dir(s->dir) != 0)) {
+            fail(vs, "cannot create", dir);
+            free(t);
+            return NULL;
+        }
+    }
     path(s, dir, sizeof dir, "blobs/tmp");
-    mkdir(dir, 0700);
+    if (ensure_directory(dir) < 0) {
+        fail(vs, "cannot create", dir);
+        free(t);
+        return NULL;
+    }
     pt_sys_random(NULL, r, sizeof r);
     snprintf(t->path, sizeof t->path, "%s/%02x%02x%02x%02x%02x%02x%02x%02x", dir, r[0], r[1], r[2], r[3], r[4],
              r[5], r[6], r[7]);
-    t->fd = open(t->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    t->fd = open(t->path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (t->fd < 0) {
         fail(vs, "cannot create", t->path);
         free(t);
@@ -147,17 +410,7 @@ static void *p_blob_begin(pt_store *vs)
 static int p_blob_write(pt_store *vs, void *h, const void *p, size_t n)
 {
     blob_tmp *t = (blob_tmp *)h;
-    const char *c = (const char *)p;
-    while (n) {
-        ssize_t w = write(t->fd, c, n);
-        if (w < 0 && errno == EINTR)
-            continue;
-        if (w <= 0)
-            return fail(vs, "cannot write", t->path);
-        c += w;
-        n -= (size_t)w;
-    }
-    return 0;
+    return write_all(t->fd, p, n) == 0 ? 0 : fail(vs, "cannot write", t->path);
 }
 
 static void p_blob_abort(pt_store *vs, void *h)
@@ -171,30 +424,67 @@ static void p_blob_abort(pt_store *vs, void *h)
     free(t);
 }
 
+static int discard_blob(pt_store *vs, blob_tmp *t, const char *what, const char *path)
+{
+    int error = errno;
+    if (t->fd >= 0)
+        close(t->fd);
+    unlink(t->path);
+    free(t);
+    errno = error;
+    return fail(vs, what, path);
+}
+
 static int p_blob_commit(pt_store *vs, void *h, const char *hex)
 {
     posix_store *s = (posix_store *)vs;
     blob_tmp *t = (blob_tmp *)h;
-    char dst[4200], dir[4200];
+    char dst[4200], root[4200], dir[4200];
     struct stat st;
-    blob_path(s, dst, sizeof dst, hex);
-    snprintf(dir, sizeof dir, "%s/blobs/%.2s", s->dir, hex);
-    if (stat(dst, &st) == 0) { /* already there: the same bytes */
-        p_blob_abort(vs, h);
-        return 0;
+    int root_made, dir_made, sync_result, sync_error, close_result, close_error;
+    if (!blob_path(s, dst, sizeof dst, hex))
+        return discard_blob(vs, t, errno == EINVAL ? "bad blob name" : "blob path too long", "blob");
+    path(s, root, sizeof root, "blobs");
+    root_made = ensure_directory(root);
+    if (root_made < 0)
+        return discard_blob(vs, t, "cannot create", root);
+    if (root_made && sync_dir(s->dir) != 0)
+        return discard_blob(vs, t, "cannot sync", s->dir);
+    if (!shard_dir_path(dir, sizeof dir, root, hex))
+        return discard_blob(vs, t, "blob path too long", root);
+    dir_made = ensure_directory(dir);
+    if (dir_made < 0)
+        return discard_blob(vs, t, "cannot create", dir);
+    if (lstat(dst, &st) == 0) {
+        if (S_ISREG(st.st_mode)) {
+            /* Trust an existing regular hash-named file rather than rehashing
+             * potentially large blobs on every commit. */
+            p_blob_abort(vs, t);
+            return 0;
+        }
+        if (unlink(dst) != 0)
+            return discard_blob(vs, t, "cannot remove invalid blob", dst);
+    } else if (errno != ENOENT) {
+        return discard_blob(vs, t, "cannot inspect", dst);
     }
-    if (sync_fd(t->fd) != 0 || close(t->fd) != 0) {
-        t->fd = -1;
-        fail(vs, "cannot sync", t->path);
-        unlink(t->path);
-        free(t);
-        return -1;
+
+    sync_result = sync_fd(t->fd);
+    sync_error = errno;
+    close_result = close(t->fd); /* always close, even when syncing failed */
+    close_error = errno;
+    t->fd = -1;
+    if (sync_result != 0 || close_result != 0) {
+        errno = sync_result != 0 ? sync_error : close_error;
+        return discard_blob(vs, t, "cannot sync", t->path);
     }
-    if ((mkdir(dir, 0700) != 0 && errno != EEXIST) || rename(t->path, dst) != 0 || sync_dir(dir) != 0) {
-        fail(vs, "cannot store", dst);
-        unlink(t->path);
+
+    if (rename(t->path, dst) != 0)
+        return discard_blob(vs, t, "cannot store", dst);
+    if (sync_dir(dir) != 0 || (dir_made && sync_dir(root) != 0)) {
+        int error = errno;
         free(t);
-        return -1;
+        errno = error;
+        return fail(vs, "cannot sync", dir);
     }
     free(t);
     return 0;
@@ -203,11 +493,34 @@ static int p_blob_commit(pt_store *vs, void *h, const char *hex)
 static int p_blob_read(pt_store *vs, const char *hex, uint64_t off, void *p, size_t cap, size_t *got)
 {
     posix_store *s = (posix_store *)vs;
-    char src[4200];
+    char src[4200], root[4200], dir[4200];
+    struct stat st;
     int fd, r;
-    blob_path(s, src, sizeof src, hex);
-    if ((fd = open(src, O_RDONLY | O_CLOEXEC)) < 0)
+    if (!blob_path(s, src, sizeof src, hex))
+        return fail(vs, errno == EINVAL ? "bad blob name" : "blob path too long", "blob");
+    path(s, root, sizeof root, "blobs");
+    if (!shard_dir_path(dir, sizeof dir, root, hex))
+        return fail(vs, "blob path too long", "blob");
+    if (lstat(root, &st) != 0)
+        return fail(vs, "cannot open", root);
+    if (!S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return fail(vs, "cannot open", root);
+    }
+    if (lstat(dir, &st) != 0)
+        return fail(vs, "cannot open", dir);
+    if (!S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return fail(vs, "cannot open", dir);
+    }
+    if ((fd = open(src, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) < 0)
         return fail(vs, "cannot open", src);
+    if (require_regular_file(fd) != 0) {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return fail(vs, "cannot read", src);
+    }
     r = read_at(fd, off, p, cap, got);
     close(fd);
     return r == 0 ? 0 : fail(vs, "cannot read", src);
@@ -217,14 +530,15 @@ static int p_blob_path(pt_store *vs, const char *hex, char *out, size_t cap)
 {
     if (blob_path((posix_store *)vs, out, cap, hex))
         return 0;
-    snprintf(vs->err, sizeof vs->err, "blob path too long");
+    snprintf(vs->err, sizeof vs->err, "%s", errno == EINVAL ? "bad blob name" : "blob path too long");
     return -1;
 }
 
 static int p_truncate(pt_store *vs, uint64_t off)
 {
     posix_store *s = (posix_store *)vs;
-    if (ftruncate(s->log_fd, (off_t)off) != 0 || fsync(s->log_fd) != 0)
+    off_t pos;
+    if (!checked_offset(off, &pos) || ftruncate(s->log_fd, pos) != 0 || fsync(s->log_fd) != 0)
         return fail(vs, "cannot truncate", "log.jsonl");
     return 0;
 }
@@ -236,11 +550,23 @@ static int p_live_put(pt_store *vs, uint32_t task, const void *p, size_t n)
     live_path(s, tmp, sizeof tmp, task, ".tmp");
     live_path(s, dst, sizeof dst, task, "");
     {
-        int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-        bool ok = fd >= 0 && write(fd, p, n) == (ssize_t)n;
-        if (fd >= 0 && close(fd) != 0)
-            ok = false;
-        if (!ok)
+        int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+        int saved_errno;
+        if (fd < 0)
+            return fail(vs, "cannot write", tmp);
+        if (require_regular_file(fd) != 0) {
+            saved_errno = errno;
+            close(fd);
+            errno = saved_errno;
+            return fail(vs, "cannot write", tmp);
+        }
+        if (write_all(fd, p, n) != 0) {
+            saved_errno = errno;
+            close(fd);
+            errno = saved_errno;
+            return fail(vs, "cannot write", tmp);
+        }
+        if (close(fd) != 0)
             return fail(vs, "cannot write", tmp);
     }
     if (rename(tmp, dst) != 0)
@@ -261,30 +587,51 @@ static int p_live_del(pt_store *vs, uint32_t task)
 static int p_live_list(pt_store *vs, void (*fn)(void *ud, uint32_t task, pt_str bytes), void *ud)
 {
     posix_store *s = (posix_store *)vs;
-    char dir[4200], p[4600];
+    char dir[4200];
     DIR *d;
     struct dirent *e;
+    int fd;
     path(s, dir, sizeof dir, "live");
-    d = opendir(dir);
-    if (!d)
+    fd = open(dir, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (fd < 0)
         return errno == ENOENT ? 0 : fail(vs, "cannot list", dir);
+    {
+        struct stat st;
+        if (fstat(fd, &st) != 0) {
+            int error = errno;
+            close(fd);
+            errno = error;
+            return fail(vs, "cannot list", dir);
+        }
+        if (!S_ISDIR(st.st_mode)) {
+            close(fd);
+            errno = ENOTDIR;
+            return fail(vs, "cannot list", dir);
+        }
+    }
+    d = fdopendir(fd);
+    if (!d) {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return fail(vs, "cannot list", dir);
+    }
     while ((e = readdir(d))) {
-        unsigned long task;
-        char rest[16];
+        uint32_t task;
+        bool temporary;
         size_t n;
         char *data;
-        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
-        if (sscanf(e->d_name, "t%lu%15s", &task, rest) != 2)
+        if (!live_name(e->d_name, &task, &temporary))
             continue;
-        if (strcmp(rest, ".json.tmp") == 0) { /* a write that never finished */
-            unlink(p);
+        if (temporary) { /* a write that never finished */
+            unlinkat(dirfd(d), e->d_name, 0);
             continue;
         }
-        if (strcmp(rest, ".json") != 0 || task == 0 || task > UINT32_MAX)
+        if (task == 0)
             continue;
-        data = pt_sys_read_file(p, &n);
+        data = read_live_file_at(dirfd(d), e->d_name, &n);
         if (data) {
-            fn(ud, (uint32_t)task, (pt_str){data, n});
+            fn(ud, task, (pt_str){data, n});
             free(data);
         }
     }
@@ -306,24 +653,49 @@ pt_store *pt_store_posix_open(const char *dir, bool create, char *err, size_t ca
 {
     posix_store *s = (posix_store *)calloc(1, sizeof *s);
     char p[4200];
+    size_t dir_len;
+    bool dir_created = false;
+    struct stat st;
     if (!s) {
         snprintf(err, cap, "out of memory");
         return NULL;
     }
     s->log_fd = s->lock_fd = -1;
-    snprintf(s->dir, sizeof s->dir, "%s", dir);
-    if (create && mkdir(dir, 0700) != 0) {
-        snprintf(err, cap, "cannot create %s: %s", dir, strerror(errno));
+    if (!dir || (dir_len = strlen(dir)) >= sizeof s->dir) {
+        snprintf(err, cap, "session path too long");
+        goto fail;
+    }
+    memcpy(s->dir, dir, dir_len + 1);
+    while (dir_len > 1 && s->dir[dir_len - 1] == '/')
+        s->dir[--dir_len] = 0;
+    if (create) {
+        if (mkdir(s->dir, 0700) != 0) {
+            snprintf(err, cap, "cannot create %s: %s", s->dir, strerror(errno));
+            goto fail;
+        }
+        dir_created = true;
+    }
+    if (lstat(s->dir, &st) != 0) {
+        snprintf(err, cap, "cannot open session %s: %s", s->dir, strerror(errno));
+        goto fail;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        snprintf(err, cap, "cannot open session %s: %s", s->dir, strerror(errno));
         goto fail;
     }
     path(s, p, sizeof p, "live");
-    if (mkdir(p, 0700) != 0 && errno != EEXIST) {
-        snprintf(err, cap, "cannot open session %s: %s", dir, strerror(errno));
+    if (ensure_directory(p) < 0) {
+        snprintf(err, cap, "cannot open session %s: %s", s->dir, strerror(errno));
         goto fail;
     }
     path(s, p, sizeof p, "LOCK");
-    s->lock_fd = open(p, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    s->lock_fd = open(p, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     if (s->lock_fd < 0) {
+        snprintf(err, cap, "cannot open %s: %s", p, strerror(errno));
+        goto fail;
+    }
+    if (require_regular_file(s->lock_fd) != 0) {
         snprintf(err, cap, "cannot open %s: %s", p, strerror(errno));
         goto fail;
     }
@@ -345,26 +717,23 @@ pt_store *pt_store_posix_open(const char *dir, bool create, char *err, size_t ca
         bool ok;
         pt_sys_identity(host, sizeof host, boot, sizeof boot, &pid);
         n = snprintf(who, sizeof who, "%s pid %lld\n", host, (long long)pid);
-        ok = ftruncate(s->lock_fd, 0) == 0 && pwrite(s->lock_fd, who, (size_t)n, 0) == n;
+        ok = n >= 0 && (size_t)n < sizeof who && ftruncate(s->lock_fd, 0) == 0 &&
+             pwrite(s->lock_fd, who, (size_t)n, 0) == (ssize_t)n;
         (void)ok; /* only used in messages */
     }
     path(s, p, sizeof p, "log.jsonl");
-    s->log_fd = open(p, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
+    s->log_fd = open(p, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     if (s->log_fd < 0) {
         snprintf(err, cap, "cannot open %s: %s", p, strerror(errno));
         goto fail;
     }
-    if (create) { /* the new directory and its files must survive power loss */
-        char parent[4096];
-        char *slash;
-        snprintf(parent, sizeof parent, "%s", dir);
-        slash = strrchr(parent, '/');
-        if (slash && slash != parent)
-            *slash = 0;
-        if (sync_dir(dir) != 0 || (slash && sync_dir(parent) != 0)) {
-            snprintf(err, cap, "cannot sync %s: %s", dir, strerror(errno));
-            goto fail;
-        }
+    if (require_regular_file(s->log_fd) != 0) {
+        snprintf(err, cap, "cannot open %s: %s", p, strerror(errno));
+        goto fail;
+    }
+    if (dir_created && (sync_dir(s->dir) != 0 || sync_parent_dir(s->dir) != 0)) {
+        snprintf(err, cap, "cannot sync %s: %s", s->dir, strerror(errno));
+        goto fail;
     }
     s->vt.size = p_size;
     s->vt.append = p_append;

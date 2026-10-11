@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,11 +33,22 @@ pt_allocator pt_sys_allocator(void)
 
 int pt_sys_wait(pt_waitfd *fds, unsigned n, int timeout_ms)
 {
-    struct pollfd p[64];
+    struct pollfd stack[64], *p = stack;
     unsigned i;
-    int r;
-    if (n > 64)
-        n = 64;
+    int r, error;
+    if (n > sizeof stack / sizeof stack[0]) {
+#if SIZE_MAX <= UINT_MAX
+        if ((size_t)n > SIZE_MAX / sizeof *p) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+#endif
+        p = (struct pollfd *)malloc((size_t)n * sizeof *p);
+        if (!p) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
     for (i = 0; i < n; i++) {
         p[i].fd = fds[i].fd;
         p[i].events = POLLIN;
@@ -44,10 +56,18 @@ int pt_sys_wait(pt_waitfd *fds, unsigned n, int timeout_ms)
         fds[i].ready = false;
     }
     r = poll(p, n, timeout_ms);
-    if (r < 0)
-        return errno == EINTR ? 0 : -1;
-    for (i = 0; i < n; i++)
-        fds[i].ready = (p[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+    error = errno;
+    if (r >= 0)
+        for (i = 0; i < n; i++)
+            fds[i].ready = (p[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) != 0;
+    if (p != stack)
+        free(p);
+    if (r < 0) {
+        if (error == EINTR)
+            return 0;
+        errno = error;
+        return -1;
+    }
     return r;
 }
 
@@ -73,16 +93,28 @@ const char *pt_sys_env(void *ud, const char *name)
     return getenv(name);
 }
 
-char *pt_sys_read_file(const char *path, size_t *n)
+static char *read_file(const char *path, size_t *n, bool regular_only)
 {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | (regular_only ? O_NONBLOCK : 0));
     struct stat st;
     char *p = NULL;
     size_t len = 0, cap = 0;
     int error;
     if (fd < 0)
         return NULL;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0) {
+    if (regular_only) {
+        if (fstat(fd, &st) != 0)
+            goto fail;
+        if (!S_ISREG(st.st_mode)) {
+            errno = EINVAL;
+            goto fail;
+        }
+        if (st.st_size < 0 || (uint64_t)st.st_size >= SIZE_MAX) {
+            errno = EOVERFLOW;
+            goto fail;
+        }
+        cap = (size_t)st.st_size;
+    } else if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0) {
         if ((uint64_t)st.st_size >= SIZE_MAX) {
             errno = EOVERFLOW;
             goto fail;
@@ -141,6 +173,16 @@ fail:
     return NULL;
 }
 
+char *pt_sys_read_file(const char *path, size_t *n)
+{
+    return read_file(path, n, false);
+}
+
+char *pt_sys_read_regular_file(const char *path, size_t *n)
+{
+    return read_file(path, n, true);
+}
+
 bool pt_sys_write_file(const char *path, const void *p, size_t n)
 {
     FILE *f = fopen(path, "wb");
@@ -175,15 +217,21 @@ void pt_sys_random(void *ud, void *out, size_t n)
 void pt_sys_identity(char *host, size_t hcap, char *boot, size_t bcap, int64_t *pid)
 {
     FILE *f;
-    if (gethostname(host, hcap) != 0 || !host[0])
-        snprintf(host, hcap, "unknown");
-    host[hcap - 1] = 0;
-    boot[0] = 0;
-    f = fopen("/proc/sys/kernel/random/boot_id", "r");
-    if (f) {
-        if (fgets(boot, (int)bcap, f))
-            boot[strcspn(boot, "\n")] = 0;
-        fclose(f);
+    if (host && hcap) {
+        if (gethostname(host, hcap) != 0 || !host[0])
+            snprintf(host, hcap, "unknown");
+        host[hcap - 1] = 0;
     }
-    *pid = (int64_t)getpid();
+    if (boot && bcap) {
+        boot[0] = 0;
+        f = fopen("/proc/sys/kernel/random/boot_id", "r");
+        if (f) {
+            int cap = bcap > (size_t)INT_MAX ? INT_MAX : (int)bcap;
+            if (fgets(boot, cap, f))
+                boot[strcspn(boot, "\n")] = 0;
+            fclose(f);
+        }
+    }
+    if (pid)
+        *pid = (int64_t)getpid();
 }
