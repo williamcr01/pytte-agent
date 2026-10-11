@@ -34,7 +34,7 @@ struct cli_open_job {
 static void job_free(cli_open_job *job);
 
 const char cli_default_system[] =
-    "You are an expert assistant operating inside pytte, a agent harness. You help users with their "
+    "You are an expert assistant operating inside pytte, an agent harness. You help users with their "
     "requests with the tools you have at your disposal.";
 
 void cli_sessions_dir(char *out, size_t cap)
