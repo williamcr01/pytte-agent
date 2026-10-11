@@ -27,17 +27,17 @@ enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
 #define DOUBLE_MS 1000
 
 typedef struct syms {
-    const char *prompt, *bullet, *think, *fail, *sel, *rail, *bar, *rule, *more, *ok, *spin[10];
+    const char *prompt, *bullet, *think, *fail, *sel, *rail, *bar, *rule, *more, *ok, *tee, *elbow, *spin[10];
     int nspin;
 } syms;
 
-static const syms uni = {"❯", "●", "✻", "✗", "▸", "┃", "│", "─", "…", "✓",
+static const syms uni = {"❯", "●", "✻", "✗", "▸", "┃", "│", "─", "…", "✓", "├", "└",
                          {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}, 10};
-static const syms asc = {">", "*", "*", "x", ">", "|", "|", "-", "...", "ok", {"-", "\\", "|", "/"}, 4};
+static const syms asc = {">", "*", "*", "x", ">", "|", "|", "-", "...", "ok", "|", "`", {"-", "\\", "|", "/"}, 4};
 
 #define SPIN_MS 120  /* the activity row's frame: spinner and shimmer */
 #define TOOL_FAIL 3  /* rows of a failed tool's output kept in the scrollback */
-#define TOOL_DIFF 20 /* rows of an edit's diff */
+#define TOOL_DIFF 8  /* rows of an edit's diff */
 #define TOOL_LIVE 5  /* rows of a running tool's output in the band */
 #define TOOL_KEEP 4096 /* bytes of it kept for that */
 
@@ -79,6 +79,19 @@ typedef struct item {
     size_t at, n;      /* label in items_buf */
     size_t dat, dn;    /* description */
 } item;
+
+/* Tool calls in a row form a group (see group_add). */
+#define GROUP_MAX 128 /* rows of a group; a longer run of calls makes more groups */
+#define GROUP_LIVE 8  /* rows of an open group shown in the band */
+enum { CAT_COMMAND, CAT_READ, CAT_WRITE, CAT_EDIT, CAT_OTHER, NCAT };
+enum { G_OK, G_FAILED, G_TIMEOUT, G_DENIED, G_CANCELLED, G_INTERRUPTED, NBAD };
+
+typedef struct grow {
+    uint32_t at, n;   /* the row, styled, in grp */
+    uint32_t dat, dn; /* its details, raw lines: a diff ("- ", "+ ") or a failure's last lines */
+    uint8_t cat, bad;
+    bool diff;
+} grow;
 
 typedef struct queued_input {
     pt_buf text;
@@ -152,8 +165,13 @@ typedef struct app {
     uint32_t tool_task;
     char tool_name[64];
     pt_buf tool_out;
-    pt_buf tool_head; /* the running tool's header row, for the band */
-    pt_buf diff;      /* a finished call's summary or diff, reused */
+    pt_buf tool_head; /* the running tool's row, for the band */
+    pt_buf diff;      /* scratch for the band, reused */
+    /* the open group of finished calls: in the band until something else is shown */
+    pt_buf grp;
+    grow grows[GROUP_MAX];
+    int ngrows;
+    int tool_cat; /* the running call's kind */
     /* a tool call waiting for approval (refreshed from pt_asks) */
     pt_ask_view ask;
     uint32_t ask_task;
@@ -185,6 +203,8 @@ typedef struct app {
     bool keep_on_quit; /* /quit keeps even an empty session for resuming */
     int code;
 } app;
+
+static void group_close(app *a);
 
 static void set_dirty(app *a)
 {
@@ -282,6 +302,7 @@ static void out_rail(app *a, pt_buf *out, const char *rail, int rstyle, int styl
 
 static void out_z(app *a, int style, const char *z)
 {
+    group_close(a);
     out_text(a, &a->lines, style, NULL, 0, pt_strz(z), 0);
 }
 
@@ -323,37 +344,79 @@ static pt_str call_gist(app *a, pt_str args)
     return args;
 }
 
-/* A call's header, "● name gist" on one row (full: with all of its
- * arguments), then `tail` dim on the same row. */
-static void out_call(app *a, pt_buf *out, const pt_block *b, bool full, const char *tail)
+/* A call with all of its arguments, for the full view: "● name {...}". */
+static void out_call(app *a, pt_buf *out, const pt_block *b)
 {
     char head[160];
     snprintf(head, sizeof head, "%s %.*s ", a->sy->bullet, (int)(b->name.n > 60 ? 60 : b->name.n),
              b->name.p);
-    if (full) {
-        out_text(a, out, 0, head, TUI_BOLD, b->args, 2);
-    } else { /* one row */
-        int col = 0;
-        size_t k;
-        pt_buf_reset(&a->tmp2);
-        tui_style(&a->tmp2, TUI_BOLD);
-        pt_buf_putz(&a->tmp2, head);
-        tui_style(&a->tmp2, 0);
-        pt_buf_reset(&a->tmp);
-        tui_clean(&a->tmp, call_gist(a, b->args), &col);
-        for (k = 0; k < a->tmp.n; k++)
-            if (a->tmp.p[k] == '\n')
-                a->tmp.p[k] = ' ';
-        pt_buf_puts(&a->tmp2, pt_buf_str(&a->tmp));
-        if (tail && *tail) {
-            tui_style(&a->tmp2, TUI_DIM);
-            pt_buf_putz(&a->tmp2, tail);
-            tui_style(&a->tmp2, 0);
+    out_text(a, out, 0, head, TUI_BOLD, b->args, 2);
+}
+
+/* How each builtin tool's row reads: asking, running, done, failed. */
+static const struct {
+    const char *name, *ask, *running, *done, *fail;
+    int cat;
+} verbs[] = {
+    {"bash", "Run", "Running", "Ran", "Couldn't run", CAT_COMMAND},
+    {"read", "Read", "Reading", "Read", "Couldn't read", CAT_READ},
+    {"read_output", "Read output of", "Reading output of", "Read output of", "Couldn't read output of", CAT_READ},
+    {"write", "Write", "Writing", "Wrote", "Couldn't write", CAT_WRITE},
+    {"edit", "Edit", "Editing", "Edited", "Couldn't edit", CAT_EDIT},
+};
+#define NVERBS (sizeof verbs / sizeof verbs[0])
+
+static int verb_of(pt_str name)
+{
+    int i;
+    for (i = 0; i < (int)NVERBS; i++)
+        if (pt_str_eqz(name, verbs[i].name))
+            return i;
+    return -1;
+}
+
+/* A call on one row: the verb (another tool: its name), then the gist of
+ * its arguments, dim; in a command, the programs stand out. */
+static void phrase(app *a, pt_buf *out, int vstyle, const char *verb, pt_str name, pt_str args)
+{
+    pt_str g = call_gist(a, args);
+    bool cmd = pt_str_eqz(name, "bash"), at_cmd = true, in_word = false, prog = false;
+    int col = 0, cur = -1;
+    size_t k;
+    tui_style(out, vstyle);
+    if (verb)
+        pt_buf_putz(out, verb);
+    else
+        pt_buf_put(out, name.p, name.n > 60 ? 60 : name.n);
+    pt_buf_reset(&a->tmp);
+    tui_clean(&a->tmp, g, &col);
+    while (a->tmp.n && (a->tmp.p[a->tmp.n - 1] == '\n' || a->tmp.p[a->tmp.n - 1] == ' '))
+        a->tmp.n--;
+    if (a->tmp.n)
+        pt_buf_putc(out, ' ');
+    for (k = 0; k < a->tmp.n; k++) {
+        char c = a->tmp.p[k] == '\n' ? ' ' : a->tmp.p[k];
+        int st;
+        if (cmd && (c == ';' || c == '|' || (c == '&' && (!k || (a->tmp.p[k - 1] != '>' && a->tmp.p[k - 1] != '<'))))) {
+            st = 0; /* a program comes next */
+            at_cmd = true;
+            in_word = false;
+        } else if (c == ' ') {
+            st = cur < 0 ? TUI_DIM : cur;
+            in_word = false;
+        } else {
+            if (!in_word) {
+                in_word = true;
+                prog = cmd && at_cmd && !strchr("<>(", c);
+                at_cmd = false;
+            }
+            st = prog ? 0 : TUI_DIM;
         }
-        k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
-        pt_buf_put(out, a->tmp2.p, k);
-        pt_buf_putc(out, '\n');
+        if (st != cur)
+            tui_style(out, cur = st);
+        pt_buf_putc(out, c);
     }
+    tui_style(out, 0);
 }
 
 /* A duration, short: 5s, 2m 5s, 1h 2m. */
@@ -406,116 +469,332 @@ static pt_str last_lines(pt_str s, uint32_t n)
     return (pt_str){s.p + at, s.n - at};
 }
 
-/* A finished call, compactly (section 16.2): its header, then one summary
- * row ("✓ 31 · 0.1s", "✗ exit 2 · 3.4s · 212 lines"). A failure keeps its
- * last lines, an edit shows its diff, a read is a single row. */
-static void out_result(app *a, pt_buf *out, const pt_entry_view *v)
+/* ---- tool calls: groups (section 16.2) ----
+ * Calls in a row, with nothing shown between them, form a group: a header
+ * that counts them ("● 3 tool calls · 2 commands · 1 edit"), then a row
+ * for each ("├ Ran make test", "└ Edited a.c +3 / -1") with its details
+ * under it: an edit's diff, a failure's last lines. One call is just its
+ * row. The open group is drawn in the band, and goes to the scrollback
+ * whole once something else is shown, since the header must count calls
+ * that have not happened yet. */
+
+static const char *const cat_one[NCAT] = {"command", "read", "write", "edit", "other"};
+static const char *const cat_many[NCAT] = {"commands", "reads", "writes", "edits", "others"};
+static const char *const bad_names[NBAD] = {"", "failed", "timed out", "denied", "cancelled", "interrupted"};
+
+static bool starts(pt_str s, const char *z)
 {
+    size_t n = strlen(z);
+    return s.n >= n && memcmp(s.p, z, n) == 0;
+}
+
+/* The lines of s into grp, each after a prefix, while *left > 0; *left
+ * counts down past 0 for the lines left out. */
+static void put_lines(app *a, pt_str s, const char *prefix, int *left)
+{
+    size_t at = 0;
+    while (s.n && s.p[s.n - 1] == '\n')
+        s.n--;
+    while (s.n && at <= s.n) {
+        size_t e = at;
+        while (e < s.n && s.p[e] != '\n')
+            e++;
+        if (*left > 0) {
+            pt_buf_putz(&a->grp, prefix);
+            pt_buf_put(&a->grp, s.p + at, e - at);
+            pt_buf_putc(&a->grp, '\n');
+        }
+        (*left)--;
+        at = e + 1;
+    }
+}
+
+/* A finished call joins the open group: its row, such as "Ran make test",
+ * "Exited 2 make" or "Denied bash rm -rf build", and its details. */
+static void group_add(app *a, const pt_entry_view *v)
+{
+    static const char *const how[NBAD] = {"", "", "Timed out", "Denied", "Cancelled", "Interrupted"};
     const pt_msg *m = v->msg;
     const pt_block *call = find_call(a, m->call_id);
-    pt_block anon;
-    const pt_json *d;
-    pt_str text = m->text, name = m->name, old = PT_STR_NULL, new_ = PT_STR_NULL;
+    const pt_json *data, *d, *j;
+    pt_str text = m->text, args = call ? call->args : PT_S("");
     int64_t ms = -1, code = 0;
-    bool has_code = false, cut, one;
-    uint32_t lines;
-    char sum[200], tail[64], took[32], rail[16];
-    size_t n = 0;
-    if (!call) { /* its call is in an earlier epoch */
-        memset(&anon, 0, sizeof anon);
-        anon.name = name;
-        anon.args = PT_S("");
-        call = &anon;
-    }
-    /* details: exit code, duration, a blob (the text is cut) */
+    bool has_code, timed = false, stats = false;
+    unsigned add = 0, del = 0;
+    int vi = verb_of(m->name), left = TOOL_DIFF;
+    int nn = (int)(m->name.n > 60 ? 60 : m->name.n);
+    char verb[160], tail[64];
+    const char *vz = NULL;
+    grow *g;
+    if (a->ngrows == GROUP_MAX)
+        group_close(a);
+    g = &a->grows[a->ngrows];
+    memset(g, 0, sizeof *g);
+    g->cat = (uint8_t)(vi < 0 ? CAT_OTHER : verbs[vi].cat);
     pt_arena_reset(&a->ar);
-    d = pt_json_get(pt_json_get(pt_json_parse(v->raw, &a->ar, NULL), "data"), "details");
+    data = pt_json_get(pt_json_parse(v->raw, &a->ar, NULL), "data");
+    d = pt_json_get(data, "details");
     has_code = pt_json_int(pt_json_get(d, "exit"), &code);
     if (!pt_json_int(pt_json_get(d, "ms"), &ms))
         ms = -1;
-    cut = pt_json_get(d, "blob") != NULL;
-    snprintf(rail, sizeof rail, "  %s", a->sy->bar);
-    if (has_code) { /* bash's "[exit code N]" note: the summary says it */
+    if (g->cat == CAT_COMMAND) { /* bash's closing note: the row says it */
         pt_str last = last_lines(text, 1);
-        if (last.n > 11 && memcmp(last.p, "[exit code ", 11) == 0) {
+        timed = starts(last, "[timed out after ");
+        if (timed || starts(last, "[exit code ") || starts(last, "[stopped]")) {
             text.n = (size_t)(last.p - text.p);
             while (text.n && text.p[text.n - 1] == '\n')
                 text.n--;
         }
     }
-    lines = count_lines(text);
-    out_blank(out);
-    if (pt_str_eqz(name, "edit")) {
-        const pt_json *args = pt_json_parse(call->args, &a->ar, NULL);
-        old = pt_json_gets(args, "old", &a->ar);
-        new_ = pt_json_gets(args, "new", &a->ar);
-    }
-    tail[0] = 0;
-    if (!m->is_error && pt_str_eqz(name, "read")) {
-        snprintf(tail, sizeof tail, "  %s %u lines", a->sy->ok, lines);
-        out_call(a, out, call, false, tail);
-        return;
-    }
-    if (!m->is_error && pt_str_eqz(name, "edit")) {
-        snprintf(tail, sizeof tail, "  +%u -%u", count_lines(new_), count_lines(old));
-        out_call(a, out, call, false, tail);
-        pt_buf_reset(&a->diff);
-        for (n = 0; n < 2; n++) { /* the old lines, then the new ones */
-            pt_str s = n ? new_ : old;
-            size_t at = 0;
-            while (s.n && s.p[s.n - 1] == '\n')
-                s.n--;
-            while (s.n && at <= s.n) {
-                size_t e = at;
-                while (e < s.n && s.p[e] != '\n')
-                    e++;
-                pt_buf_putz(&a->diff, n ? "+ " : "- ");
-                pt_buf_put(&a->diff, s.p + at, e - at);
-                pt_buf_putc(&a->diff, '\n');
-                at = e + 1;
-            }
-        }
-        out_rail(a, out, rail, TUI_DIM, TUI_DIM, pt_buf_str(&a->diff), TOOL_DIFF);
-        return;
-    }
-    out_call(a, out, call, false, NULL);
-    /* the summary row */
-    one = lines == 1 && !cut && text.n <= 80 && !(m->is_error && has_code);
-    n = (size_t)snprintf(sum, sizeof sum, "  %s ", m->is_error ? a->sy->fail : a->sy->ok);
-    if (m->is_error && has_code)
-        n += (size_t)snprintf(sum + n, sizeof sum - n, "exit %lld", (long long)code);
-    else if (one || !lines)
-        n += (size_t)snprintf(sum + n, sizeof sum - n, "%s", one ? "" : "no output");
+    if (!m->is_error)
+        g->bad = G_OK;
+    else if (pt_json_get(data, "interrupted"))
+        g->bad = G_INTERRUPTED;
+    else if (starts(text, "The user aborted"))
+        g->bad = G_CANCELLED;
+    else if (starts(text, "Permission denied") || starts(text, "The user denied"))
+        g->bad = G_DENIED;
     else
-        n += (size_t)snprintf(sum + n, sizeof sum - n, "%u%s lines", lines, cut ? "+" : "");
-    if (ms >= 0) {
-        if (ms < 100)
-            snprintf(took, sizeof took, "<0.1s");
-        else if (ms < 1000)
-            snprintf(took, sizeof took, "%.1fs", (double)ms / 1000);
-        else
-            secs_short(took, sizeof took, ms);
-        n += (size_t)snprintf(sum + n, sizeof sum - n, " · %s", took);
-    }
-    if (m->is_error && has_code && lines && n < sizeof sum)
-        snprintf(sum + n, sizeof sum - n, " · %u%s lines", lines, cut ? "+" : "");
-    if (one) { /* the output itself: "✓ 31 · 0.1s" */
-        pt_buf_reset(&a->diff);
-        pt_buf_putz(&a->diff, m->is_error ? a->sy->fail : a->sy->ok);
-        pt_buf_putc(&a->diff, ' ');
-        pt_buf_puts(&a->diff, text);
-        while (a->diff.n && a->diff.p[a->diff.n - 1] == '\n')
-            a->diff.n--;
-        if (ms >= 0) {
-            pt_buf_putz(&a->diff, " · ");
-            pt_buf_putz(&a->diff, took);
+        g->bad = timed ? G_TIMEOUT : G_FAILED;
+    /* the details, and what the row ends with */
+    tail[0] = 0;
+    g->dat = (uint32_t)a->grp.n;
+    if (g->bad == G_OK && g->cat == CAT_EDIT) {
+        pt_str old, new_;
+        j = pt_json_parse(args, &a->ar, NULL);
+        old = pt_json_gets(j, "old", &a->ar);
+        new_ = pt_json_gets(j, "new", &a->ar);
+        add = count_lines(new_);
+        del = count_lines(old);
+        stats = g->diff = true;
+        put_lines(a, old, "- ", &left);
+        put_lines(a, new_, "+ ", &left);
+        if (left < 0) {
+            snprintf(verb, sizeof verb, "%s %d more lines (ctrl+o)\n", a->sy->more, -left);
+            pt_buf_putz(&a->grp, verb);
         }
-        out_text(a, out, m->is_error ? TUI_RED | TUI_DIM : TUI_DIM, "  ", 0, pt_buf_str(&a->diff), 4);
-        return;
+    } else if (g->bad == G_OK && g->cat == CAT_WRITE) {
+        j = pt_json_parse(args, &a->ar, NULL);
+        add = count_lines(pt_json_gets(j, "content", &a->ar));
+        stats = true;
+    } else if (g->bad == G_OK && pt_str_eqz(m->name, "read")) {
+        snprintf(tail, sizeof tail, " · %u lines", count_lines(text));
+    } else if (g->bad == G_FAILED || g->bad == G_TIMEOUT) {
+        left = TOOL_FAIL;
+        put_lines(a, last_lines(text, TOOL_FAIL), "", &left);
     }
-    out_text(a, out, m->is_error ? TUI_RED | TUI_DIM : TUI_DIM, "  ", 0, pt_strz(sum + 2), 4);
-    if (m->is_error && lines)
-        out_rail(a, out, rail, TUI_DIM, TUI_DIM, last_lines(text, TOOL_FAIL), 0);
+    g->dn = (uint32_t)(a->grp.n - g->dat);
+    if (g->cat == CAT_COMMAND && ms >= 1000) {
+        char took[32];
+        secs_short(took, sizeof took, ms);
+        snprintf(tail, sizeof tail, " · %s", took);
+    }
+    /* the row */
+    if (g->bad == G_OK) {
+        vz = vi < 0 ? NULL : verbs[vi].done;
+    } else if (g->bad == G_FAILED && g->cat == CAT_COMMAND && has_code && code) {
+        snprintf(verb, sizeof verb, "Exited %lld", (long long)code);
+        vz = verb;
+    } else if (g->bad == G_FAILED) {
+        if (vi < 0)
+            snprintf(verb, sizeof verb, "%.*s failed", nn, m->name.p);
+        vz = vi < 0 ? verb : verbs[vi].fail;
+    } else {
+        if (g->bad == G_TIMEOUT)
+            snprintf(verb, sizeof verb, "%s", how[g->bad]);
+        else
+            snprintf(verb, sizeof verb, "%s %.*s", how[g->bad], nn, m->name.p);
+        vz = verb;
+    }
+    g->at = (uint32_t)a->grp.n;
+    phrase(a, &a->grp, g->bad ? TUI_RED : 0, vz, m->name, args);
+    if (stats) { /* "+3", "+3 / -1" */
+        snprintf(verb, sizeof verb, " +%u", add);
+        tui_style(&a->grp, TUI_GREEN);
+        pt_buf_putz(&a->grp, verb);
+        if (g->cat == CAT_EDIT) {
+            snprintf(verb, sizeof verb, " -%u", del);
+            tui_style(&a->grp, TUI_DIM);
+            pt_buf_putz(&a->grp, " /");
+            tui_style(&a->grp, TUI_RED);
+            pt_buf_putz(&a->grp, verb);
+        }
+    } else if (tail[0]) {
+        tui_style(&a->grp, TUI_DIM);
+        pt_buf_putz(&a->grp, tail);
+    }
+    tui_style(&a->grp, 0);
+    g->n = (uint32_t)(a->grp.n - g->at);
+    a->ngrows++;
+}
+
+/* One row: a mark ("├", "●"), then styled text, cut to the width. */
+static void group_row(app *a, pt_buf *out, const char *mark, int mstyle, pt_str styled)
+{
+    size_t k;
+    pt_buf_reset(&a->tmp2);
+    tui_style(&a->tmp2, mstyle);
+    pt_buf_putz(&a->tmp2, mark);
+    tui_style(&a->tmp2, 0);
+    pt_buf_putc(&a->tmp2, ' ');
+    pt_buf_puts(&a->tmp2, styled);
+    k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
+    pt_buf_put(out, a->tmp2.p, k);
+    pt_buf_putc(out, '\n');
+}
+
+/* A row's details, each line after `cont` (the tree's line, or spaces). */
+static void group_details(app *a, pt_buf *out, const grow *g, const char *cont)
+{
+    pt_str s = {a->grp.p + g->dat, g->dn};
+    size_t at = 0;
+    while (at < s.n) {
+        size_t e = at, k;
+        int col = 0, style = TUI_DIM;
+        pt_str line;
+        while (e < s.n && s.p[e] != '\n')
+            e++;
+        line = (pt_str){s.p + at, e - at};
+        if (g->diff && starts(line, "- "))
+            style = TUI_RED;
+        else if (g->diff && starts(line, "+ "))
+            style = TUI_GREEN;
+        pt_buf_reset(&a->tmp2);
+        tui_style(&a->tmp2, TUI_DIM);
+        pt_buf_putz(&a->tmp2, cont);
+        tui_style(&a->tmp2, style);
+        pt_buf_reset(&a->tmp);
+        tui_clean(&a->tmp, line, &col);
+        pt_buf_puts(&a->tmp2, pt_buf_str(&a->tmp));
+        tui_style(&a->tmp2, 0);
+        k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
+        pt_buf_put(out, a->tmp2.p, k);
+        pt_buf_putc(out, '\n');
+        at = e + 1;
+    }
+}
+
+/* "● 3 tool calls · 2 commands · 1 edit · 1 failed": the kinds, most
+ * first, then what went wrong. */
+static void group_header(app *a, pt_buf *out, int bstyle, int running_cat)
+{
+    int cats[NCAT] = {0}, bads[NBAD] = {0}, i, total = a->ngrows;
+    bool used[NCAT] = {false};
+    char seg[64];
+    size_t k;
+    for (i = 0; i < a->ngrows; i++) {
+        cats[a->grows[i].cat]++;
+        bads[a->grows[i].bad]++;
+    }
+    if (running_cat >= 0) {
+        cats[running_cat]++;
+        total++;
+    }
+    pt_buf_reset(&a->tmp2);
+    tui_style(&a->tmp2, bstyle);
+    pt_buf_putz(&a->tmp2, a->sy->bullet);
+    tui_style(&a->tmp2, 0);
+    snprintf(seg, sizeof seg, " %d tool calls", total);
+    pt_buf_putz(&a->tmp2, seg);
+    tui_style(&a->tmp2, TUI_DIM);
+    for (;;) {
+        int best = -1, c;
+        for (c = 0; c < NCAT; c++)
+            if (cats[c] && !used[c] && (best < 0 || cats[c] > cats[best]))
+                best = c;
+        if (best < 0)
+            break;
+        used[best] = true;
+        snprintf(seg, sizeof seg, " · %d %s", cats[best], cats[best] == 1 ? cat_one[best] : cat_many[best]);
+        pt_buf_putz(&a->tmp2, seg);
+    }
+    for (i = G_FAILED; i < NBAD; i++)
+        if (bads[i]) {
+            tui_style(&a->tmp2, TUI_DIM);
+            pt_buf_putz(&a->tmp2, " · ");
+            tui_style(&a->tmp2, TUI_RED);
+            snprintf(seg, sizeof seg, "%d %s", bads[i], bad_names[i]);
+            pt_buf_putz(&a->tmp2, seg);
+        }
+    tui_style(&a->tmp2, 0);
+    k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
+    pt_buf_put(out, a->tmp2.p, k);
+    pt_buf_putc(out, '\n');
+}
+
+/* The group: whole for the scrollback; live, for the band, with its
+ * newest rows only, without details, and the running call last. */
+static void group_render(app *a, pt_buf *out, bool live)
+{
+    bool running = live && a->phase == PH_TOOL && a->tool_head.n;
+    int n = a->ngrows + running, i, first = 0;
+    bool single = n == 1, bad = false;
+    char cont[16], more[48];
+    if (!n)
+        return;
+    for (i = 0; i < a->ngrows; i++)
+        bad = bad || a->grows[i].bad != G_OK;
+    if (!single)
+        group_header(a, out, running ? TUI_DIM : bad ? TUI_RED : TUI_GREEN, running ? a->tool_cat : -1);
+    if (live && a->ngrows > GROUP_LIVE) {
+        first = a->ngrows - GROUP_LIVE;
+        snprintf(more, sizeof more, "%s %d more", a->sy->more, first);
+        pt_buf_reset(&a->wrap);
+        tui_style(&a->wrap, TUI_DIM);
+        pt_buf_putz(&a->wrap, more);
+        group_row(a, out, a->sy->tee, TUI_DIM, pt_buf_str(&a->wrap));
+    }
+    for (i = first; i < a->ngrows; i++) {
+        const grow *g = &a->grows[i];
+        bool last = i == a->ngrows - 1 && !running;
+        if (g->at + g->n > a->grp.n || g->dat + g->dn > a->grp.n)
+            break; /* out of memory: paint() says so */
+        if (single)
+            group_row(a, out, a->sy->bullet, g->bad ? TUI_RED : TUI_GREEN, (pt_str){a->grp.p + g->at, g->n});
+        else
+            group_row(a, out, last ? a->sy->elbow : a->sy->tee, TUI_DIM, (pt_str){a->grp.p + g->at, g->n});
+        if (!live) { /* under the row's text */
+            snprintf(cont, sizeof cont, "%s   ", single || last ? " " : a->sy->bar);
+            group_details(a, out, g, cont);
+        }
+    }
+    if (running) { /* its row, and the end of its output */
+        pt_str o = pt_buf_str(&a->tool_out), rows;
+        size_t at = o.n;
+        int lines = 0;
+        group_row(a, out, single ? a->sy->bullet : a->sy->elbow, TUI_DIM, pt_buf_str(&a->tool_head));
+        while (at && o.p[at - 1] == '\n')
+            at--;
+        o.n = at;
+        while (at && lines <= TOOL_LIVE)
+            lines += o.p[--at] == '\n';
+        if (at < o.n && o.p[at] == '\n')
+            at++;
+        while (at < o.n && ((unsigned char)o.p[at] & 0xC0) == 0x80)
+            at++;
+        if (!o.n)
+            return;
+        pt_buf_reset(&a->diff);
+        snprintf(cont, sizeof cont, "  %s", a->sy->bar);
+        out_rail(a, &a->diff, cont, TUI_DIM, TUI_DIM, (pt_str){o.p + at, o.n - at}, 0);
+        rows = pt_buf_str(&a->diff); /* its last TOOL_LIVE rows */
+        at = rows.n;
+        for (lines = 0; at && lines <= TOOL_LIVE; at--)
+            if (rows.p[at - 1] == '\n' && ++lines > TOOL_LIVE)
+                break;
+        pt_buf_put(out, rows.p + at, rows.n - at);
+    }
+}
+
+/* The open group goes to the scrollback. */
+static void group_close(app *a)
+{
+    if (!a->ngrows)
+        return;
+    out_blank(&a->lines);
+    group_render(a, &a->lines, false);
+    a->ngrows = 0;
+    pt_buf_reset(&a->grp);
 }
 
 static void out_thinking(app *a, pt_buf *out, pt_str text, int64_t ms, bool full)
@@ -577,17 +856,14 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
                 any = true;
             } else if (b->kind == PT_BLOCK_TOOL_CALL) {
                 if (full) /* else it is shown with its result */
-                    out_call(a, out, b, true, NULL);
+                    out_call(a, out, b);
                 any = true;
             }
         }
         if (m->stop == PT_STOP_ABORTED || m->stop == PT_STOP_ERROR)
             out_text(a, out, TUI_DIM, NULL, 0, any ? PT_S("(interrupted)") : PT_S("(interrupted, nothing arrived)"), 0);
-    } else if (strcmp(v->kind, "tool_result") == 0) {
-        if (full)
-            out_rail(a, out, a->sy->bar, TUI_DIM, m->is_error ? TUI_RED | TUI_DIM : TUI_DIM, m->text, 0);
-        else
-            out_result(a, out, v);
+    } else if (strcmp(v->kind, "tool_result") == 0) { /* else it joins a group */
+        out_rail(a, out, a->sy->bar, TUI_DIM, m->is_error ? TUI_RED | TUI_DIM : TUI_DIM, m->text, 0);
     } else if (strcmp(v->kind, "error") == 0) {
         char p[16];
         snprintf(p, sizeof p, "%s ", a->sy->fail);
@@ -601,6 +877,7 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
 
 static void begin_msg(app *a)
 {
+    group_close(a);
     if (!a->started)
         out_blank(&a->lines);
     a->started = true;
@@ -640,7 +917,7 @@ static void live_end(app *a)
 {
     if (a->live_kind != LIVE_NONE && a->live.n)
         live_line(a, pt_buf_str(&a->live));
-    if (a->live_kind == LIVE_THINK && a->thinking == TH_COLLAPSED) {
+    if (a->live_kind == LIVE_THINK && a->thinking == TH_COLLAPSED && !a->ngrows) { /* a group goes on over it */
         begin_msg(a);
         out_thinking(a, &a->lines, PT_STR_NULL, pt_sys_now_ms() - a->think_at, false);
     }
@@ -667,11 +944,14 @@ static void on_ai(app *a, const pt_ai_event *ev)
         a->phase = PH_WAIT;
         break;
     case PT_EV_THINKING_START:
+        if (a->thinking == TH_FULL)
+            group_close(a);
         live_begin(a, LIVE_THINK);
         a->think_at = pt_sys_now_ms();
         a->phase = PH_THINK;
         break;
-    case PT_EV_TEXT_START:
+    case PT_EV_TEXT_START: /* the calls before it are over */
+        group_close(a);
         live_begin(a, LIVE_TEXT);
         a->phase = PH_WRITE;
         break;
@@ -696,6 +976,37 @@ static void on_ai(app *a, const pt_ai_event *ev)
     default:
         break;
     }
+}
+
+/* Whether an assistant entry shows anything outside the full view: text,
+ * thinking (in a group, collapsed thinking is left out), or that it was
+ * cut off. With only calls, a group goes on over it. */
+static bool shows(app *a, const pt_entry_view *v)
+{
+    const pt_msg *m = v->msg;
+    uint32_t i;
+    if (m->stop == PT_STOP_ABORTED || m->stop == PT_STOP_ERROR)
+        return true;
+    for (i = 0; i < m->nblocks; i++)
+        if ((m->blocks[i].kind == PT_BLOCK_TEXT) ||
+            (m->blocks[i].kind == PT_BLOCK_THINKING && m->blocks[i].text.n &&
+             (a->thinking == TH_FULL || (a->thinking == TH_COLLAPSED && !a->ngrows))))
+            return true;
+    return false;
+}
+
+/* An entry from its record, outside the full view: a result joins the
+ * open group, anything else shown closes it. */
+static void show_entry(app *a, const pt_entry_view *v)
+{
+    if (strcmp(v->kind, "tool_result") == 0) {
+        group_add(a, v);
+        return;
+    }
+    if (strcmp(v->kind, "assistant") == 0 && !shows(a, v))
+        return;
+    group_close(a);
+    out_entry(a, &a->lines, v, false);
 }
 
 static void on_entries(app *a)
@@ -735,7 +1046,7 @@ static void on_entries(app *a)
             a->started = false;
             continue;
         }
-        out_entry(a, &a->lines, &v, false);
+        show_entry(a, &v);
     }
     a->seen = n;
 }
@@ -757,6 +1068,7 @@ static void on_event(void *ud, const pt_event *ev)
         else if (pt_str_eqz(ev->outcome, "failed")) {
             snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
                      ev->error.p);
+            group_close(a);
             out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(line), 2);
         }
         break;
@@ -766,13 +1078,10 @@ static void on_event(void *ud, const pt_event *ev)
         snprintf(a->tool_name, sizeof a->tool_name, "%.*s", (int)(ev->name.n > 60 ? 60 : ev->name.n), ev->name.p);
         pt_buf_reset(&a->tool_out);
         {
-            pt_block b;
-            memset(&b, 0, sizeof b);
-            b.kind = PT_BLOCK_TOOL_CALL;
-            b.name = ev->name;
-            b.args = ev->args;
+            int vi = verb_of(ev->name);
+            a->tool_cat = vi < 0 ? CAT_OTHER : verbs[vi].cat;
             pt_buf_reset(&a->tool_head);
-            out_call(a, &a->tool_head, &b, false, NULL);
+            phrase(a, &a->tool_head, 0, vi < 0 ? NULL : verbs[vi].running, ev->name, ev->args);
         }
         break;
     case PT_E_TOOL_OUTPUT:
@@ -797,6 +1106,7 @@ static void on_event(void *ud, const pt_event *ev)
         tui_clean(&a->retry_err, ev->error, &(int){0});
         break;
     case PT_E_RUN_DONE:
+        group_close(a);
         if (pt_str_eqz(ev->outcome, "failed")) {
             snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
                      ev->error.p);
@@ -816,6 +1126,7 @@ static void on_event(void *ud, const pt_event *ev)
         a->run_at = pt_sys_now_ms(); /* a queued input runs next */
         break;
     case PT_E_FATAL:
+        group_close(a);
         snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
                  ev->error.p);
         out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(line), 2);
@@ -1161,24 +1472,27 @@ static void ask_row(app *a, int i)
     row(a, pt_buf_str(&a->tmp));
 }
 
-/* The question: the call on one row, then the choices. */
+/* The question: the call on one row ("● Run make test"), then the choices. */
 static void ask_rows(app *a, int n)
 {
-    int col = 0, i;
+    int col = 0, vi = verb_of(a->ask.name), i;
     size_t k;
     pt_buf_reset(&a->tmp2);
     tui_style(&a->tmp2, TUI_BOLD);
     pt_buf_putz(&a->tmp2, a->sy->bullet);
-    pt_buf_putc(&a->tmp2, ' ');
-    pt_buf_put(&a->tmp2, a->ask.name.p, a->ask.name.n > 60 ? 60 : a->ask.name.n);
-    pt_buf_putc(&a->tmp2, ' ');
     tui_style(&a->tmp2, 0);
-    pt_buf_reset(&a->tmp);
-    tui_clean(&a->tmp, a->ask.prompt.n ? a->ask.prompt : call_gist(a, a->ask.args), &col);
-    for (k = 0; k < a->tmp.n; k++)
-        if (a->tmp.p[k] == '\n')
-            a->tmp.p[k] = ' ';
-    pt_buf_puts(&a->tmp2, pt_buf_str(&a->tmp));
+    pt_buf_putc(&a->tmp2, ' ');
+    if (vi < 0 && a->ask.prompt.n) { /* another tool: its name and what it asks */
+        size_t at = a->tmp2.n;
+        pt_buf_put(&a->tmp2, a->ask.name.p, a->ask.name.n > 60 ? 60 : a->ask.name.n);
+        pt_buf_putc(&a->tmp2, ' ');
+        tui_clean(&a->tmp2, a->ask.prompt, &col);
+        for (k = at; k < a->tmp2.n; k++)
+            if (a->tmp2.p[k] == '\n')
+                a->tmp2.p[k] = ' ';
+    } else {
+        phrase(a, &a->tmp2, 0, vi < 0 ? NULL : verbs[vi].ask, a->ask.name, a->ask.args);
+    }
     k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
     a->tmp2.n = k;
     row(a, pt_buf_str(&a->tmp2));
@@ -1199,40 +1513,17 @@ static void build_frame(app *a, int64_t now)
         avail = 1;
     /* the pieces */
     pt_buf_reset(live_rows);
+    if (a->ngrows || (a->phase == PH_TOOL && a->tool_head.n)) { /* the open group */
+        pt_buf_putc(live_rows, '\n');
+        group_render(a, live_rows, true);
+    }
     if (a->live_kind != LIVE_NONE && a->live.n) {
         tui_md copy = a->md;
-        live_n = tui_md_line(&copy, pt_buf_str(&a->live), a->cols, a->live_kind == LIVE_THINK ? TUI_DIM : 0, true,
-                             live_rows);
-    } else if (a->phase == PH_TOOL && (a->tool_out.n || a->tool_head.n)) {
-        /* the running tool: its header and the end of its output */
-        pt_str o = pt_buf_str(&a->tool_out), rows;
-        size_t at = o.n;
-        int lines = 0;
-        while (at && o.p[at - 1] == '\n')
-            at--;
-        o.n = at;
-        while (at && lines <= TOOL_LIVE)
-            lines += o.p[--at] == '\n';
-        if (o.p[at] == '\n')
-            at++;
-        while (at < o.n && ((unsigned char)o.p[at] & 0xC0) == 0x80)
-            at++;
-        pt_buf_reset(&a->diff);
-        if (o.n) {
-            char rail[16];
-            snprintf(rail, sizeof rail, "  %s", a->sy->bar);
-            out_rail(a, &a->diff, rail, TUI_DIM, TUI_DIM, (pt_str){o.p + at, o.n - at}, 0);
-        }
-        rows = pt_buf_str(&a->diff); /* its last TOOL_LIVE rows */
-        at = rows.n;
-        for (lines = 0; at && lines <= TOOL_LIVE; at--)
-            if (rows.p[at - 1] == '\n' && ++lines > TOOL_LIVE)
-                break;
-        pt_buf_puts(live_rows, pt_buf_str(&a->tool_head));
-        pt_buf_put(live_rows, rows.p + at, rows.n - at);
-        for (i = 0; (size_t)i < live_rows->n; i++)
-            live_n += live_rows->p[i] == '\n';
+        tui_md_line(&copy, pt_buf_str(&a->live), a->cols, a->live_kind == LIVE_THINK ? TUI_DIM : 0, true,
+                    live_rows);
     }
+    for (i = 0; (size_t)i < live_rows->n; i++)
+        live_n += live_rows->p[i] == '\n';
     a->asked = asking(a);
     nask = a->asked ? 4 : 0;
     act = a->running && !nask ? 1 : 0;
@@ -1392,7 +1683,8 @@ static void paint(app *a)
     int64_t now = pt_sys_now_ms();
     build_frame(a, now);
     if (a->in.text.oom || a->in.kill.oom || a->in.saved.oom || a->frame.rows.oom || a->lines.oom ||
-        a->live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->items_buf.oom) {
+        a->live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->items_buf.oom || a->grp.oom ||
+        a->tool_head.oom || a->live_rows.oom || a->diff.oom) {
         if (!a->quit)
             fprintf(stderr, "pytte: out of memory drawing the terminal\n");
         a->code = 1;
@@ -1479,6 +1771,7 @@ static void finish_setting(app *a)
         unsigned i;
         job->active = false;
         if (!job->ok) {
+            group_close(a);
             out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(job->err), 2);
         } else {
             for (i = 0; i < NSETTINGS && settings[i].k != job->key; i++)
@@ -1629,13 +1922,14 @@ static void out_tail(app *a)
         out_z(a, TUI_DIM, line);
     }
     for (i = from; i < n && pt_entry_at(a->s.a, i, &v); i++)
-        out_entry(a, &a->lines, &v, false);
+        show_entry(a, &v);
     a->seen = n;
 }
 
 static void reset_display(app *a)
 {
     uint32_t i;
+    group_close(a); /* the old session's, to the scrollback */
     pt_buf_reset(&a->live);
     a->live_kind = LIVE_NONE;
     a->streamed = a->started = a->printed = a->running = false;
@@ -1668,6 +1962,7 @@ static bool open_session(app *a, const char *id)
                                     a->open && session_empty(a),
                                     on_event, a, a->err, sizeof a->err);
     if (!a->opening) {
+        group_close(a);
         out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(a->err), 2);
         a->code = 1;
         return false;
@@ -1888,6 +2183,7 @@ static void run_command(app *a, pt_str line)
     cmd.p++;
     cmd.n--;
     snprintf(v, sizeof v, "%.*s", (int)(arg.n < sizeof v ? arg.n : sizeof v - 1), arg.p);
+    group_close(a);
     out_blank(&a->lines); /* the command itself is not echoed: only what it did */
     if (pt_str_eqz(cmd, "model")) {
         if (arg.n) {
@@ -2096,6 +2392,7 @@ static void finish_session(app *a)
         return;
     a->opening = NULL;
     if (rc) {
+        group_close(a);
         out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(a->err), 2);
         a->urgent = true;
         if (a->fallback[0]) {
@@ -2555,6 +2852,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_init(&a.tool_out, pt_sys_allocator());
     pt_buf_init(&a.tool_head, pt_sys_allocator());
     pt_buf_init(&a.diff, pt_sys_allocator());
+    pt_buf_init(&a.grp, pt_sys_allocator());
     pt_buf_init(&a.items_buf, pt_sys_allocator());
     pt_buf_init(&a.pending_history, pt_sys_allocator());
     pt_buf_init(&a.command, pt_sys_allocator());
@@ -2707,9 +3005,12 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     }
     /* quit: the close claim, then the terminal. What was shown of an
      * unfinished answer stays (pytte -c picks the run up again). */
-    if (a.live_kind != LIVE_NONE && a.live.n && a.code != 129) {
-        live_end(&a);
-        out_z(&a, TUI_DIM, "(detached)");
+    if (a.code != 129 && ((a.live_kind != LIVE_NONE && a.live.n) || a.ngrows)) {
+        if (a.live_kind != LIVE_NONE && a.live.n) {
+            live_end(&a);
+            out_z(&a, TUI_DIM, "(detached)");
+        }
+        group_close(&a); /* the band is erased next */
         a.menu = MENU_NONE;
         paint(&a);
     }
@@ -2765,6 +3066,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_free(&a.tool_out);
     pt_buf_free(&a.tool_head);
     pt_buf_free(&a.diff);
+    pt_buf_free(&a.grp);
     pt_buf_free(&a.items_buf);
     pt_buf_free(&a.pending_history);
     pt_buf_free(&a.command);

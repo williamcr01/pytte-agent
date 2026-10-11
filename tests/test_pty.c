@@ -440,7 +440,7 @@ static void test_interrupt_and_queue(void)
     CHECK(wait_for(&p, "queued: and then?", 2000));
     CHECK(wait_for(&p, "No tools are", 5000));
     /* the call shows the gist of its arguments, then how it ended */
-    CHECK(has(&p, "● bash ls\n  ✗ Invalid arguments: $: missing required property command"));
+    CHECK(wait_for(&p, "● Couldn't run ls\n    Invalid arguments: $: missing required property command", 1000));
     keys(&p, "\x1b[27u");
     CHECK(wait_for(&p, "esc again to interrupt", 1000));
     keys(&p, "\x1b[27u");
@@ -456,9 +456,10 @@ static void test_interrupt_and_queue(void)
     pty_free(&p);
 }
 
-/* Finished calls are compact (section 16.2): a header and a summary row;
- * a failure keeps its last lines, a read is one row, an edit shows its
- * diff. A running call shows its header and output tail in the band. */
+/* Calls in a row form a group (section 16.2): a header that counts them,
+ * then a row each; a failure keeps its last lines, an edit shows its diff.
+ * The open group, with the running call and its output tail, is in the
+ * band. */
 static void test_tool_rendering(void)
 {
     pty p;
@@ -467,17 +468,30 @@ static void test_tool_rendering(void)
     pty_start(&p, 30, 100, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
-    CHECK(wait_for(&p, "● bash echo 31\n  ✓ 31 · ", 3000));
-    CHECK(wait_for(&p, "● bash echo started; sleep 1; echo finished\n  │ started\n", 3000)); /* the band */
-    CHECK(wait_for(&p, "● bash echo started; sleep 1; echo finished\n  ✓ 2 lines · 1", 4000));
-    CHECK(wait_for(&p, "  ✗ exit 2 · ", 3000));
-    CHECK(has(&p, "  │ two\n  │ band.c:88: error\n  │ make: Error 1\n"));
-    CHECK(!has(&p, "│ one"));
+    CHECK(wait_for(&p, /* the band */
+                   "● 2 tool calls · 2 commands\n"
+                   "├ Ran echo 31\n"
+                   "└ Running echo started; sleep 1; echo finished\n"
+                   "  │ started\n",
+                   3000));
+    CHECK(wait_for(&p, "Fixed.", 5000));
+    CHECK(has(&p, "Looking.\n\n"
+                  "● 6 tool calls · 3 commands · 1 read · 1 write · 1 edit · 1 failed\n"
+                  "├ Ran echo 31\n"
+                  "├ Ran echo started; sleep 1; echo finished · 1s\n"
+                  "├ Exited 2 echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2\n"
+                  "│   two\n"
+                  "│   band.c:88: error\n"
+                  "│   make: Error 1\n"
+                  "├ Wrote build/test/render.c +2\n"
+                  "├ Read build/test/render.c · 2 lines\n"
+                  "└ Edited build/test/render.c +1 / -1\n"
+                  "    - int up = cur;\n"
+                  "    + int up = b->cur;\n"
+                  "\n"
+                  "Fixed."));
+    CHECK(!has(&p, "│   one"));
     CHECK(!has(&p, "[exit code 2]"));
-    CHECK(wait_for(&p, "● write build/test/render.c\n  ✓ ", 3000));
-    CHECK(wait_for(&p, "● read build/test/render.c  ✓ 2 lines\n", 3000));
-    CHECK(wait_for(&p, "● edit build/test/render.c  +1 -1\n  │ - int up = cur;\n  │ + int up = b->cur;\n", 3000));
-    CHECK(wait_for(&p, "Fixed.", 3000));
     CHECK(wait_idle(&p, 3000));
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
@@ -496,15 +510,18 @@ static void test_approval(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
     CHECK(wait_for(&p, "1. Yes", 3000));
-    CHECK(has(&p, "● bash echo hi-from-bash; echo second-line"));
+    CHECK(has(&p, "● Run echo hi-from-bash; echo second-line"));
     CHECK(has(&p, "2. Yes, and allow bash \"echo\" this session"));
     CHECK(has(&p, "esc no"));
     keys(&p, "1");
-    CHECK(wait_for(&p, "● bash echo hi-from-bash; echo second-line\n  ✓ 2 lines · ", 3000));
-    CHECK(wait_for(&p, "● bash touch should-not-exist", 3000));
+    CHECK(wait_for(&p, "● Ran echo hi-from-bash; echo second-line\n", 3000));
+    CHECK(wait_for(&p, "● Run touch should-not-exist", 3000));
     CHECK(wait_for(&p, "3. No (esc)", 3000));
     keys(&p, "\x1b[27u");
-    CHECK(wait_for(&p, "● bash touch should-not-exist\n  ✗ The user denied this tool call.", 3000));
+    CHECK(wait_for(&p, "● 2 tool calls · 2 commands · 1 denied\n"
+                       "├ Ran echo hi-from-bash; echo second-line\n"
+                       "└ Denied bash touch should-not-exist\n",
+                   3000));
     CHECK(wait_for(&p, "All done with tools.", 3000));
     CHECK(wait_idle(&p, 3000));
     CHECK(access("should-not-exist", F_OK) != 0);
