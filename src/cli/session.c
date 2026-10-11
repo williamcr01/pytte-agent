@@ -7,6 +7,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,26 +83,39 @@ static void new_session_id(char *out, size_t cap)
     out[n] = 0;
 }
 
+bool cli_log_first_line(int fd, pt_buf *line)
+{
+    enum { CHUNK = 65536, MAX = 16 << 20 };
+    pt_buf_reset(line);
+    while (line->n < MAX && pt_buf_reserve(line, CHUNK)) {
+        ssize_t got = pread(fd, line->p + line->n, CHUNK, (off_t)line->n);
+        const char *nl = got > 0 ? (const char *)memchr(line->p + line->n, '\n', (size_t)got) : NULL;
+        if (got <= 0)
+            return false;
+        if (nl) {
+            line->n = (size_t)(nl - line->p);
+            return true;
+        }
+        line->n += (size_t)got;
+    }
+    return false;
+}
+
 bool cli_session_cwd(const char *id, char *out, size_t cap)
 {
-    char root[4096], path[4200], line[8192];
-    FILE *f;
-    size_t n;
+    char root[4096], path[4200];
+    int fd;
+    pt_buf line;
     pt_arena ar;
     pt_json *j;
     bool ok = false;
     cli_sessions_dir(root, sizeof root);
     snprintf(path, sizeof path, "%s/%s/log.jsonl", root, id);
-    if (!(f = fopen(path, "rb")))
+    if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0)
         return false;
-    n = fread(line, 1, sizeof line - 1, f);
-    fclose(f);
-    line[n] = 0;
-    if (!strchr(line, '\n'))
-        return false;
-    *strchr(line, '\n') = 0;
+    pt_buf_init(&line, pt_sys_allocator());
     pt_arena_init(&ar, pt_sys_allocator(), 0);
-    if ((j = pt_json_parse(pt_strz(line), &ar, NULL))) {
+    if (cli_log_first_line(fd, &line) && (j = pt_json_parse(pt_buf_str(&line), &ar, NULL))) {
         const pt_json *w = pt_json_get(j, "w"), *r;
         for (r = w ? w->child : NULL; r; r = r->next)
             if (pt_str_eqz(pt_json_gets(r, "t", &ar), "session")) {
@@ -111,7 +125,9 @@ bool cli_session_cwd(const char *id, char *out, size_t cap)
                 break;
             }
     }
+    close(fd);
     pt_arena_free(&ar);
+    pt_buf_free(&line);
     return ok;
 }
 

@@ -75,6 +75,10 @@ void cli_sessions_dir(char *out, size_t cap);
 /* Session IDs, newest first; with cwd, only those started there. Returns
  * how many were written (at most max). */
 uint32_t cli_sessions_list(const char *cwd, char (*ids)[64], uint32_t max);
+/* A log's first line, without its newline: the session record and the
+ * first epoch, as long as its system prompt made it. False when the line
+ * is unfinished, past 16 MiB, or cannot be read. */
+bool cli_log_first_line(int fd, pt_buf *line);
 /* The session's original working directory, from its header. */
 bool cli_session_cwd(const char *id, char *out, size_t cap);
 

@@ -733,13 +733,15 @@ static bool ls_head(void *ud, pt_str line)
     for (c = c ? c->child : NULL; c; c = c->next) {
         pt_str t = pt_json_gets(c, "t", &r->ar);
         if (pt_str_eqz(t, "session"))
-            r->cwd = pt_json_gets(c, "cwd", &r->ar);
+            r->cwd = pt_arena_dup(&r->ar, pt_json_gets(c, "cwd", &r->ar));
         else if (pt_str_eqz(t, "entry") && pt_str_eqz(pt_json_gets(c, "kind", &r->ar), "user") &&
                    !r->title.p) {
             const pt_json *content = pt_json_get(pt_json_get(c, "data"), "content");
             if (pt_json_is(content, PT_J_OBJ))
                 r->title_blob = pt_json_gets(content, "blob", &r->ar);
-            r->title = pt_json_str(content, &r->ar);
+            /* copied: the tail is read into the same buffer */
+            r->title_blob = pt_arena_dup(&r->ar, r->title_blob);
+            r->title = pt_arena_dup(&r->ar, pt_json_str(content, &r->ar));
         }
     }
     return !r->title.p;
@@ -803,6 +805,7 @@ static int cmd_ls(void)
     size_t hn = home ? strlen(home) : 0;
     uint32_t n, i;
     ls_row r;
+    pt_buf first; /* each log's first line, reused */
     cli_sessions_dir(root, sizeof root);
     ids = (char(*)[64])malloc(4096 * sizeof *ids);
     peek = (char *)malloc(LS_PEEK);
@@ -810,6 +813,7 @@ static int cmd_ls(void)
         die("out of memory", NULL);
     n = cli_sessions_list(NULL, ids, 4096);
     pt_arena_init(&r.ar, pt_sys_allocator(), 0);
+    pt_buf_init(&first, pt_sys_allocator());
     for (i = 0; i < n; i++) {
         struct stat st;
         ssize_t got;
@@ -826,16 +830,19 @@ static int cmd_ls(void)
         r.title_blob = PT_STR_NULL;
         r.cwd = r.title = PT_STR_NULL;
         r.claim = NULL;
-        got = pread(fd, peek, LS_PEEK, 0);
-        if (got > 0)
-            each_line(peek, (size_t)got, ls_head, &r);
-        if (st.st_size > LS_PEEK) {
-            got = pread(fd, peek, LS_PEEK, st.st_size - LS_PEEK);
-            if (got > 0 && (t.p = (const char *)memchr(peek, '\n', (size_t)got)))
-                each_line(t.p + 1, (size_t)got - (size_t)(t.p + 1 - peek), ls_tail, &r);
-        } else if (got > 0) {
-            each_line(peek, (size_t)got, ls_tail, &r);
+        /* the head: the first line whole (however long its system prompt),
+         * then up to LS_PEEK after it */
+        if (cli_log_first_line(fd, &first)) {
+            ls_head(&r, pt_buf_str(&first));
+            got = pread(fd, peek, LS_PEEK, (off_t)first.n + 1);
+            if (got > 0 && !r.title.p)
+                each_line(peek, (size_t)got, ls_head, &r);
         }
+        got = pread(fd, peek, LS_PEEK, st.st_size > LS_PEEK ? st.st_size - LS_PEEK : 0);
+        if (got > 0 && st.st_size > LS_PEEK && (t.p = (const char *)memchr(peek, '\n', (size_t)got)))
+            each_line(t.p + 1, (size_t)got - (size_t)(t.p + 1 - peek), ls_tail, &r);
+        else if (got > 0 && st.st_size <= LS_PEEK)
+            each_line(peek, (size_t)got, ls_tail, &r);
         close(fd);
         if (r.title_blob.n == 71) { /* a large prompt: its first bytes */
             char bp[4400];
@@ -872,6 +879,7 @@ static int cmd_ls(void)
                    t.n < r.title.n ? "…" : "");
     }
     pt_arena_free(&r.ar);
+    pt_buf_free(&first);
     free(peek);
     free(ids);
     return 0;
