@@ -303,7 +303,7 @@ static void add_tools(world *w, pt_rt *rt)
     t[1].def.schema = PT_S("{\"type\":\"object\",\"properties\":{\"at\":{\"type\":\"string\"}}}");
     t[1].def.replay = PT_REPLAY_SAFE;
     t[1].def.parallel = true;
-    t[1].read_only = true;
+    t[1].def.read_only = true;
     t[1].run = look_run;
     t[1].cancel = look_cancel;
     t[1].ud = w;

@@ -16,19 +16,25 @@
 #define CUT 2048            /* bytes kept of each tool call's input and result */
 #define SUMMARY_TOKENS 8192 /* at most, for the summary */
 #define KEEP 20000          /* tokens of the newest turns kept as they are */
+#define FILES 256           /* paths listed, of each kind */
 
 static const char instructions[] =
-    "You write the summary that replaces the history of a long coding session, so that the work "
-    "can go on in a fresh context window. Whoever continues sees only your summary, so it must "
-    "stand on its own. Cover:\n"
-    "- the user's goals and constraints, and decisions made with the user;\n"
-    "- files read, created and changed (paths), and what changed in them;\n"
-    "- commands that mattered and what they showed (errors, test results);\n"
-    "- the current state of the work, open problems and the next steps;\n"
-    "- the user's latest request, quoted in full.\n"
-    "Be specific (names, paths, numbers) and concise. Write only the summary.";
+    "You keep the summary that replaces the history of a long coding session, so that the work "
+    "can go on in a fresh context window. Whoever continues sees only your summary and the newest "
+    "messages, so it must stand on its own. Use this format:\n\n"
+    "## Goal\nWhat the user wants to achieve.\n\n"
+    "## Constraints and preferences\nRequirements and preferences the user stated.\n\n"
+    "## Progress\n### Done\n### In progress\n### Blocked\n\n"
+    "## Key decisions\nWhat was decided, and why.\n\n"
+    "## Next steps\nWhat should happen next, in order.\n\n"
+    "## Critical context\nNames, paths, commands, errors and numbers needed to continue.\n\n"
+    "Keep every section; write \"(none)\" under an empty one. Be specific and concise. The files "
+    "read and modified are listed separately: do not list them. Write only the summary.";
 
-static const char ask[] = "\n\nWrite the summary of the session above now.";
+static const char ask[] = "\n</conversation>\n\nWrite the summary of the conversation above.";
+static const char ask_update[] =
+    "\n</conversation>\n\nUpdate the previous summary with the conversation above: keep what still "
+    "holds, add what is new, move finished work to Done, and drop what no longer matters.";
 static const char gap[] = "\n\n[... the middle of the session is left out ...]\n\n";
 
 static bool sent_answer(const entry *e)
@@ -129,12 +135,7 @@ static void transcript(pt_agent *a, uint32_t end, pt_buf *b)
         const entry *e = &a->entries[i];
         const pt_msg *m = &e->msg;
         switch (e->kind) {
-        case ENT_EPOCH:
-            if (e->summary.n) {
-                pt_buf_putz(b, "[summary of the session before]\n");
-                pt_buf_puts(b, e->summary);
-                pt_buf_putz(b, "\n\n");
-            }
+        case ENT_EPOCH: /* its summary goes first, as the previous one */
             if (e->request.n) {
                 pt_buf_putz(b, "[user]\n");
                 pt_buf_puts(b, e->request);
@@ -185,20 +186,27 @@ static void transcript(pt_agent *a, uint32_t end, pt_buf *b)
     }
 }
 
+/* The summarization request: the previous summary, if the epoch has one,
+ * then the entries before t->keep as text; a transcript too long for the
+ * window keeps its start (the goal) and its end (the newest work). */
 bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena *ar)
 {
+    static const char prev_open[] = "<previous-summary>\n", prev_close[] = "\n</previous-summary>\n\n",
+                      conv[] = "<conversation>\n";
     pt_ai_target target;
     pt_msg *msgs = (pt_msg *)pt_arena_zalloc(ar, sizeof(pt_msg) * 2);
+    pt_str prev = a->nentries ? a->entries[0].summary : PT_STR_NULL, end = prev.n ? PT_S(ask_update) : PT_S(ask);
     uint64_t window, budget;
     pt_buf b;
     pt_str all;
     char *p;
-    size_t n, head, tail;
+    size_t n, head, tail, pre;
     if (!msgs || !pt_run_resolve(a, t->model, &target, ar))
         return false;
     window = target.model.context_window;
     /* about 3 bytes per token, leaving room for the summary */
     budget = window > (uint64_t)t->max_tokens + 2048 ? (window - t->max_tokens - 2048) * 3 : 0;
+    budget = budget > prev.n ? budget - prev.n : 0;
     if (budget < 16384)
         budget = 16384;
     pt_buf_init(&b, a->al);
@@ -214,10 +222,21 @@ bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena
         while (tail && ((unsigned char)all.p[all.n - tail] & 0xC0) == 0x80)
             tail--;
     }
-    n = head + (tail ? sizeof gap - 1 + tail : 0) + sizeof ask - 1;
+    pre = (prev.n ? sizeof prev_open - 1 + prev.n + sizeof prev_close - 1 : 0) + sizeof conv - 1;
+    n = pre + head + (tail ? sizeof gap - 1 + tail : 0) + end.n;
     p = b.oom ? NULL : (char *)pt_arena_alloc(ar, n);
     if (p) {
         char *q = p;
+        if (prev.n) {
+            memcpy(q, prev_open, sizeof prev_open - 1);
+            q += sizeof prev_open - 1;
+            memcpy(q, prev.p, prev.n);
+            q += prev.n;
+            memcpy(q, prev_close, sizeof prev_close - 1);
+            q += sizeof prev_close - 1;
+        }
+        memcpy(q, conv, sizeof conv - 1);
+        q += sizeof conv - 1;
         if (head)
             memcpy(q, all.p, head);
         q += head;
@@ -227,7 +246,7 @@ bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena
             memcpy(q, all.p + all.n - tail, tail);
             q += tail;
         }
-        memcpy(q, ask, sizeof ask - 1);
+        memcpy(q, end.p, end.n);
     }
     pt_buf_free(&b);
     if (!p)
@@ -332,6 +351,92 @@ static pt_str epoch_tools(pt_agent *a)
     return pt_json_is(tools, PT_J_ARR) ? tools->raw : PT_S("[]");
 }
 
+/* ---- the files read and modified ---- */
+
+typedef struct file_list {
+    pt_str read[FILES], mod[FILES];
+    uint32_t nread, nmod;
+} file_list;
+
+static bool listed(const pt_str *l, uint32_t n, pt_str path)
+{
+    uint32_t i;
+    for (i = 0; i < n; i++)
+        if (pt_str_eq(l[i], path))
+            return true;
+    return false;
+}
+
+/* Append path unless listed; a full list drops its oldest. */
+static void add_path(pt_str *l, uint32_t *n, pt_str path)
+{
+    if (!path.n || memchr(path.p, '\n', path.n) || listed(l, *n, path))
+        return;
+    if (*n == FILES)
+        memmove(l, l + 1, sizeof *l * --*n);
+    l[(*n)++] = path;
+}
+
+/* The paths of the previous lists, then of the summarized tool calls with
+ * a "path" argument: a call of a read-only tool reads it, any other may
+ * change it. Code, not the model, keeps these, so none is forgotten. */
+static file_list *collect_files(pt_agent *a, const task *t)
+{
+    pt_arena *sa = &a->scratch;
+    file_list *f = (file_list *)pt_arena_zalloc(sa, sizeof *f);
+    const pt_json *r, *prev, *c;
+    uint32_t i, k, end = t->keep ? t->keep : t->cutoff + 1;
+    if (!f || !a->nentries)
+        return f;
+    r = pt_json_parse(a->entries[0].raw, sa, NULL);
+    prev = pt_json_get(pt_json_get(r, "data"), "files");
+    for (c = pt_json_is(pt_json_get(prev, "read"), PT_J_ARR) ? pt_json_get(prev, "read")->child : NULL; c; c = c->next)
+        add_path(f->read, &f->nread, pt_json_str(c, sa));
+    for (c = pt_json_is(pt_json_get(prev, "modified"), PT_J_ARR) ? pt_json_get(prev, "modified")->child : NULL; c;
+         c = c->next)
+        add_path(f->mod, &f->nmod, pt_json_str(c, sa));
+    for (i = 1; i < a->nentries && a->entries[i].id < end; i++) {
+        const pt_msg *m = &a->entries[i].msg;
+        if (!sent_answer(&a->entries[i]))
+            continue;
+        for (k = 0; k < m->nblocks; k++) {
+            int tool;
+            pt_str path;
+            if (m->blocks[k].kind != PT_BLOCK_TOOL_CALL || (tool = pt_core_find_tool(a, m->blocks[k].name)) < 0)
+                continue;
+            path = pt_json_gets(pt_json_parse(m->blocks[k].args, sa, NULL), "path", sa);
+            if (a->tool_meta[tool].read_only)
+                add_path(f->read, &f->nread, path);
+            else
+                add_path(f->mod, &f->nmod, path);
+        }
+    }
+    return f;
+}
+
+static void write_files(pt_jw *w, const file_list *f)
+{
+    uint32_t i, nread = 0;
+    for (i = 0; i < f->nread; i++)
+        nread += !listed(f->mod, f->nmod, f->read[i]);
+    if (!nread && !f->nmod)
+        return;
+    pt_jw_key(w, "files");
+    pt_jw_obj(w);
+    pt_jw_key(w, "read");
+    pt_jw_arr(w);
+    for (i = 0; i < f->nread; i++)
+        if (!listed(f->mod, f->nmod, f->read[i])) /* modified says it all */
+            pt_jw_str(w, f->read[i]);
+    pt_jw_arr_end(w);
+    pt_jw_key(w, "modified");
+    pt_jw_arr(w);
+    for (i = 0; i < f->nmod; i++)
+        pt_jw_str(w, f->mod[i]);
+    pt_jw_arr_end(w);
+    pt_jw_obj_end(w);
+}
+
 /* Whether a user entry is among the kept ones (the run's own, if so). */
 static bool keeps_user(pt_agent *a, const task *t)
 {
@@ -411,6 +516,7 @@ bool pt_compact_finish(pt_agent *a, task *t)
     input *in = run ? pt_core_input(a, run->input) : NULL;
     task nt = *t;
     pt_buf summary, why;
+    file_list *files;
     pt_jw *w = &a->cw;
     uint32_t i;
     bool ok;
@@ -434,6 +540,10 @@ bool pt_compact_finish(pt_agent *a, task *t)
         pt_jw_raw(w, PT_S("[]"));
         pt_jw_key(w, "summary");
         pt_jw_str(w, pt_buf_str(&summary));
+        if ((files = collect_files(a, t)))
+            write_files(w, files);
+        else
+            pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
         if (in && in->text.n && !keeps_user(a, t)) {
             pt_jw_key(w, "request");
             pt_jw_str(w, in->text);

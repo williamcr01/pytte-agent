@@ -44,7 +44,6 @@ bool pt_rt_recover(pt_rt *rt, char *err, size_t cap);
  * timer or an fd watch. */
 typedef struct pt_rt_tool {
     pt_tool_def def;
-    bool read_only; /* changes nothing: the gate never asks about it */
     void (*run)(void *ud, pt_rt *rt, const pt_fx *call);
     /* Stop a running call (abort, exit). It must still end with
      * pt_rt_tool_done, now or later. NULL: calls finish inside run. */

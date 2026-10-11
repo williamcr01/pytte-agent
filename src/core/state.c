@@ -459,6 +459,7 @@ static bool apply_tools(pt_agent *a, const pt_json *list)
         m->replay = pt_str_eqz(pt_json_gets(t, "replay", &a->scratch), "safe") ? PT_REPLAY_SAFE
                                                                               : PT_REPLAY_UNSAFE;
         m->parallel = pt_json_truthy(pt_json_get(t, "parallel"));
+        m->read_only = pt_json_truthy(pt_json_get(t, "read_only"));
         m->schema = pt_json_parse(d->schema, ea, NULL);
         if (!d->name.n)
             return false;
@@ -499,6 +500,45 @@ oom:
     return false;
 }
 
+/* An epoch's "files" ({"read": [...], "modified": [...]}) as the text that
+ * follows its summary. */
+static pt_str files_text(const pt_json *f, pt_arena *ea, pt_arena *sa)
+{
+    static const char *const keys[] = {"read", "modified"};
+    static const char *const heads[] = {"Files read:", "Files modified:"};
+    const pt_json *c;
+    size_t n = 0;
+    char *p, *q;
+    unsigned k;
+    for (k = 0; k < 2; k++)
+        for (c = pt_json_is(pt_json_get(f, keys[k]), PT_J_ARR) ? pt_json_get(f, keys[k])->child : NULL; c;
+             c = c->next)
+            n += 3 + pt_json_str(c, sa).n;
+    if (!n)
+        return PT_STR_NULL;
+    n += 64;
+    if (!(p = q = (char *)pt_arena_alloc(ea, n)))
+        return PT_STR_NULL;
+    for (k = 0; k < 2; k++) {
+        const pt_json *arr = pt_json_get(f, keys[k]);
+        if (!pt_json_is(arr, PT_J_ARR) || !arr->child)
+            continue;
+        if (q > p)
+            *q++ = '\n';
+        memcpy(q, heads[k], strlen(heads[k]));
+        q += strlen(heads[k]);
+        for (c = arr->child; c; c = c->next) {
+            pt_str s = pt_json_str(c, sa);
+            memcpy(q, "\n- ", 3);
+            q += 3;
+            memcpy(q, s.p, s.n);
+            q += s.n;
+        }
+        *q++ = '\n';
+    }
+    return (pt_str){p, (size_t)(q - p)};
+}
+
 static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
 {
     pt_arena *ea = &a->epoch, *sa = &a->scratch;
@@ -534,6 +574,7 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
         e->msg.text = pt_arena_dup(ea, pt_json_gets(d, "system", sa));
         e->summary = pt_arena_dup(ea, pt_json_gets(d, "summary", sa));
         e->request = pt_arena_dup(ea, pt_json_gets(d, "request", sa));
+        e->files = files_text(pt_json_get(d, "files"), ea, sa);
         if (!apply_tools(a, pt_json_get(d, "tools")))
             return false;
         break;

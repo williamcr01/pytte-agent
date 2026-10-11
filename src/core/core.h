@@ -25,6 +25,7 @@ typedef struct entry {
     ent_kind kind;
     pt_msg msg; /* epoch: the system prompt; notes: role system */
     pt_str summary, request; /* epoch after compaction: the summary, the request being worked on */
+    pt_str files;            /* epoch after compaction: the files read and modified, as text */
     bool to_model;
     uint32_t kept; /* a copy of this entry of the epoch before (section 12.3) */
     pt_str raw;
@@ -115,7 +116,7 @@ typedef struct doc {
 /* The epoch's frozen tools: what the model is offered, and how they run. */
 typedef struct tool_meta {
     pt_replay replay;
-    bool parallel;
+    bool parallel, read_only;
     const pt_json *schema; /* parsed, in the epoch arena */
 } tool_meta;
 
@@ -267,6 +268,7 @@ void pt_task_release(pt_agent *a, task *t); /* free its process-only state */
 /* The current epoch through entry `cutoff`, as a unified context. */
 bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena *ar);
 bool pt_core_sent(const entry *e); /* part of the requests */
+int pt_core_find_tool(pt_agent *a, pt_str name); /* in the current epoch; -1: none */
 uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e);
 
 /* ---- run.c ---- */

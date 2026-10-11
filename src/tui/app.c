@@ -556,6 +556,8 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
         out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
         if (full)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->summary, 0);
+        if (full && v->files.n)
+            out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->files, 0);
     } else if (strcmp(v->kind, "user") == 0) {
         out_blank(out);
         out_rail(a, out, a->sy->rail, TUI_DIM, TUI_BOLD, m->text, 0);

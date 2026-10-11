@@ -133,7 +133,7 @@ void pt_rt_gate(pt_rt *rt, const pt_fx *fx)
     gist = pt_rt_gist(fx->args, &rt->ar);
     memset(&g, 0, sizeof g);
     g.kind = PT_GATE_ALLOW;
-    if (k < 0 || rt->tools[k].read_only || rt->perm == PT_PERM_AUTO || allowed(rt, fx->name, gist)) {
+    if (k < 0 || rt->tools[k].def.read_only || rt->perm == PT_PERM_AUTO || allowed(rt, fx->name, gist)) {
         /* allow; an unknown tool fails when it runs */
     } else if (rt->perm == PT_PERM_READ_ONLY) {
         g.kind = PT_GATE_DENY;

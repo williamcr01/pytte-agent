@@ -27,7 +27,7 @@ bool pt_core_sent(const entry *e)
 uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e)
 {
     const pt_msg *m = &e->msg;
-    uint64_t n = 16 + m->text.n + e->summary.n + e->request.n;
+    uint64_t n = 16 + m->text.n + e->summary.n + e->files.n + e->request.n;
     uint32_t i;
     for (i = 0; i < m->nblocks; i++)
         n += 16 + m->blocks[i].text.n + m->blocks[i].args.n + m->blocks[i].signature.n / 4;
@@ -73,7 +73,8 @@ static const char working[] = "\n\nThe user's message being worked on when the s
 static bool summary_msg(const entry *e, bool kept, pt_msg *m, pt_arena *ar)
 {
     pt_str in = kept ? PT_S(intro_kept) : PT_S(intro);
-    size_t n = in.n + e->summary.n + (e->request.n ? sizeof working - 1 + e->request.n : 0);
+    size_t n = in.n + e->summary.n + (e->files.n ? 2 + e->files.n : 0) +
+               (e->request.n ? sizeof working - 1 + e->request.n : 0);
     char *p = (char *)pt_arena_alloc(ar, n ? n : 1), *q = p;
     if (!p)
         return false;
@@ -81,6 +82,11 @@ static bool summary_msg(const entry *e, bool kept, pt_msg *m, pt_arena *ar)
     q += in.n;
     memcpy(q, e->summary.p, e->summary.n);
     q += e->summary.n;
+    if (e->files.n) {
+        memcpy(q, "\n\n", 2);
+        memcpy(q + 2, e->files.p, e->files.n);
+        q += 2 + e->files.n;
+    }
     if (e->request.n) {
         memcpy(q, working, sizeof working - 1);
         q += sizeof working - 1;

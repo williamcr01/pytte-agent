@@ -499,6 +499,8 @@ static void print_entry(const pt_entry_view *v, bool tty)
         printf("%s[epoch %u] %.*s%s\n\n", dim, v->epoch, (int)m->text.n, m->text.p, reset);
         if (v->summary.n)
             printf("%s[summary] %.*s%s\n\n", dim, (int)v->summary.n, v->summary.p, reset);
+        if (v->files.n)
+            printf("%s%.*s%s\n", dim, (int)v->files.n, v->files.p, reset);
     } else if (strcmp(v->kind, "user") == 0) {
         printf("%s> %.*s%s\n\n", tty ? "\x1b[1m" : "", (int)m->text.n, m->text.p, reset);
     } else if (strcmp(v->kind, "assistant") == 0) {

@@ -384,6 +384,10 @@ void pt_core_write_tool_defs(pt_jw *w, const pt_tool_def *defs, uint32_t n)
         pt_jw_strz(w, d->replay == PT_REPLAY_SAFE ? "safe" : "unsafe");
         pt_jw_key(w, "parallel");
         pt_jw_bool(w, d->parallel);
+        if (d->read_only) {
+            pt_jw_key(w, "read_only");
+            pt_jw_bool(w, true);
+        }
         pt_jw_key(w, "source");
         pt_jw_str(w, d->source);
         pt_jw_obj_end(w);
@@ -1056,6 +1060,7 @@ bool pt_entry_at(const pt_agent *a, uint32_t i, pt_entry_view *out)
     out->msg = e->kind == ENT_ERROR ? NULL : &e->msg;
     out->raw = e->raw;
     out->summary = e->summary;
+    out->files = e->files;
     out->kept = e->kept;
     return true;
 }

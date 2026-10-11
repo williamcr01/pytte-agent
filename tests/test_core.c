@@ -571,6 +571,10 @@ static void test_compact_keep(void)
     CHECK(two && beta);
     CHECK(pt_compact(h.a));
     h_run(&h);
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("Write the summary"))); /* the compaction's */
+    CHECK(!has(pt_buf_str(&h.last_request), PT_S("<previous-summary>")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("Alpha answer")));
+    CHECK(!has(pt_buf_str(&h.last_request), PT_S("Beta answer"))); /* kept, not summarized */
     CHECK(pt_entry_count(h.a) == 3);
     CHECK(pt_entry_at(h.a, 0, &v) && strcmp(v.kind, "epoch") == 0 && v.epoch == 2 && !v.kept);
     CHECK(!has(v.raw, PT_S("\"request\""))); /* the user's message is kept */
@@ -590,6 +594,12 @@ static void test_compact_keep(void)
     CHECK(h_reload(&h) == PT_LOAD_OK);
     transcript(h.a, &got);
     CHECK_SAME(pt_buf_str(&got), pt_buf_str(&want));
+    CHECK(pt_compact(h.a)); /* again: the summary is updated, not redone */
+    h_run(&h);
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("<previous-summary>")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("So far: one question.")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("Update the previous summary")));
+    CHECK(pt_entry_at(h.a, 0, &v) && v.epoch == 3);
     h_free(&h);
     pt_buf_free(&want);
     pt_buf_free(&got);

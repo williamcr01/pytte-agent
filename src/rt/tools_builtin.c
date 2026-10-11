@@ -932,7 +932,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[1].def.schema = PT_S(read_schema);
     t[1].def.replay = PT_REPLAY_SAFE;
     t[1].def.parallel = true;
-    t[1].read_only = true;
+    t[1].def.read_only = true;
     t[1].run = t_read;
     t[2].def.name = PT_S("write");
     t[2].def.description = PT_S("Write a whole file, creating it and its directories if needed.");
@@ -952,7 +952,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[4].def.schema = PT_S(read_output_schema);
     t[4].def.replay = PT_REPLAY_SAFE;
     t[4].def.parallel = true;
-    t[4].read_only = true;
+    t[4].def.read_only = true;
     t[4].run = t_read_output;
     for (i = 0; i < 5; i++)
         if (!pt_rt_tool_add(rt, &t[i]))

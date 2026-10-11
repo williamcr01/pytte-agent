@@ -151,6 +151,7 @@ typedef struct pt_tool_def {
     pt_str schema;   /* JSON Schema of the arguments, raw JSON */
     pt_replay replay;
     bool parallel;   /* may run at the same time as other parallel tools */
+    bool read_only;  /* changes nothing: never asked about; its "path" is a file read */
     pt_str source;   /* who runs it: "builtin", ... */
 } pt_tool_def;
 
@@ -281,6 +282,7 @@ typedef struct pt_entry_view {
     const pt_msg *msg; /* NULL for error entries */
     pt_str raw;        /* the record */
     pt_str summary;    /* epoch after a compaction: what the model continues from */
+    pt_str files;      /* ...and the files read and modified, as text */
     uint32_t kept;     /* after a compaction: a copy of entry `kept` of the epoch
                         * before (already shown, if the viewer saw that epoch) */
 } pt_entry_view;

@@ -88,6 +88,12 @@ if command -v jq >/dev/null; then
     PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --context-window 8000 --script tests/faux/old_output.json count >/dev/null 2>&1
     PYTTE_PERMISSION_MODE=auto "$pytte" -p -c --context-window 8000 --script tests/faux/old_output.json "page it" >/dev/null 2>&1
     check "read_output finds a call from before a compaction" sh -c '"$1" log --json | jq -se "(map(select(.kind == \"epoch\")) | .[0].data.n == 2) and (map(select(.kind == \"tool_result\")) | .[0].data.content == \"10000\n\")" >/dev/null' _ "$pytte"
+    d=$XDG_STATE_HOME/files
+    mkdir -p "$d" && seq 1 5000 >"$d/big.txt"
+    printf '{"turns": [{"content": [{"type": "tool_call", "name": "write", "args": {"path": "%s/notes.txt", "content": "hi"}}]}, {"content": [{"type": "tool_call", "name": "read", "args": {"path": "%s/big.txt"}}]}, {"content": [{"type": "text", "text": "Read."}]}]}' \
+        "$d" "$d" >"$d/script.json"
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --context-window 4000 --script "$d/script.json" "write, then read" >/dev/null 2>&1
+    check "a compaction lists the files read and modified" sh -c '"$1" log --json | jq -se "map(select(.kind == \"epoch\")) | .[0].data.files == {\"read\": [\"$2/big.txt\"], \"modified\": [\"$2/notes.txt\"]}" >/dev/null' _ "$pytte" "$d"
 fi
 
 printf '%s' '{"turns": [[{"status": 529}, {"status": 400, "body": {"message": "bad request"}}]]}' \

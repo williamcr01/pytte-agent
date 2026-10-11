@@ -60,7 +60,7 @@ static const pt_block *find_call(pt_agent *a, const task *t)
     return NULL;
 }
 
-static int find_tool(pt_agent *a, pt_str name)
+int pt_core_find_tool(pt_agent *a, pt_str name)
 {
     uint32_t i;
     for (i = 0; i < a->ntools; i++)
@@ -234,7 +234,7 @@ static bool check_args(pt_agent *a, task *t, const pt_block *call, int k, pt_str
 
 static bool call_phase(pt_agent *a, task *t, const pt_block *call)
 {
-    int k = find_tool(a, call->name);
+    int k = pt_core_find_tool(a, call->name);
     pt_fx fx;
     if (k < 0) {
         pt_buf b;
@@ -285,7 +285,7 @@ static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_st
     nt.attempt = attempt;
     if (ph == PH_EXECUTE && attempt == 1) { /* the policy at the time of the intent */
         const pt_block *call = find_call(a, t);
-        k = call ? find_tool(a, call->name) : -1;
+        k = call ? pt_core_find_tool(a, call->name) : -1;
         nt.replay = k >= 0 ? a->tool_meta[k].replay : PT_REPLAY_UNSAFE;
     }
     pt_write_task(&a->cw, &nt);
@@ -295,7 +295,7 @@ static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_st
 static bool gated(pt_agent *a, task *t, const pt_block *call)
 {
     pt_str text = pt_buf_str(&t->gate_text);
-    int k = find_tool(a, call->name);
+    int k = pt_core_find_tool(a, call->name);
     t->gated = false;
     switch (t->gate) {
     case PT_GATE_DENY:
@@ -611,7 +611,7 @@ static bool execute_phase(pt_agent *a, task *t, const pt_block *call, bool abort
     if (t->recovered) {
         /* The process died after the intent: run it again only if both the
          * stored and the current policy say that is harmless. */
-        k = find_tool(a, call->name);
+        k = pt_core_find_tool(a, call->name);
         if (t->replay == PT_REPLAY_SAFE && k >= 0 && a->tool_meta[k].replay == PT_REPLAY_SAFE)
             return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, t->attempt + 1, NULL);
         return finish_cut(a, t, call, false, NULL);
