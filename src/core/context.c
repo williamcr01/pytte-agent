@@ -37,6 +37,29 @@ uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e)
     return n;
 }
 
+/* Tokens the context through cutoff takes (section 12.1): what the newest
+ * answer's request and output took, as the provider counted them, and a
+ * guess for what came after it (before any answer: the system prompt and
+ * tools too). One estimate decides compaction and max_tokens, so the two
+ * never disagree, and the TUI shows it. */
+uint64_t pt_core_estimate(const pt_agent *a, uint32_t cutoff)
+{
+    uint64_t bytes = 0, tokens = 0;
+    uint32_t i = a->nentries;
+    while (i-- > 0) {
+        const entry *e = &a->entries[i];
+        const pt_usage *u = &e->msg.usage;
+        if (e->id > cutoff || !pt_core_sent(e))
+            continue;
+        if (e->kind == ENT_ASSISTANT && !e->kept && (u->input || u->output)) { /* a copy's is old */
+            tokens = u->input + u->cache_read + u->cache_write + u->output;
+            break;
+        }
+        bytes += pt_core_sent_bytes(a, e);
+    }
+    return tokens + bytes / 3; /* generous: a guess too low overflows */
+}
+
 /* The tool results after an assistant entry with calls, in call order
  * (section 9.2): parallel calls may finish in any order, and the request
  * bytes must not depend on it. Results are the entries that follow it up

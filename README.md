@@ -76,7 +76,11 @@ command menu: `/model`, `/effort`, `/new`, `/resume`, `/status`,
 `/thinking`, `/compact`, `/usage`, `/settings`, `/help`, `/quit`. Settings are saved to
 `~/.config/pytte/config.json`.
 
-The footer shows the selected model and effort. Effort starts at `medium`;
+The footer shows the selected model, effort and context use of the model's
+window (`12k/200k`). It counts what the next request sends: the provider's
+count for the newest answer plus an estimate of what came since, so a fresh
+session already shows its system prompt, `AGENTS.md` files, skills index and
+tools. Compaction goes by the same number. Effort starts at `medium`;
 `/effort <level>` changes it for this session, and `/settings reasoning <level>`
 changes it now and saves it for future sessions. The levels are `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `off` requests disabled

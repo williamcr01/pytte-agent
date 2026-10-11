@@ -585,7 +585,8 @@ static void test_compaction(void)
 static void test_skills(void)
 {
     pty p;
-    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
+    int i;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", "--context-window", "100000", NULL};
     char path[300];
     static const char skill[] = "---\nname: garden\ndescription: reads the soil\n---\nLook at the soil.\n";
     snprintf(path, sizeof path, "%s/pytte/skills/garden", config_dir);
@@ -600,6 +601,10 @@ static void test_skills(void)
     CHECK(pt_sys_write_file(path, skill, sizeof skill - 1));
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
+    /* before any answer, the context holds the system prompt, tools and skills */
+    for (i = 0; i < 50 && (!has(&p, "/100k") || has(&p, " 0/100k")); i++)
+        pump(&p, 20); /* 0 only until the session is open */
+    CHECK(has(&p, "/100k") && !has(&p, " 0/100k"));
     keys(&p, "check $ga");
     CHECK(wait_for(&p, "▸ $garden  reads the soil", 1000));
     keys(&p, "\r"); /* picks the skill; the message goes on */

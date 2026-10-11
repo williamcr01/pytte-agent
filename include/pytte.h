@@ -310,6 +310,12 @@ pt_str pt_session_cwd(const pt_agent *a);
  * or empty. */
 pt_str pt_session_prompt(const pt_agent *a);
 
+/* About how many tokens the current epoch's context takes, as compaction
+ * counts it: the newest answer's request and output as the provider
+ * counted them, plus an estimate of what came after. Before any answer
+ * that is the system prompt, tools and skills index, and what was sent. */
+uint64_t pt_context_tokens(const pt_agent *a);
+
 /* Entries of the current epoch, in order. */
 uint32_t pt_entry_count(const pt_agent *a);
 bool pt_entry_at(const pt_agent *a, uint32_t i, pt_entry_view *out);

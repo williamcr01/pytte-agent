@@ -67,28 +67,6 @@ bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
 
 /* ---- prepare ---- */
 
-/* Tokens the context through cutoff takes (section 12.1): what the newest
- * answer's request and output took, as the provider counted them, and a
- * guess for what came after it. One estimate decides both compaction and
- * max_tokens, so the two never disagree. */
-static uint64_t estimate(pt_agent *a, uint32_t cutoff)
-{
-    uint64_t bytes = 0, tokens = 0;
-    uint32_t i = a->nentries;
-    while (i-- > 0) {
-        const entry *e = &a->entries[i];
-        const pt_usage *u = &e->msg.usage;
-        if (e->id > cutoff || !pt_core_sent(e))
-            continue;
-        if (e->kind == ENT_ASSISTANT && !e->kept && (u->input || u->output)) { /* a copy's is old */
-            tokens = u->input + u->cache_read + u->cache_write + u->output;
-            break;
-        }
-        bytes += pt_core_sent_bytes(a, e);
-    }
-    return tokens + bytes / 3; /* generous: a guess too low overflows */
-}
-
 /* Room kept free for the next answer and one round of tool results. */
 #define RESERVE 24576
 
@@ -129,7 +107,7 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     if (!pt_run_resolve(a, c->model, &target, sa) || !pt_run_credentials(a, target.provider, &cred))
         return false;
     nt.cutoff = last ? last->id : 0;
-    used = estimate(a, nt.cutoff);
+    used = pt_core_estimate(a, nt.cutoff);
     if (over_budget(a, &target, used))
         return start_compaction(a, t, nt.cutoff);
     if (!pt_core_context(a, nt.cutoff, &ctx, sa)) {

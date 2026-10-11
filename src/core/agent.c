@@ -1059,6 +1059,11 @@ pt_str pt_session_cwd(const pt_agent *a)
     return a->cwd.n ? a->cwd : a->create.cwd;
 }
 
+uint64_t pt_context_tokens(const pt_agent *a)
+{
+    return pt_core_estimate(a, UINT32_MAX);
+}
+
 pt_str pt_session_prompt(const pt_agent *a)
 {
     return a->prompt;

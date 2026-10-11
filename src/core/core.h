@@ -271,6 +271,7 @@ bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena 
 bool pt_core_sent(const entry *e); /* part of the requests */
 int pt_core_find_tool(pt_agent *a, pt_str name); /* in the current epoch; -1: none */
 uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e);
+uint64_t pt_core_estimate(const pt_agent *a, uint32_t cutoff);
 
 /* ---- run.c ---- */
 /* Advance a run task; true when it queued something. */

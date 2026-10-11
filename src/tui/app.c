@@ -978,10 +978,6 @@ static void on_ai(app *a, const pt_ai_event *ev)
     case PT_EV_DONE:
     case PT_EV_ERROR:
         live_end(a);
-        if (ev->kind == PT_EV_DONE) {
-            const pt_usage *u = &ev->msg->usage;
-            a->ctx_used = u->input + u->cache_read + u->cache_write + u->output;
-        }
         break;
     case PT_EV_TOOLCALL_END: /* shown with its result, or in the band as it runs */
         live_end(a);
@@ -1027,10 +1023,9 @@ static void on_entries(app *a)
 {
     uint32_t n = pt_entry_count(a->s.a), i;
     pt_entry_view v;
-    if (n < a->seen || (n && a->seen && pt_entry_at(a->s.a, 0, &v) && v.epoch != a->shown_epoch)) {
+    if (n < a->seen || (n && a->seen && pt_entry_at(a->s.a, 0, &v) && v.epoch != a->shown_epoch))
         a->seen = 0; /* a new epoch */
-        a->ctx_used = 0;
-    }
+    a->ctx_used = pt_context_tokens(a->s.a);
     if (n && pt_entry_at(a->s.a, 0, &v))
         a->shown_epoch = v.epoch;
     for (i = a->seen; i < n && pt_entry_at(a->s.a, i, &v); i++) {
@@ -1923,12 +1918,9 @@ static void update_model(app *a)
             if (!a->model[0])
                 snprintf(a->model, sizeof a->model, "%.*s/%.*s", (int)v.msg->provider.n, v.msg->provider.p,
                          (int)v.msg->model.n, v.msg->model.p);
-            if (!a->ctx_used) {
-                const pt_usage *u = &v.msg->usage;
-                a->ctx_used = u->input + u->cache_read + u->cache_write + u->output;
-            }
             break;
         }
+    a->ctx_used = a->open ? pt_context_tokens(a->s.a) : 0;
     a->ctx_window = 0;
     pt_arena_reset(&a->ar);
     if (a->model[0] && pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(a->model), &t, &a->ar, &why))
