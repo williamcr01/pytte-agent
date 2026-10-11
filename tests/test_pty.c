@@ -33,7 +33,7 @@ typedef struct pty {
     pt_buf scratch;
 } pty;
 
-static char state_dir[256], config_dir[256];
+static char state_dir[256], config_dir[256], self_bin[4096];
 static const char *bin;
 
 static void put(int fd, const char *p, size_t n)
@@ -99,6 +99,140 @@ static void leader(const char *slave, char *const argv[], int info)
         }
         _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 128 + WTERMSIG(st));
     }
+}
+
+static int proc_fd_probe(void)
+{
+    struct stat out, other;
+    int fd;
+    if (fstat(STDOUT_FILENO, &out) != 0)
+        return 2;
+    for (fd = 3; fd < 4096; fd++)
+        if (fcntl(fd, F_GETFD) >= 0 && fstat(fd, &other) == 0 &&
+            out.st_dev == other.st_dev && out.st_ino == other.st_ino)
+            return 1; /* an original pipe end survived exec */
+    return 0;
+}
+
+static void test_identity_zero_capacity(void)
+{
+    char host = 'h', boot = 'b';
+    int64_t pid = 0;
+    pt_sys_identity(&host, 0, &boot, 0, &pid);
+    CHECK(host == 'h' && boot == 'b');
+    CHECK(pid == (int64_t)getpid());
+    pt_sys_identity(NULL, 0, NULL, 0, NULL);
+}
+
+static void test_proc_cloexec(void)
+{
+    char err[300];
+    const char *argv[] = {self_bin, "--proc-fd-probe", NULL};
+    pt_proc *p;
+    int status = -1;
+    p = pt_proc_spawn(argv, NULL, NULL, NULL, err, sizeof err);
+    CHECK(p != NULL);
+    if (!p) {
+        fprintf(stderr, "    process spawn: %s\n", err);
+        return;
+    }
+    CHECK(pt_proc_out_fd(p) > 2);
+    CHECK(pt_proc_reap(p, true, &status));
+    CHECK(status == 0); /* the executed child must not inherit its pipe reader */
+    pt_proc_free(p);
+}
+
+typedef struct faux_probe {
+    unsigned heads, bodies, dones;
+    bool error;
+} faux_probe;
+
+static void faux_head(void *ud, int status, pt_str retry)
+{
+    faux_probe *p = (faux_probe *)ud;
+    (void)status;
+    (void)retry;
+    p->heads++;
+}
+
+static void faux_body(void *ud, const char *bytes, size_t n)
+{
+    faux_probe *p = (faux_probe *)ud;
+    (void)bytes;
+    if (n)
+        p->bodies++;
+}
+
+static void faux_done(void *ud, const char *error)
+{
+    faux_probe *p = (faux_probe *)ud;
+    p->dones++;
+    p->error = error != NULL;
+}
+
+static void test_faux_delay(void)
+{
+    pt_http_driver *d = pt_http_faux_new(PT_S(
+        "{\"chunk\":1,\"delay_ms\":1000,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}]}"));
+    pt_http_req req;
+    pt_http_sink sink;
+    faux_probe seen;
+    pt_waitfd fd;
+    void *handle;
+    int wake[2];
+    memset(&req, 0, sizeof req);
+    req.body = PT_S("{}");
+    memset(&seen, 0, sizeof seen);
+    CHECK(d != NULL);
+    if (!d)
+        return;
+    sink = (pt_http_sink){&seen, faux_head, faux_body, faux_done};
+    handle = d->start(d, &req, &sink);
+    CHECK(handle != NULL);
+    if (!handle) {
+        d->free(d);
+        return;
+    }
+    CHECK(d->pump(d, 0, NULL, 0) == 1);
+    CHECK(seen.heads == 0 && seen.bodies == 0 && seen.dones == 0);
+    if (pipe(wake) != 0) {
+        d->cancel(d, handle);
+        d->free(d);
+        CHECK(false);
+        return;
+    }
+    CHECK(write(wake[1], "w", 1) == 1);
+    fd = (pt_waitfd){wake[0], false};
+    CHECK(d->pump(d, 1000, &fd, 1) == 1 && fd.ready);
+    CHECK(seen.heads == 0 && seen.bodies == 0 && seen.dones == 0);
+    pt_sys_sleep_ms(1020);
+    CHECK(d->pump(d, 0, NULL, 0) == 1);
+    CHECK(seen.heads == 1 && seen.bodies == 1 && seen.dones == 0);
+    d->cancel(d, handle);
+    d->free(d);
+    close(wake[0]); close(wake[1]);
+}
+
+static void test_faux_cut(void)
+{
+    pt_http_driver *d;
+    pt_http_req req;
+    pt_http_sink sink;
+    faux_probe seen;
+    CHECK(pt_http_faux_new((pt_str){"", SIZE_MAX}) == NULL);
+    d = pt_http_faux_new(PT_S(
+        "{\"turns\":[{\"cut\":1,\"content\":[{\"type\":\"text\",\"text\":\"x\"}]}]}"));
+    memset(&req, 0, sizeof req);
+    req.body = PT_S("{}");
+    memset(&seen, 0, sizeof seen);
+    CHECK(d != NULL);
+    if (!d)
+        return;
+    sink = (pt_http_sink){&seen, faux_head, faux_body, faux_done};
+    CHECK(d->start(d, &req, &sink) != NULL);
+    CHECK(d->pump(d, 0, NULL, 0) == 0);
+    CHECK(seen.heads == 1 && seen.bodies == 1 && seen.dones == 1 && seen.error);
+    d->free(d);
 }
 
 static void pty_start(pty *p, int rows, int cols, const char *const *args)
@@ -929,16 +1063,24 @@ static void test_blocked_settings(void)
     free(text);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
     char tmpl[] = "/tmp/pytte-pty-XXXXXX";
     char cmd[4200], repo[4096];
     static char bin_path[4096];
     const char *dir;
+    if (argc == 2 && strcmp(argv[1], "--proc-fd-probe") == 0)
+        return proc_fd_probe();
+    if (!realpath(argv[0], self_bin))
+        return 1;
+    RUN(test_identity_zero_capacity);
+    RUN(test_proc_cloexec);
+    RUN(test_faux_delay);
+    RUN(test_faux_cut);
     bin = getenv("PYTTE_BIN") ? getenv("PYTTE_BIN") : "build/pytte";
     if (access(bin, X_OK) != 0) {
         fprintf(stderr, "test_pty: %s not built; skipped\n", bin);
-        return 0;
+        return t_done("test_pty");
     }
     if (!(dir = mkdtemp(tmpl)) || !realpath(bin, bin_path) || !getcwd(repo, sizeof repo))
         return 1;

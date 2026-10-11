@@ -3,6 +3,7 @@
  * or prompt on /dev/tty) and its whole group can be signalled. On Linux a
  * pidfd tells when the process ended even while a background child keeps
  * the pipe open. */
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 #include "drv/drv.h"
@@ -45,10 +46,18 @@ static char **make_env(const char *const unset[], const char *const add[])
 {
     size_t n = 0, k = 0, i;
     char **env;
-    for (i = 0; environ[i]; i++)
+    for (i = 0; environ[i]; i++) {
+        if (n == SIZE_MAX)
+            return NULL;
         n++;
-    for (i = 0; add && add[i]; i++)
+    }
+    for (i = 0; add && add[i]; i++) {
+        if (n == SIZE_MAX)
+            return NULL;
         n++;
+    }
+    if (n > SIZE_MAX / sizeof *env - 1)
+        return NULL;
     env = (char **)malloc((n + 1) * sizeof *env);
     if (!env)
         return NULL;
@@ -72,10 +81,21 @@ pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *co
         goto fail;
     }
     p->exitfd = -1;
+#if defined(__linux__)
+    if (pipe2(fds, O_CLOEXEC) != 0) {
+        snprintf(err, cap, "pipe: %s", strerror(errno));
+        goto fail;
+    }
+#else
     if (pipe(fds) != 0) {
         snprintf(err, cap, "pipe: %s", strerror(errno));
         goto fail;
     }
+    if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) < 0) {
+        snprintf(err, cap, "fcntl: %s", strerror(errno));
+        goto fail;
+    }
+#endif
     p->pid = fork();
     if (p->pid < 0) {
         snprintf(err, cap, "fork: %s", strerror(errno));
@@ -91,8 +111,18 @@ pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *co
         sigemptyset(&none);
         sigprocmask(SIG_SETMASK, &none, NULL);
         devnull = open("/dev/null", O_RDONLY);
-        if (devnull < 0 || dup2(devnull, 0) < 0 || dup2(fds[1], 1) < 0 || dup2(fds[1], 2) < 0)
+        if (devnull < 0 || (devnull > 2 && fcntl(devnull, F_SETFD, FD_CLOEXEC) < 0) ||
+            dup2(devnull, 0) < 0 || dup2(fds[1], 1) < 0 || dup2(fds[1], 2) < 0)
             _exit(127);
+        /* dup2 clears FD_CLOEXEC except when source and destination match. */
+        if (fcntl(0, F_SETFD, 0) < 0 || fcntl(1, F_SETFD, 0) < 0 || fcntl(2, F_SETFD, 0) < 0)
+            _exit(127);
+        if (fds[0] > 2)
+            close(fds[0]);
+        if (fds[1] > 2)
+            close(fds[1]);
+        if (devnull > 2)
+            close(devnull);
         if (cwd && chdir(cwd) != 0) {
             static const char msg[] = "pytte: cannot enter the session's directory\n";
             ssize_t w = write(2, msg, sizeof msg - 1);
@@ -104,7 +134,6 @@ pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *co
     }
     close(fds[1]);
     p->out = fds[0];
-    fcntl(p->out, F_SETFD, FD_CLOEXEC);
     fcntl(p->out, F_SETFL, fcntl(p->out, F_GETFL) | O_NONBLOCK); /* our pipe, never a terminal */
 #if defined(__linux__) && defined(SYS_pidfd_open)
     p->exitfd = (int)syscall(SYS_pidfd_open, p->pid, 0);

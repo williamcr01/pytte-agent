@@ -11,10 +11,12 @@
  * edit refuses a file that changed since, so the model never edits text
  * it has not seen. */
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #include "rt/rt_int.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +24,7 @@
 #include <unistd.h>
 
 #define CHUNK 65536
+#define READ_OUTPUT_MAX (256u * 1024u)
 #define READ_LIMIT 2000 /* lines a read shows unless it asks for more */
 #define YIELD_S 10        /* seconds a bash call waits before it goes to the background */
 #define POLL_S 10         /* seconds a bash_poll waits for the process to end */
@@ -93,7 +96,9 @@ static const char *arg_str(builtins *b, const pt_json *args, const char *key)
     return v && v->type == PT_J_STR ? pt_arena_cstr(&b->ar, pt_json_str(v, &b->ar)) : NULL;
 }
 
-/* An absolute path: relative ones are under the session's directory. */
+/* An absolute path: relative ones are under the session's directory. Paths
+ * are intentionally not confined to the session directory: the tool runner
+ * trusts the agent, and absolute paths are part of the tool's behavior. */
 static const char *resolve(builtins *b, const char *path)
 {
     pt_str cwd = pt_session_cwd(pt_rt_agent(b->rt));
@@ -159,19 +164,32 @@ static bool mkdirs(const char *path)
     return true;
 }
 
-/* Replace path atomically: a temporary file next to it, synced, renamed
- * over it. Keeps the old file's mode. */
-static bool write_atomic(const char *path, const char *p, size_t n)
+/* Replace path atomically: a unique temporary file next to it, synced,
+ * renamed over it. Keeps the old file's mode; new files honor the process
+ * umask as for open(..., 0666). */
+static bool write_atomic(const char *path, const char *p, size_t n, const struct stat *expected)
 {
     char tmp[4200];
     struct stat st;
-    mode_t mode = stat(path, &st) == 0 ? st.st_mode & 07777 : 0666;
+    bool existed = stat(path, &st) == 0;
+    mode_t mode = existed ? st.st_mode & 07777 : 0666;
     int fd, saved;
     size_t off = 0;
-    snprintf(tmp, sizeof tmp, "%s.pytte-%ld.tmp", path, (long)getpid());
-    fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode);
+    mode_t mask;
+    if (snprintf(tmp, sizeof tmp, "%s.pytte-XXXXXX", path) >= (int)sizeof tmp) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    fd = mkstemp(tmp);
     if (fd < 0)
         return false;
+    if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0)
+        goto fail;
+    if (!existed) {
+        mask = umask(0022);
+        umask(mask);
+        mode &= ~mask;
+    }
     while (off < n) {
         ssize_t w = write(fd, p + off, n - off);
         if (w < 0 && errno == EINTR)
@@ -180,13 +198,25 @@ static bool write_atomic(const char *path, const char *p, size_t n)
             goto fail;
         off += (size_t)w;
     }
-    if (fchmod(fd, mode) != 0 || fsync(fd) != 0 || close(fd) != 0) {
+    if (fchmod(fd, mode) != 0 || fsync(fd) != 0)
+        goto fail;
+    if (close(fd) != 0) {
         fd = -1;
         goto fail;
     }
+    fd = -1;
+    if (expected) {
+        struct stat current;
+        if (stat(path, &current) != 0 || current.st_size != expected->st_size ||
+            current.st_mtime != expected->st_mtime) {
+            errno = ESTALE;
+            goto fail;
+        }
+    }
+    /* A change after this check and before rename remains a small unavoidable
+     * TOCTOU window without directory-level locking. */
     if (rename(tmp, path) == 0)
         return true;
-    fd = -1;
 fail:
     saved = errno;
     if (fd >= 0)
@@ -204,11 +234,13 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
     const pt_json *args = args_of(b, fx);
     const char *rel = arg_str(b, args, "path"), *path;
     int64_t offset = pt_json_geti(args, "offset", 1), limit = pt_json_geti(args, "limit", READ_LIMIT);
+    int64_t end_line;
     uint64_t line = 1, after = 0;
-    bool start = true, binary = false;
+    bool start = true, binary = false, truncated = false;
     unsigned char hash[32];
     pt_sha256 sh;
     struct stat st;
+    char resolved[4096];
     pt_rt_out r;
     pt_buf key;
     int fd;
@@ -217,7 +249,17 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
         return;
     }
     path = resolve(b, rel);
-    if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0) {
+    if (!realpath(path, resolved)) {
+        fail(rt, fx->id, "cannot resolve", path);
+        return;
+    }
+    path = resolved;
+    if (offset < 1)
+        offset = 1;
+    if (limit < 1)
+        limit = 1;
+    end_line = limit > INT64_MAX - offset ? INT64_MAX : offset + limit;
+    if ((fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0) {
         fail(rt, fx->id, "cannot open", path);
         return;
     }
@@ -226,9 +268,9 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
         fail(rt, fx->id, "cannot stat", path);
         return;
     }
-    if (S_ISDIR(st.st_mode)) {
+    if (!S_ISREG(st.st_mode)) {
         close(fd);
-        done_text(rt, fx->id, PT_S("This is a directory; list it with bash (ls)."), true);
+        done_text(rt, fx->id, PT_S("This is not a regular file; read only regular files."), true);
         return;
     }
     pt_sha256_init(&sh);
@@ -252,15 +294,29 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
         while (p < end && !binary) {
             const char *nl = (const char *)memchr(p, '\n', (size_t)(end - p));
             const char *stop = nl ? nl + 1 : end;
-            bool shown = (int64_t)line >= offset && (int64_t)line < offset + limit;
-            if (shown) {
+            bool shown = line >= (uint64_t)offset && line < (uint64_t)end_line;
+            if (shown && b->out.n < READ_OUTPUT_MAX) {
                 if (start) {
                     char num[24];
                     int k = snprintf(num, sizeof num, "%6llu\t", (unsigned long long)line);
-                    pt_buf_put(&b->out, num, (size_t)k);
+                    size_t room = READ_OUTPUT_MAX - b->out.n;
+                    size_t take = (size_t)k < room ? (size_t)k : room;
+                    pt_buf_put(&b->out, num, take);
+                    if (take != (size_t)k)
+                        truncated = true;
                 }
-                pt_buf_put(&b->out, p, (size_t)(stop - p));
-            } else if (start && (int64_t)line >= offset + limit) {
+                if (b->out.n < READ_OUTPUT_MAX) {
+                    size_t len = (size_t)(stop - p);
+                    size_t room = READ_OUTPUT_MAX - b->out.n;
+                    size_t take = len < room ? len : room;
+                    pt_buf_put(&b->out, p, take);
+                    if (take != len)
+                        truncated = true;
+                } else if (stop > p)
+                    truncated = true;
+            } else if (shown && stop > p) {
+                truncated = true;
+            } else if (start && line >= (uint64_t)end_line) {
                 after++;
             }
             start = nl != NULL;
@@ -289,7 +345,16 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
         pt_buf_putz(&b->out, "… ");
         pt_buf_u64(&b->out, after);
         pt_buf_putz(&b->out, " more lines; read on with offset ");
-        pt_buf_i64(&b->out, offset + limit);
+        pt_buf_i64(&b->out, end_line);
+    }
+    if (b->out.n > READ_OUTPUT_MAX)
+        truncated = true;
+    if (truncated) {
+        static const char marker[] = "\n… output truncated at 256 KiB";
+        size_t m = sizeof marker - 1;
+        if (b->out.n + m > READ_OUTPUT_MAX)
+            b->out.n = READ_OUTPUT_MAX - m;
+        pt_buf_put(&b->out, marker, m);
     }
     stamp(b, &st, hash);
     pt_buf_init(&key, pt_sys_allocator());
@@ -328,7 +393,7 @@ static void t_write(void *ud, pt_rt *rt, const pt_fx *fx)
         fail(rt, fx->id, "cannot create the directories of", path);
         return;
     }
-    if (!write_atomic(path, text.p, text.n)) {
+    if (!write_atomic(path, text.p, text.n, NULL)) {
         fail(rt, fx->id, "cannot write", path);
         return;
     }
@@ -407,7 +472,8 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
     size_t n, i = 0;
     uint64_t found;
     unsigned char hash[32];
-    struct stat st;
+    struct stat st, current;
+    char resolved[4096];
     pt_rt_out r;
     pt_buf key;
     char msg[4300];
@@ -426,7 +492,22 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
         return;
     }
     path = resolve(b, rel);
-    if (!(src = pt_sys_read_file(path, &n))) {
+    if (stat(path, &st) != 0) {
+        fail(rt, fx->id, "cannot stat", path);
+        return;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        done_text(rt, fx->id, PT_S("This is not a regular file; edit only regular files."), true);
+        return;
+    }
+    /* Resolve symlink destinations once: editing replaces the target, not
+     * the link itself. */
+    if (!realpath(path, resolved)) {
+        fail(rt, fx->id, "cannot resolve", path);
+        return;
+    }
+    path = resolved;
+    if (!(src = pt_sys_read_regular_file(path, &n))) {
         fail(rt, fx->id, "cannot read", path);
         return;
     }
@@ -464,7 +545,11 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
         done_text(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
-    if (!write_atomic(path, b->out.p, b->out.n) || stat(path, &st) != 0) {
+    if (stat(path, &current) != 0 || current.st_size != st.st_size || current.st_mtime != st.st_mtime) {
+        done_text(rt, fx->id, PT_S("The file was modified while editing. Read it again, then edit it."), true);
+        return;
+    }
+    if (!write_atomic(path, b->out.p, b->out.n, &st) || stat(path, &st) != 0) {
         fail(rt, fx->id, "cannot write", path);
         return;
     }
@@ -676,6 +761,8 @@ static void stop_job(job *j)
     if (j->timer)
         pt_rt_timer_cancel(rt, j->timer);
     j->timer = pt_rt_timer(rt, pt_rt_now(rt) + 2000, on_kill, j);
+    if (!j->timer)
+        pt_proc_stop(j->p, true); /* Preserve the kill guarantee on timer OOM. */
 }
 
 static void on_timeout(void *ud, pt_rt *rt)
@@ -767,6 +854,13 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     if (timeout > 0) {
         j->timeout_s = timeout > 86400 ? 86400 : (uint32_t)timeout;
         j->timer = pt_rt_timer(rt, j->started + (int64_t)j->timeout_s * 1000, on_timeout, j);
+        if (!j->timer) {
+            j->timed_out = true;
+            j->stopped = true;
+            pt_proc_stop(j->p, true);
+            job_end(j);
+            return;
+        }
     }
     if (yield > 0 && background_count(b) < BACKGROUND_MAX)
         j->yield = pt_rt_timer(rt, j->started + (yield > 86400 ? 86400 : yield) * 1000, on_yield, j);

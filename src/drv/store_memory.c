@@ -3,6 +3,7 @@
  * append on purpose to simulate a crash at that point. */
 #include "drv/drv.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -37,6 +38,23 @@ static int fail(pt_store *s, const char *msg)
     return -1;
 }
 
+/* Grow one of the uint32-indexed arrays without wrapping either its
+ * element count or allocation size. */
+static bool grow_capacity(uint32_t old, size_t elem_size, uint32_t *next)
+{
+    uint32_t cap;
+    if (!old)
+        cap = 8;
+    else if (old > UINT32_MAX / 2)
+        return false;
+    else
+        cap = old * 2;
+    if ((uintmax_t)cap > (uintmax_t)((size_t)-1) / elem_size)
+        return false;
+    *next = cap;
+    return true;
+}
+
 static int m_size(pt_store *s, uint64_t *out)
 {
     *out = ((mem_store *)s)->log.n;
@@ -48,14 +66,15 @@ static int m_append(pt_store *vs, const void *p, size_t n, bool sync)
     mem_store *s = (mem_store *)vs;
     (void)sync;
     if (s->fail_in && --s->fail_in == 0) {
-        size_t keep = s->keep < 0 || (size_t)s->keep > n ? n : (size_t)s->keep;
+        size_t keep = s->keep < 0 || (uintmax_t)s->keep > (uintmax_t)n ? n : (size_t)s->keep;
         pt_buf_put(&s->log, p, keep);
         return fail(vs, "simulated crash");
     }
     pt_buf_put(&s->log, p, n);
     if (s->log.oom)
         return fail(vs, "out of memory");
-    s->appends++;
+    if (s->appends != UINT32_MAX)
+        s->appends++;
     return 0;
 }
 
@@ -64,7 +83,7 @@ static int read_at(pt_str all, uint64_t off, void *p, size_t cap, size_t *got)
     size_t n = off < all.n ? all.n - (size_t)off : 0;
     *got = n < cap ? n : cap;
     if (*got)
-        memcpy(p, all.p + off, *got);
+        memcpy(p, all.p + (size_t)off, *got);
     return 0;
 }
 
@@ -118,8 +137,13 @@ static int m_blob_commit(pt_store *vs, void *h, const char *hex)
         return find_blob(s, hex) ? 0 : fail(vs, "bad blob name");
     }
     if (s->nblobs == s->bcap) {
-        uint32_t ncap = s->bcap ? s->bcap * 2 : 8;
-        blob *n = (blob *)realloc(s->blobs, ncap * sizeof *n);
+        uint32_t ncap;
+        blob *n;
+        if (!grow_capacity(s->bcap, sizeof *n, &ncap)) {
+            m_blob_abort(vs, h);
+            return fail(vs, "out of memory");
+        }
+        n = (blob *)realloc(s->blobs, (size_t)ncap * sizeof *n);
         if (!n) {
             m_blob_abort(vs, h);
             return fail(vs, "out of memory");
@@ -165,8 +189,11 @@ static int m_live_put(pt_store *vs, uint32_t task, const void *p, size_t n)
     live_file *f = find_live(s, task);
     if (!f) {
         if (s->nlive == s->cap) {
-            uint32_t ncap = s->cap ? s->cap * 2 : 8;
-            live_file *nl = (live_file *)realloc(s->live, ncap * sizeof *nl);
+            uint32_t ncap;
+            live_file *nl;
+            if (!grow_capacity(s->cap, sizeof *nl, &ncap))
+                return fail(vs, "out of memory");
+            nl = (live_file *)realloc(s->live, (size_t)ncap * sizeof *nl);
             if (!nl)
                 return fail(vs, "out of memory");
             s->live = nl;
@@ -176,8 +203,17 @@ static int m_live_put(pt_store *vs, uint32_t task, const void *p, size_t n)
         f->task = task;
         pt_buf_init(&f->b, pt_sys_allocator());
     }
-    pt_buf_reset(&f->b);
-    pt_buf_put(&f->b, p, n);
+    {
+        size_t old_n = f->b.n;
+        f->b.n = 0;
+        f->b.oom = false;
+        pt_buf_put(&f->b, p, n);
+        if (f->b.oom) {
+            f->b.n = old_n; /* reserve failed before touching the old bytes */
+            f->b.oom = false;
+            return fail(vs, "out of memory");
+        }
+    }
     return 0;
 }
 

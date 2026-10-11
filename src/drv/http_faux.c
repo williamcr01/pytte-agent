@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "drv/drv.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,7 +15,8 @@ typedef struct fx {
     size_t n, at;
     int status;
     uint32_t chunk, delay_ms;
-    bool head_sent;
+    int64_t next_at_ms;
+    bool cut, head_sent;
 } fx;
 
 typedef struct faux_drv {
@@ -44,12 +46,19 @@ static void *start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sin
     }
     x->sink = *sink;
     x->status = r.status;
-    x->n = r.cut >= 0 && (size_t)r.cut < r.body.n ? (size_t)r.cut : r.body.n;
+    x->cut = r.cut >= 0 && (uintmax_t)r.cut < (uintmax_t)r.body.n;
+    x->n = x->cut ? (size_t)r.cut : r.body.n;
+    if (x->n == SIZE_MAX) {
+        pt_arena_free(&a);
+        free(x);
+        return NULL;
+    }
     x->body = (char *)malloc(x->n + 1);
     if (x->body && x->n)
         memcpy(x->body, r.body.p, x->n);
     x->chunk = r.chunk;
     x->delay_ms = r.delay_ms;
+    x->next_at_ms = pt_sys_now_ms() + (int64_t)x->delay_ms;
     pt_arena_free(&a);
     if (!x->body) {
         free(x);
@@ -82,18 +91,37 @@ static void cancel(pt_http_driver *vd, void *h)
 static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
     faux_drv *d = (faux_drv *)vd;
-    fx *x = d->list, *next;
-    int active = 0;
-    if (nfds) {
-        int t = timeout_ms;
-        if (x && (t < 0 || (int)x->delay_ms < t))
-            t = (int)x->delay_ms;
-        pt_sys_wait(fds, nfds, t);
-    } else if (x && x->delay_ms)
-        pt_sys_sleep_ms(x->delay_ms);
-    for (; x; x = next) {
+    fx *x, *next;
+    int64_t now = pt_sys_now_ms(), due = INT64_MAX;
+    int active = 0, wait_ms = timeout_ms;
+    for (x = d->list; x; x = x->next)
+        if (x->next_at_ms < due)
+            due = x->next_at_ms;
+    if (nfds || d->list) {
+        if (due != INT64_MAX) {
+            int64_t left = due - now;
+            if (left < 0)
+                left = 0;
+            if (left > INT_MAX)
+                left = INT_MAX;
+            if (wait_ms < 0 || left < wait_ms)
+                wait_ms = (int)left;
+        }
+        if (nfds) {
+            if (pt_sys_wait(fds, nfds, wait_ms) < 0)
+                return -1;
+        } else if (wait_ms > 0) {
+            pt_sys_sleep_ms((uint32_t)wait_ms);
+        }
+    }
+    now = pt_sys_now_ms();
+    for (x = d->list; x; x = next) {
         size_t step;
         next = x->next;
+        if (x->next_at_ms > now) {
+            active++;
+            continue;
+        }
         if (!x->head_sent) {
             x->head_sent = true;
             if (x->sink.head)
@@ -105,9 +133,11 @@ static int pump(pt_http_driver *vd, int timeout_ms, pt_waitfd *fds, unsigned nfd
         x->at += step;
         if (x->at >= x->n) {
             if (x->sink.done)
-                x->sink.done(x->sink.ud, NULL);
+                x->sink.done(x->sink.ud,
+                             x->cut ? "faux response cut off" : NULL);
             unlink_fx(d, x);
         } else {
+            x->next_at_ms = now + (int64_t)x->delay_ms;
             active++;
         }
     }
@@ -125,7 +155,10 @@ static void drv_free(pt_http_driver *vd)
 
 pt_http_driver *pt_http_faux_new(pt_str script)
 {
-    faux_drv *d = (faux_drv *)calloc(1, sizeof *d);
+    faux_drv *d;
+    if (script.n == SIZE_MAX)
+        return NULL;
+    d = (faux_drv *)calloc(1, sizeof *d);
     if (!d)
         return NULL;
     d->script = (char *)malloc(script.n + 1);
@@ -133,7 +166,8 @@ pt_http_driver *pt_http_faux_new(pt_str script)
         free(d);
         return NULL;
     }
-    memcpy(d->script, script.p, script.n);
+    if (script.n)
+        memcpy(d->script, script.p, script.n);
     d->script[script.n] = 0;
     d->script_n = script.n;
     d->vt.start = start;

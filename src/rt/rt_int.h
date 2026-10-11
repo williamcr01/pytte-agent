@@ -32,6 +32,7 @@ typedef struct rt_timer {
 
 typedef struct rt_watch {
     int fd;
+    uint64_t generation;
     pt_rt_fn fn;
     void *ud;
 } rt_watch;
@@ -45,6 +46,8 @@ typedef struct rt_call {
     /* Output past OUT_CAP also goes, whole, to a blob (section 12.2). */
     void *blob;
     bool nospill; /* the store keeps no blobs, or writing one failed */
+    bool output_oom; /* head/tail capture was incomplete */
+    bool cancel_requested;
     pt_sha256 sha;
 } rt_call;
 
@@ -75,10 +78,11 @@ struct pt_rt {
     uint32_t ntimers, tmcap, next_timer;
     rt_watch *watches;
     uint32_t nwatches, wcap;
+    uint64_t watch_generation;
     pt_perm_mode perm;
     rt_rule *rules;
     uint32_t nrules, rucap;
-    bool closing;
+    bool closing, free_waiting;
     void *builtin; /* tools_builtin.c's state */
     void (*builtin_free)(void *ud);
     /* The agent is idle: true when it submitted something (a note that

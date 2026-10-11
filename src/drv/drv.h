@@ -14,6 +14,8 @@ void pt_sys_sleep_ms(uint32_t ms);
 const char *pt_sys_env(void *ud, const char *name);
 /* Whole file, NUL-terminated, malloc'd. NULL on error (errno set). */
 char *pt_sys_read_file(const char *path, size_t *n);
+/* Like pt_sys_read_file, but rejects non-regular files without blocking. */
+char *pt_sys_read_regular_file(const char *path, size_t *n);
 bool pt_sys_write_file(const char *path, const void *p, size_t n);
 /* Extra file descriptors to wake on while waiting (stdin, a signal pipe):
  * ready is set when fd can be read without blocking. */
@@ -26,7 +28,8 @@ typedef struct pt_waitfd {
 int pt_sys_wait(pt_waitfd *fds, unsigned n, int timeout_ms);
 /* Random bytes from the OS. ud is unused (fits pt_opts.random). */
 void pt_sys_random(void *ud, void *out, size_t n);
-/* Hostname, boot ID (empty when unknown) and pid, for claim records. */
+/* Hostname, boot ID (empty when unknown) and pid, for claim records.
+ * A zero buffer capacity means no output is written to that buffer. */
 void pt_sys_identity(char *host, size_t hcap, char *boot, size_t bcap, int64_t *pid);
 
 /* One reusable blocking-I/O worker. start borrows fn/ud and their reachable

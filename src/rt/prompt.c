@@ -5,10 +5,13 @@
 #include "rt/rt_int.h"
 
 #include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 /* Where prompt files and skills are looked up, in order: a later root wins. */
 enum { R_HOME, R_CONFIG, R_CWD };
@@ -303,6 +306,41 @@ typedef struct agents_file {
     size_t n, keep;
 } agents_file;
 
+/* Read only enough to enforce the total prompt cap. The extra byte lets the
+ * caller detect truncation without loading an unbounded instruction file. */
+static char *read_bounded(const char *path, size_t cap, size_t *n)
+{
+    char *p = (char *)malloc(cap + 1);
+    size_t used = 0;
+    int fd;
+    if (!p)
+        return NULL;
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) {
+        free(p);
+        return NULL;
+    }
+    {
+        struct stat st;
+        if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            close(fd);
+            free(p);
+            return NULL;
+        }
+    }
+    while (used < cap + 1) {
+        ssize_t got = read(fd, p + used, cap + 1 - used);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        used += (size_t)got;
+    }
+    close(fd);
+    *n = used;
+    return p;
+}
+
 /* dir's AGENTS.md, else its CLAUDE.md. */
 static bool read_agents(agents_file *f, const char *dir, size_t dn)
 {
@@ -310,7 +348,7 @@ static bool read_agents(agents_file *f, const char *dir, size_t dn)
     size_t i;
     for (i = 0; i < 2; i++) {
         int k = snprintf(f->path, sizeof f->path, "%.*s/%s", (int)dn, dir, names[i]);
-        if (k > 0 && (size_t)k < sizeof f->path && (f->text = pt_sys_read_file(f->path, &f->n)))
+        if (k > 0 && (size_t)k < sizeof f->path && (f->text = read_bounded(f->path, AGENTS_CAP, &f->n)))
             return true;
     }
     return false;
