@@ -1,0 +1,32 @@
+{
+  "turns": [
+    {
+      "content": [
+        {"type": "text", "text": "Looking."},
+        {"type": "tool_call", "name": "bash", "args": {"command": "echo 31"}},
+        {"type": "tool_call", "name": "bash", "args": {"command": "echo started; sleep 1; echo finished"}},
+        {"type": "tool_call", "name": "bash", "args": {"command": "echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "write", "args": {"path": "build/test/render.c", "content": "int up = cur;\nint x;\n"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "read", "args": {"path": "build/test/render.c"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "edit", "args": {"path": "build/test/render.c", "old": "int up = cur;", "new": "int up = b->cur;"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "Fixed."}
+      ]
+    }
+  ]
+}
