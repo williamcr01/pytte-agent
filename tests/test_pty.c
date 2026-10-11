@@ -581,6 +581,50 @@ static void test_compaction(void)
     pty_free(&p);
 }
 
+/* Skills: the $ menu, /skill: in the slash menu, a skill shown by name. */
+static void test_skills(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
+    char path[300];
+    static const char skill[] = "---\nname: garden\ndescription: reads the soil\n---\nLook at the soil.\n";
+    snprintf(path, sizeof path, "%s/pytte/skills/garden", config_dir);
+    CHECK(mkdir(config_dir, 0700) == 0 || errno == EEXIST);
+    snprintf(path, sizeof path, "%s/pytte", config_dir);
+    CHECK(mkdir(path, 0700) == 0 || errno == EEXIST);
+    snprintf(path, sizeof path, "%s/pytte/skills", config_dir);
+    CHECK(mkdir(path, 0700) == 0 || errno == EEXIST);
+    snprintf(path, sizeof path, "%s/pytte/skills/garden", config_dir);
+    CHECK(mkdir(path, 0700) == 0 || errno == EEXIST);
+    snprintf(path, sizeof path, "%s/pytte/skills/garden/SKILL.md", config_dir);
+    CHECK(pt_sys_write_file(path, skill, sizeof skill - 1));
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "check $ga");
+    CHECK(wait_for(&p, "▸ $garden  reads the soil", 1000));
+    keys(&p, "\r"); /* picks the skill; the message goes on */
+    CHECK(wait_for(&p, "┃ check $garden \n", 1000));
+    keys(&p, "now\r");
+    CHECK(wait_for(&p, "┃ skill garden\n┃ check $garden now", 3000));
+    CHECK(wait_for(&p, "Hello from the faux", 3000));
+    CHECK(!has(&p, "Look at the soil")); /* the instructions are the model's */
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "/sk");
+    CHECK(wait_for(&p, "▸ /skill:garden  reads the soil", 1000));
+    keys(&p, "\t");
+    CHECK(wait_for(&p, "┃ /skill:garden \n", 1000));
+    keys(&p, "go\r");
+    CHECK(wait_for(&p, "┃ skill garden\n┃ go", 3000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "/skill:nope x\r");
+    CHECK(wait_for(&p, "no skill named nope", 1000));
+    keys(&p, "/settings skills off\r");
+    CHECK(wait_for(&p, "skills: off", 1000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+}
+
 /* The slash menu, /model, /effort, /thinking (saved), /status, /help. */
 static void test_commands(void)
 {
@@ -823,6 +867,7 @@ int main(void)
     snprintf(config_dir, sizeof config_dir, "%s/config", dir);
     setenv("XDG_STATE_HOME", state_dir, 1);
     setenv("XDG_CONFIG_HOME", config_dir, 1);
+    setenv("HOME", dir, 1); /* none of the user's ~/.agents skills */
     setenv("TERM", "xterm-256color", 1);
     setenv("LANG", "C.UTF-8", 1);
     unsetenv("LC_ALL");
@@ -839,6 +884,7 @@ int main(void)
     RUN(test_compaction);
     RUN(test_resize_while_streaming);
     RUN(test_commands);
+    RUN(test_skills);
     RUN(test_history_pager_draft);
     RUN(test_sigterm);
     RUN(test_early_input);

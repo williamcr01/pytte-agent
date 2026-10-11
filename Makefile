@@ -34,7 +34,7 @@ CORE_SRC := $(wildcard src/core/*.c)
 LIB_SRC  := $(BASE_SRC) $(AI_SRC) $(CORE_SRC)
 # Host parts.
 DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/drv/store_memory.c src/drv/worker_posix.c src/drv/proc_posix.c
-RT_SRC   := src/rt/rt.c src/rt/tools.c src/rt/tools_builtin.c
+RT_SRC   := src/rt/rt.c src/rt/tools.c src/rt/tools_builtin.c src/rt/prompt.c
 SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
 # The TUI's parts; app.c (the loop) only goes into pytte.

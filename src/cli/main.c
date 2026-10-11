@@ -228,6 +228,12 @@ static void apply_config(opts *o, cli_config *cfg, bool create)
                 cfg->src[CFG_PERMS]);
         exit(1);
     }
+    if (strcmp(cfg->val[CFG_SKILLS], "on") != 0 && strcmp(cfg->val[CFG_SKILLS], "off") != 0) {
+        fprintf(stderr, "pytte: skills.auto is on or off, not %s (from %s)\n", cfg->val[CFG_SKILLS],
+                cfg->src[CFG_SKILLS]);
+        exit(1);
+    }
+    o->c.manual_skills = strcmp(cfg->val[CFG_SKILLS], "off") == 0;
     if (o->compact_flag)
         cli_config_set(cfg, CFG_COMPACT_MODEL, o->c.compact_model, "flag");
     else if (cfg->val[CFG_COMPACT_MODEL][0])
@@ -443,10 +449,26 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
     }
     if (prompt.n) {
         pt_input in;
+        pt_buf text;
+        char in_dir[4200];
+        pt_buf_init(&text, pt_sys_allocator());
         memset(&in, 0, sizeof in);
         in.text = prompt;
+        switch (pt_rt_expand_skills(s.rt, prompt, &text, err, sizeof err)) {
+        case -1:
+            fprintf(stderr, "pytte: %s\n", err);
+            snprintf(in_dir, sizeof in_dir, "%s", s.dir);
+            cli_session_close(&s);
+            if (!id) /* new, and nothing in it */
+                cli_session_discard(in_dir);
+            return 1;
+        case 1:
+            in.text = pt_buf_str(&text);
+            break;
+        }
         if (!pt_submit(s.a, &in))
             die(pt_error(s.a), NULL);
+        pt_buf_free(&text);
     }
     if (o->out == OUT_TEXT)
         fprintf(stderr, "%ssession %s%s\n", u.tty_err ? "\x1b[2m" : "", s.id, u.tty_err ? "\x1b[0m" : "");

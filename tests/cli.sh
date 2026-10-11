@@ -96,6 +96,55 @@ if command -v jq >/dev/null; then
     check "a compaction lists the files read and modified" sh -c '"$1" log --json | jq -se "map(select(.kind == \"epoch\")) | .[0].data.files == {\"read\": [\"$2/big.txt\"], \"modified\": [\"$2/notes.txt\"]}" >/dev/null' _ "$pytte" "$d"
 fi
 
+# ---- prompt files and skills ----
+if command -v jq >/dev/null; then
+    pa=$(cd "$(dirname "$pytte")" && pwd)/$(basename "$pytte")
+    hello=$(pwd)/tests/faux/hello.json
+    old=$(pwd)/tests/faux/old_output.json
+    p=$XDG_STATE_HOME/project
+    u=$XDG_CONFIG_HOME/pytte
+    skill() { # dir name description [extra frontmatter]
+        mkdir -p "$1/skills/$2"
+        printf -- '---\nname: %s\ndescription: %s\n%b---\n%s body\n' "$2" "$3" "${4:-}" "$2" >"$1/skills/$2/SKILL.md"
+    }
+    run() { (cd "$p" && HOME=$XDG_STATE_HOME "$pa" -p "$@" >/dev/null 2>&1); } # no ~/.agents
+    mkdir -p "$p/.pytte" "$u"
+    echo "user system" >"$u/SYSTEM.md"
+    echo "project system" >"$p/.pytte/SYSTEM.md"
+    echo "user append" >"$u/APPEND_SYSTEM.md"
+    skill "$u" shared "from the user"
+    skill "$u" mine "only the user's"
+    skill "$p/.agents" shared "from the project"
+    skill "$p/.pytte" deploy "ships it" "disable-model-invocation: true\n"
+    epoch() { (cd "$p" && "$pa" log --json | jq -se "map(select(.kind == \"epoch\")) | .[$1].data | $2" >/dev/null); }
+    user() { (cd "$p" && "$pa" log --json | jq -se "map(select(.kind == \"user\")) | .[-1].data.content | $1" >/dev/null); }
+    run -m faux/faux --script "$hello" --append-system-prompt "flag append" hi
+    check "the project's SYSTEM.md replaces the user's, then the appends" \
+        epoch 0 '.system | startswith("project system\n\nuser append\n\nflag append\n\n# Skills")'
+    check "...the project's skill wins, and manual ones are not listed" \
+        epoch 0 '.skills | map(.name + ": " + .description) == ["mine: only the user'"'"'s", "shared: from the project"]'
+    run -m faux/faux --script "$hello" 'use $deploy, then $shared. $5 is $nope'
+    check '$name puts the skills before the message' \
+        user 'startswith("<skill name=\"deploy\" path=\"'"$p"'/.pytte/skills/deploy/SKILL.md\">\ndeploy body\n</skill>\n\n<skill name=\"shared\"") and endswith("</skill>\n\nuse $deploy, then $shared. $5 is $nope")'
+    run -m faux/faux --script "$hello" '/skill:mine  do it'
+    check "/skill:name puts the skill before the rest" user 'test("^<skill name=\"mine\"[^>]*>\nmine body\n</skill>\n\ndo it$")'
+    n=$(find "$XDG_STATE_HOME/pytte/sessions" -mindepth 1 -maxdepth 1 | wc -l)
+    run -m faux/faux --script "$hello" '/skill:nope x'
+    check "an unknown /skill: exits with 1" [ $? -eq 1 ]
+    check "...and leaves no session" [ "$(find "$XDG_STATE_HOME/pytte/sessions" -mindepth 1 -maxdepth 1 | wc -l)" -eq "$n" ]
+    printf '{"skills": {"auto": false}}\n' >"$u/config.json"
+    run -m faux/faux --script "$hello" hi
+    check "skills.auto off lists no skills" epoch 0 '(.skills == []) and (.system | contains("# Skills") | not)'
+    rm "$u/config.json"
+    PYTTE_PERMISSION_MODE=auto run -m faux/faux --append-system-prompt "flag append" --script "$old" count
+    echo "changed append" >"$p/.pytte/APPEND_SYSTEM.md"
+    skill "$p/.pytte" fresh "added later"
+    PYTTE_PERMISSION_MODE=auto run -c --context-window 8000 --script "$old" "page it"
+    check "a compaction reads the prompt files and skills again, keeping the flags" \
+        epoch -1 '(.n == 2) and (.system | startswith("project system\n\nchanged append\n\nflag append")) and (.skills | map(.name) | index("fresh"))'
+    rm -rf "$p" "$u/SYSTEM.md" "$u/APPEND_SYSTEM.md" "$u/skills"
+fi
+
 printf '%s' '{"turns": [[{"status": 529}, {"status": 400, "body": {"message": "bad request"}}]]}' \
     >"$XDG_STATE_HOME/fail.json"
 "$pytte" -p -m faux/faux --compact-model nope/none x >/dev/null 2>&1

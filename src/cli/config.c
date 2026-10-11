@@ -13,8 +13,17 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-static const char *const keys[CFG_N] = {"model",     "reasoning",        "tui.thinking",    "tui.symbols",
-                                        "tui.pager", "permissions.mode", "compaction.model"};
+static const char *const keys[CFG_N] = {"model",     "reasoning",        "tui.thinking",     "tui.symbols",
+                                        "tui.pager", "permissions.mode", "compaction.model", "skills.auto"};
+
+void cli_config_dir(char *out, size_t cap)
+{
+    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME");
+    if (xdg && *xdg)
+        snprintf(out, cap, "%s/pytte", xdg);
+    else
+        snprintf(out, cap, "%s/.config/pytte", home ? home : ".");
+}
 
 const char *cli_config_key(int k)
 {
@@ -71,7 +80,9 @@ static void load_file(cli_config *c, const char *path, const char *src, char *wa
     } else {
         for (k = 0; k < CFG_N; k++) {
             const pt_json *v = lookup(j, keys[k]);
-            if (v && pt_json_is(v, PT_J_STR)) {
+            if (pt_json_is(v, PT_J_TRUE) || pt_json_is(v, PT_J_FALSE)) { /* "skills.auto": false */
+                cli_config_set(c, k, pt_json_is(v, PT_J_TRUE) ? "on" : "off", src);
+            } else if (v && pt_json_is(v, PT_J_STR)) {
                 pt_str s = pt_json_str(v, &ar);
                 if (!memchr(s.p, 0, s.n) && s.n < sizeof c->val[k]) {
                     snprintf(c->val[k], sizeof c->val[k], "%.*s", (int)s.n, s.p);
@@ -86,7 +97,8 @@ static void load_file(cli_config *c, const char *path, const char *src, char *wa
 
 void cli_config_load(cli_config *c, char *warn, size_t cap)
 {
-    const char *xdg = getenv("XDG_CONFIG_HOME"), *home = getenv("HOME"), *e;
+    const char *e;
+    char dir[4000];
     int k;
     memset(c, 0, sizeof *c);
     warn[0] = 0;
@@ -96,12 +108,11 @@ void cli_config_load(cli_config *c, char *warn, size_t cap)
     cli_config_set(c, CFG_THINKING, "collapsed", "default");
     cli_config_set(c, CFG_SYMBOLS, "auto", "default");
     cli_config_set(c, CFG_PERMS, "ask", "default");
+    cli_config_set(c, CFG_SKILLS, "on", "default");
     e = getenv("PAGER");
     cli_config_set(c, CFG_PAGER, e && *e ? e : "less -R", "default");
-    if (xdg && *xdg)
-        snprintf(c->user_path, sizeof c->user_path, "%s/pytte/config.json", xdg);
-    else
-        snprintf(c->user_path, sizeof c->user_path, "%s/.config/pytte/config.json", home ? home : ".");
+    cli_config_dir(dir, sizeof dir);
+    snprintf(c->user_path, sizeof c->user_path, "%s/config.json", dir);
     load_file(c, c->user_path, "user", warn, cap);
     load_file(c, ".pytte/config.json", "project", warn, cap);
     if ((e = getenv("PYTTE_MODEL")) && *e)

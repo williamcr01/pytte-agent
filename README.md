@@ -4,7 +4,7 @@ A tiny, durable, embeddable coding agent in C. The goal is an agent that can
 run on almost anything (a laptop, a router, a microcontroller, a browser) and
 survive being killed at any point.
 
-Status: **M4, long sessions.** The AI layer (`libpytte-ai`) talks to Anthropic,
+Status: **M5 under way: prompt files and skills.** The AI layer (`libpytte-ai`) talks to Anthropic,
 OpenAI and OpenRouter. The core (`libpytte`) commits every step to a session
 log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
@@ -98,6 +98,17 @@ East Asian ambiguous characters wide, `PYTTE_REFLOW=0/1` if pytte guesses
 wrong whether the terminal rewraps lines on resize, `PYTTE_ASCII=1` for
 ASCII symbols, `NO_COLOR`. `PYTTE_TUI_TRACE=<file>` records every byte read
 and written, for replaying a display bug.
+
+Prompt files and skills: `SYSTEM.md` replaces the built-in system prompt and
+`APPEND_SYSTEM.md` adds to it; each is read from `<project>/.pytte/`, else
+`~/.config/pytte/`. Skills are `skills/<name>/SKILL.md` (frontmatter `name`
+and `description`) in `~/.agents/`, `~/.config/pytte/`, `<project>/.agents/`
+or `<project>/.pytte/`; a project skill replaces a user skill of the same
+name. The model sees each skill's name, description and path, and reads the
+file when a task matches (`skills.auto` off, or `/settings skills off`, stops
+that). `$name` anywhere in a message, or `/skill:name ...`, sends the skill's
+instructions with it; typing `$` lists the skills. The files are read when a
+session starts and again at each compaction.
 
 Tools: `bash` runs a command line in its own process group (stdin empty,
 stdout and stderr together, an optional timeout). `read` shows a file with

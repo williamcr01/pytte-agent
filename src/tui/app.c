@@ -62,17 +62,23 @@ static const char *const levels[] = {"off", "minimal", "low", "medium", "high", 
 static const char *const th_names[] = {"collapsed", "full", "hidden"};
 static const char *const sym_names[] = {"auto", "unicode", "ascii"};
 static const char *const perm_names[] = {"ask", "auto", "read-only"};
-/* the settings menu: config index and short name */
+static const char *const on_off[] = {"on", "off"};
+#define VALUES(v) v, (int)(sizeof v / sizeof v[0])
+/* the settings menu: config index, short name, and the values to cycle
+ * through (none: edited as a command) */
 static const struct {
     int k;
     const char *name;
-} settings[] = {{CFG_THINKING, "thinking"},
-                {CFG_SYMBOLS, "symbols"},
-                {CFG_MODEL, "model"},
-                {CFG_REASONING, "reasoning"},
-                {CFG_PAGER, "pager"},
-                {CFG_PERMS, "permissions"},
-                {CFG_COMPACT_MODEL, "compact-model"}};
+    const char *const *vals;
+    int nv;
+} settings[] = {{CFG_THINKING, "thinking", VALUES(th_names)},
+                {CFG_SYMBOLS, "symbols", VALUES(sym_names)},
+                {CFG_MODEL, "model", NULL, 0},
+                {CFG_REASONING, "reasoning", VALUES(levels)},
+                {CFG_PAGER, "pager", NULL, 0},
+                {CFG_PERMS, "permissions", VALUES(perm_names)},
+                {CFG_COMPACT_MODEL, "compact-model", NULL, 0},
+                {CFG_SKILLS, "skills", VALUES(on_off)}};
 #define NSETTINGS (sizeof settings / sizeof settings[0])
 
 typedef struct item {
@@ -126,6 +132,7 @@ typedef struct app {
     pt_buf pending_history, command;
     session_list *sessions;
     bool sessions_menu;
+    bool skills_menu; /* the menu lists skills (read when it opens) */
     config_job *saving;
     bool pager_pending;
     char model[256];     /* shown */
@@ -839,8 +846,15 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
         if (full && v->files.n)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->files, 0);
     } else if (strcmp(v->kind, "user") == 0) {
+        pt_str text = m->text, name;
+        char line[120];
         out_blank(out);
-        out_rail(a, out, a->sy->rail, TUI_DIM, TUI_BOLD, m->text, 0);
+        while (pt_rt_skill_block(&text, &name)) { /* a skill's instructions: just its name */
+            snprintf(line, sizeof line, "skill %.*s", (int)(name.n > 64 ? 64 : name.n), name.p);
+            out_rail(a, out, a->sy->rail, TUI_DIM, TUI_DIM, pt_strz(line), 0);
+        }
+        if (text.n)
+            out_rail(a, out, a->sy->rail, TUI_DIM, TUI_BOLD, text, 0);
     } else if (strcmp(v->kind, "assistant") == 0) {
         bool any = false;
         out_blank(out);
@@ -1139,6 +1153,17 @@ static void on_event(void *ud, const pt_event *ev)
 
 /* ---- the band ---- */
 
+static int find_setting(pt_str name)
+{
+    size_t i;
+    if (pt_str_eqz(name, "effort"))
+        name = PT_S("reasoning");
+    for (i = 0; i < NSETTINGS; i++)
+        if (pt_str_eqz(name, settings[i].name) || pt_str_eqz(name, cli_config_key(settings[i].k)))
+            return (int)i;
+    return -1;
+}
+
 static bool menu_takes_arg(pt_str cmd)
 {
     return pt_str_eqz(cmd, "model") || pt_str_eqz(cmd, "effort") || pt_str_eqz(cmd, "thinking") ||
@@ -1175,6 +1200,34 @@ static void add_models(app *a, pt_str q)
         if (n > 0 && (size_t)n < sizeof ref && pt_str_icontains(pt_strz(ref), q))
             add_item(a, ref, (size_t)n, cat->models[i].name);
     }
+}
+
+/* Skills whose invocation (lead and name: "$name", "skill:name") starts
+ * with q. */
+static void add_skills(app *a, const char *lead, pt_str q, bool rescan)
+{
+    uint32_t i, n = 0;
+    const pt_rt_skill *sk = a->open ? pt_rt_skills(a->s.rt, rescan, &n) : NULL;
+    char label[80];
+    for (i = 0; i < n; i++) {
+        int ln = snprintf(label, sizeof label, "%s%.*s", lead, (int)sk[i].name.n, sk[i].name.p);
+        if (ln > 0 && (size_t)ln < sizeof label && pt_str_starts(pt_strz(label), q)) {
+            pt_buf_reset(&a->tmp);
+            pt_buf_puts(&a->tmp, sk[i].description);
+            pt_buf_putc(&a->tmp, 0);
+            add_item(a, label, (size_t)ln, a->tmp.p);
+        }
+    }
+    a->skills_menu = true;
+}
+
+/* The word being typed: after the last space or newline. */
+static pt_str last_word(pt_str d)
+{
+    size_t at = d.n;
+    while (at && d.p[at - 1] != ' ' && d.p[at - 1] != '\n' && d.p[at - 1] != '\t')
+        at--;
+    return (pt_str){d.p + at, d.n - at};
 }
 
 static void add_list(app *a, const char *const *v, size_t n, pt_str q)
@@ -1216,16 +1269,23 @@ static session_list *get_sessions(app *a, bool refresh)
 
 static void menu_update(app *a)
 {
-    bool was_sessions = a->sessions_menu;
-    pt_str d = pt_buf_str(&a->in.text), cmd, arg;
+    bool was_sessions = a->sessions_menu, was_skills = a->skills_menu;
+    pt_str d = pt_buf_str(&a->in.text), cmd, arg, word = last_word(d);
     long sp;
     int old = a->nitems;
     a->nitems = 0;
     pt_buf_reset(&a->items_buf);
-    a->sessions_menu = false;
+    a->sessions_menu = a->skills_menu = false;
     if (a->menu == MENU_SETTINGS)
         return;
     a->menu = MENU_NONE;
+    if (!a->menu_closed && word.n && word.p[0] == '$') { /* $skill anywhere */
+        add_skills(a, "$", word, !was_skills);
+        a->menu = a->nitems ? MENU_ARG : MENU_NONE;
+        if (a->nitems != old || a->sel >= a->nitems)
+            a->sel = a->menu_top = 0;
+        return;
+    }
     if (a->menu_closed || !d.n || d.p[0] != '/' || pt_str_find(d, '\n') >= 0)
         return;
     d.p++;
@@ -1237,6 +1297,7 @@ static void menu_update(app *a)
         for (i = 0; i < NCMDS; i++)
             if (pt_str_starts(pt_strz(cmds[i].name), d))
                 add_item(a, cmds[i].name, strlen(cmds[i].name), cmds[i].desc);
+        add_skills(a, "skill:", d, !was_skills);
     } else {
         cmd = (pt_str){d.p, (size_t)sp};
         arg = (pt_str){d.p + sp + 1, d.n - (size_t)sp - 1};
@@ -1244,12 +1305,13 @@ static void menu_update(app *a)
         if (pt_str_eqz(cmd, "settings")) { /* "/settings model <id>" etc. */
             long sp2 = pt_str_find(arg, ' ');
             if (sp2 >= 0) {
-                cmd = (pt_str){arg.p, (size_t)sp2};
+                int st = find_setting((pt_str){arg.p, (size_t)sp2});
                 arg = (pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1};
-                if (pt_str_eqz(cmd, "reasoning"))
-                    cmd = PT_S("effort");
-                else if (pt_str_eqz(cmd, "symbols"))
-                    add_list(a, sym_names, 3, arg);
+                cmd = PT_STR_NULL;
+                if (st >= 0 && settings[st].vals)
+                    add_list(a, settings[st].vals, (size_t)settings[st].nv, arg);
+                else if (st >= 0 && settings[st].k != CFG_PAGER)
+                    cmd = PT_S("model");
             } else {
                 size_t i;
                 for (i = 0; i < NSETTINGS; i++)
@@ -1827,6 +1889,11 @@ static bool save_setting(app *a, int k, const char *v)
         apply_symbols(a);
     if (k == CFG_PERMS && pt_perm_parse(pt_strz(a->cfg->val[k]), &a->o.perm) && a->open)
         pt_rt_set_perm(a->s.rt, a->o.perm);
+    if (k == CFG_SKILLS) { /* from the next epoch on: compaction or a new session */
+        a->o.manual_skills = strcmp(a->cfg->val[k], "off") == 0;
+        if (a->open)
+            pt_rt_skills_auto(a->s.rt, !a->o.manual_skills);
+    }
     if (k == CFG_COMPACT_MODEL) {
         a->o.compact_model = a->cfg->val[k][0] ? a->cfg->val[k] : NULL;
         set_config(a);
@@ -2132,45 +2199,19 @@ static void cmd_help(app *a)
         snprintf(line, sizeof line, "/%s%s  %s", cmds[i].name, cmds[i].args, cmds[i].desc);
         out_z(a, TUI_DIM, line);
     }
+    out_z(a, TUI_DIM, "$name anywhere in a message, or /skill:name first, gives the model a skill's instructions");
     out_z(a, TUI_DIM,
           "enter send · shift+enter, alt+enter or ctrl-j newline · esc esc interrupt · ctrl-c clear, "
           "interrupt or quit · ctrl-d quit · ctrl-t thinking · ctrl-o details · ctrl-z suspend · ctrl-l redraw");
 }
 
-static int find_setting(pt_str name)
-{
-    size_t i;
-    if (pt_str_eqz(name, "effort"))
-        name = PT_S("reasoning");
-    for (i = 0; i < NSETTINGS; i++)
-        if (pt_str_eqz(name, settings[i].name) || pt_str_eqz(name, cli_config_key(settings[i].k)))
-            return (int)i;
-    return -1;
-}
-
-static bool valid_setting(int k, const char *v)
+static bool valid_setting(int s, const char *v)
 {
     int i;
-    pt_reasoning r;
-    if (k == CFG_THINKING) {
-        for (i = 0; i < 3; i++)
-            if (strcmp(v, th_names[i]) == 0)
-                return true;
-        return false;
-    }
-    if (k == CFG_SYMBOLS) {
-        for (i = 0; i < 3; i++)
-            if (strcmp(v, sym_names[i]) == 0)
-                return true;
-        return false;
-    }
-    if (k == CFG_REASONING)
-        return cli_effort_parse(pt_strz(v), &r);
-    if (k == CFG_PERMS) {
-        pt_perm_mode m;
-        return pt_perm_parse(pt_strz(v), &m);
-    }
-    return true;
+    for (i = 0; i < settings[s].nv; i++)
+        if (strcmp(v, settings[s].vals[i]) == 0)
+            return true;
+    return !settings[s].vals;
 }
 
 static void run_command(app *a, pt_str line)
@@ -2235,7 +2276,7 @@ static void run_command(app *a, pt_str line)
         cmd_usage(a);
     } else if (pt_str_eqz(cmd, "thinking")) {
         if (arg.n) {
-            if (!valid_setting(CFG_THINKING, v)) {
+            if (!valid_setting(find_setting(PT_S("thinking")), v)) {
                 out_z(a, TUI_RED, "modes: collapsed, full, hidden");
                 return;
             }
@@ -2254,13 +2295,17 @@ static void run_command(app *a, pt_str line)
         }
         s = find_setting((pt_str){arg.p, sp2 >= 0 ? (size_t)sp2 : arg.n});
         if (s < 0) {
-            out_z(a, TUI_RED, "settings: thinking, symbols, model, reasoning, pager, permissions, compact-model");
+            size_t i;
+            int n = snprintf(msg, sizeof msg, "settings:");
+            for (i = 0; i < NSETTINGS && n > 0 && (size_t)n < sizeof msg; i++)
+                n += snprintf(msg + n, sizeof msg - (size_t)n, "%s %s", i ? "," : "", settings[i].name);
+            out_z(a, TUI_RED, msg);
             return;
         }
         if (sp2 >= 0) {
             pt_str val = pt_str_trim((pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1});
             snprintf(v, sizeof v, "%.*s", (int)(val.n < sizeof v ? val.n : sizeof v - 1), val.p);
-            if (!valid_setting(settings[s].k, v)) {
+            if (!valid_setting(s, v)) {
                 snprintf(msg, sizeof msg, "not a value for %s: %s", settings[s].name, v);
                 out_z(a, TUI_RED, msg);
                 return;
@@ -2373,9 +2418,25 @@ static void queued_submit(app *a)
             menu_update(a);
         } else {
             pt_input in;
+            pt_buf text;
+            char err[600];
+            bool ok;
             memset(&in, 0, sizeof in);
             in.text = pt_buf_str(&q->text);
-            if (!pt_submit(a->s.a, &in)) {
+            pt_buf_init(&text, pt_sys_allocator());
+            switch (pt_rt_expand_skills(a->s.rt, in.text, &text, err, sizeof err)) {
+            case -1: /* not sent: it is still in the history */
+                out_z(a, TUI_RED, err);
+                queued_remove(a, i);
+                pt_buf_free(&text);
+                continue;
+            case 1:
+                in.text = pt_buf_str(&text);
+                break;
+            }
+            ok = pt_submit(a->s.a, &in);
+            pt_buf_free(&text);
+            if (!ok) {
                 out_z(a, TUI_RED, pt_error(a->s.a));
                 return;
             }
@@ -2465,7 +2526,7 @@ static void submit(app *a)
     } else {
         tui_hist_line(&a->pending_history, text);
     }
-    command = text.p[0] == '/' && pt_str_find(text, '\n') < 0;
+    command = text.p[0] == '/' && pt_str_find(text, '\n') < 0 && !pt_str_starts(text, PT_S("/skill:"));
     if (command && !a->opening) {
         pt_buf_reset(&a->command);
         pt_buf_puts(&a->command, text);
@@ -2500,7 +2561,6 @@ static bool complete(app *a)
 {
     pt_str d = pt_buf_str(&a->in.text), label;
     pt_buf nd;
-    long sp;
     bool changed;
     if (a->menu == MENU_NONE || a->menu == MENU_SETTINGS || !a->nitems)
         return false;
@@ -2513,12 +2573,13 @@ static bool complete(app *a)
         for (i = 0; i < NCMDS; i++)
             if (pt_str_eqz(label, cmds[i].name) && cmds[i].args[0])
                 pt_buf_putc(&nd, ' ');
+        if (pt_str_starts(label, PT_S("skill:"))) /* then what it is for */
+            pt_buf_putc(&nd, ' ');
     } else { /* replace the last word */
-        sp = (long)d.n - 1;
-        while (sp >= 0 && d.p[sp] != ' ')
-            sp--;
-        pt_buf_put(&nd, d.p, (size_t)(sp + 1));
+        pt_buf_put(&nd, d.p, (size_t)(last_word(d).p - d.p));
         pt_buf_puts(&nd, label);
+        if (label.n && label.p[0] == '$')
+            pt_buf_putc(&nd, ' ');
     }
     changed = !pt_str_eq(pt_buf_str(&nd), d);
     if (changed)
@@ -2547,7 +2608,10 @@ static void enter(app *a)
             complete(a);
         }
     } else if (a->menu == MENU_ARG && a->nitems) {
+        bool skill = a->skills_menu;
         complete(a);
+        if (skill)
+            return; /* a $skill picked: the message goes on */
     }
     submit(a);
 }
@@ -2555,8 +2619,8 @@ static void enter(app *a)
 static void settings_key(app *a, const tui_ev *ev)
 {
     int k = settings[a->set_sel].k, i, dir = ev->key == TK_LEFT ? -1 : 1;
-    const char *const *vals = NULL;
-    int nv = 0;
+    const char *const *vals = settings[a->set_sel].vals;
+    int nv = settings[a->set_sel].nv;
     char d[600];
     if (ev->key == TK_UP || ev->key == TK_DOWN) {
         a->set_sel = (a->set_sel + (ev->key == TK_UP ? -1 : 1) + (int)NSETTINGS) % (int)NSETTINGS;
@@ -2568,19 +2632,6 @@ static void settings_key(app *a, const tui_ev *ev)
     }
     if (ev->key != TK_LEFT && ev->key != TK_RIGHT && ev->key != TK_ENTER)
         return;
-    if (k == CFG_THINKING) {
-        vals = th_names;
-        nv = 3;
-    } else if (k == CFG_SYMBOLS) {
-        vals = sym_names;
-        nv = 3;
-    } else if (k == CFG_REASONING) {
-        vals = levels;
-        nv = (int)(sizeof levels / sizeof levels[0]);
-    } else if (k == CFG_PERMS) {
-        vals = perm_names;
-        nv = 3;
-    }
     if (vals) {
         for (i = 0; i < nv && strcmp(a->cfg->val[k], vals[i]) != 0; i++)
             ;

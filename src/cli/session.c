@@ -384,29 +384,57 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     if (!pt_rt_add_builtins(s->rt)) /* the store is the runtime's now */
         return fail(s, 1, err, cap, "out of memory");
     pt_rt_set_perm(s->rt, o->perm);
+    {
+        pt_rt_prompt pr;
+        char conf[4096];
+        cli_config_dir(conf, sizeof conf);
+        pr.base = cli_default_system;
+        pr.home = getenv("HOME");
+        pr.config_dir = conf;
+        pr.skills_auto = !o->manual_skills;
+        if (!pt_rt_set_prompt(s->rt, &pr))
+            return fail(s, 1, err, cap, "out of memory");
+    }
     memset(&me, 0, sizeof me);
     pt_sys_identity(s->host, sizeof s->host, s->boot, sizeof s->boot, &me.pid);
     me.host = pt_strz(s->host);
     me.boot = pt_strz(s->boot);
     if (create) {
         pt_session_cfg c;
-        pt_buf sys;
+        pt_buf sys, skills, prompt;
+        pt_jw w;
         bool ok;
         pt_buf_init(&sys, pt_sys_allocator());
-        pt_buf_putz(&sys, o->system ? o->system : cli_default_system);
-        if (o->append_system) {
-            pt_buf_putz(&sys, "\n\n");
-            pt_buf_putz(&sys, o->append_system);
+        pt_buf_init(&skills, pt_sys_allocator());
+        pt_buf_init(&prompt, pt_sys_allocator());
+        /* The flags are the session's own: kept to rebuild later epochs. */
+        if (o->system || o->append_system) {
+            pt_jw_init(&w, &prompt);
+            pt_jw_obj(&w);
+            if (o->system) {
+                pt_jw_key(&w, "system");
+                pt_jw_strz(&w, o->system);
+            }
+            if (o->append_system) {
+                pt_jw_key(&w, "append");
+                pt_jw_strz(&w, o->append_system);
+            }
+            pt_jw_obj_end(&w);
         }
         memset(&c, 0, sizeof c);
         c.cwd = pt_strz(getcwd(cwd, sizeof cwd) ? cwd : ".");
         c.host = me.host;
+        c.prompt = pt_buf_str(&prompt);
+        ok = !prompt.oom && pt_rt_build_prompt(s->rt, c.cwd, c.prompt, &sys, &skills);
         c.system = pt_buf_str(&sys);
+        c.skills = pt_buf_str(&skills);
         c.tools = pt_rt_tool_defs(s->rt, &c.ntools);
-        ok = pt_create(s->a, &c);
+        ok = ok && pt_create(s->a, &c);
         pt_buf_free(&sys);
+        pt_buf_free(&skills);
+        pt_buf_free(&prompt);
         if (!ok)
-            return fail(s, 1, err, cap, pt_error(s->a));
+            return fail(s, 1, err, cap, pt_error(s->a)[0] ? pt_error(s->a) : "out of memory");
     } else {
         char why[600];
         if (!pt_rt_recover(s->rt, why, sizeof why)) {

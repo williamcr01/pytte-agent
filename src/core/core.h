@@ -170,6 +170,7 @@ struct pt_agent {
     doc *docs;
     uint32_t ndocs, dcap;
     pt_str cwd;      /* from the session header (perm) */
+    pt_str prompt;   /* the host's prompt settings, from the header (perm) */
     task *free_tasks; /* finished tool tasks, kept for reuse */
     claim newest;    /* the newest claim record */
     uint32_t mine;   /* our claim's ID, once open */
@@ -186,7 +187,7 @@ struct pt_agent {
      * task mat_task: asked for once its request is about to start. */
     uint32_t mat_task, mat_fx;
     bool mat_ready, mat_keep; /* keep: the host had nothing newer */
-    pt_buf mat_system, mat_tools; /* tools: a JSON array, as frozen */
+    pt_buf mat_system, mat_tools, mat_skills; /* tools, skills: JSON arrays, as frozen */
     pt_session_cfg create;
     pt_identity me;
     pt_str my_token, takeover;
@@ -302,6 +303,8 @@ void pt_run_add_usage(pt_agent *a, const pt_msg *m, pt_str model);
 
 /* The tools array of an epoch entry (agent.c). */
 void pt_core_write_tool_defs(pt_jw *w, const pt_tool_def *defs, uint32_t n);
+/* Empty raw, or JSON of that type (parsed in scratch). */
+bool pt_core_raw_is(pt_agent *a, pt_str raw, pt_jtype kind);
 
 /* ---- task_compact.c ---- */
 /* True when the epoch holds an answer from the model, so a summary can

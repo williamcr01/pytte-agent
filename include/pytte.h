@@ -161,6 +161,11 @@ typedef struct pt_session_cfg {
     pt_str system; /* the system prompt, frozen into the first epoch */
     const pt_tool_def *tools; /* ...with these tools */
     uint32_t ntools;
+    pt_str skills; /* ...and this skills index: a JSON array, or empty */
+    /* The host's own prompt settings, kept in the session header to
+     * rebuild later epochs' system prompts from (pt_session_prompt): a
+     * JSON object, or empty. */
+    pt_str prompt;
 } pt_session_cfg;
 
 bool pt_create(pt_agent *a, const pt_session_cfg *c);
@@ -255,6 +260,7 @@ typedef struct pt_materials {
     pt_str system;
     const pt_tool_def *tools;
     uint32_t ntools;
+    pt_str skills; /* a JSON array, or empty */
 } pt_materials;
 
 /* The answer to EPOCH_MATERIALS; NULL keeps the current epoch's. */
@@ -300,6 +306,9 @@ uint32_t pt_asks(const pt_agent *a, pt_ask_view *out, uint32_t max);
 pt_str pt_doc(const pt_agent *a, pt_str key);
 /* The working directory the session was started in. */
 pt_str pt_session_cwd(const pt_agent *a);
+/* The host's prompt settings from the session header (pt_session_cfg.prompt),
+ * or empty. */
+pt_str pt_session_prompt(const pt_agent *a);
 
 /* Entries of the current epoch, in order. */
 uint32_t pt_entry_count(const pt_agent *a);

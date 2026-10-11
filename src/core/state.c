@@ -647,6 +647,8 @@ static bool apply_record(pt_agent *a, const pt_json *r)
         }
         a->have_session = true;
         a->cwd = pt_arena_dup(&a->perm, pt_json_gets(r, "cwd", &a->scratch));
+        if (pt_json_is(pt_json_get(r, "prompt"), PT_J_OBJ))
+            a->prompt = pt_arena_dup(&a->perm, pt_json_get(r, "prompt")->raw);
     } else if (pt_str_eqz(type, "entry")) {
         ok = apply_entry(a, r, id);
     } else if (pt_str_eqz(type, "task")) {

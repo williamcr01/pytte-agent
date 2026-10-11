@@ -81,6 +81,13 @@ struct pt_rt {
     bool closing;
     void *builtin; /* tools_builtin.c's state */
     void (*builtin_free)(void *ud);
+    /* prompt.c */
+    pt_rt_prompt prompt;
+    bool have_prompt;
+    pt_arena prompt_ar; /* the strings of prompt, kept */
+    pt_rt_skill *skills;
+    uint32_t nskills, skcap;
+    pt_arena skills_ar; /* their strings, until the next scan */
     pt_buf scratch; /* tool results, reused */
     pt_arena ar;    /* one gate or result at a time */
 };
@@ -91,6 +98,8 @@ void pt_rt_run_tool(pt_rt *rt, const pt_fx *fx);
 void pt_rt_cancel_tool(pt_rt *rt, uint32_t fx);
 void pt_rt_tools_stop(pt_rt *rt); /* closing: stop running calls */
 void pt_rt_tools_free(pt_rt *rt);
+/* prompt.c */
+void pt_rt_prompt_free(pt_rt *rt);
 /* Grow a malloc'd array to hold need items (doubling). */
 bool pt_rt_grow(void **arr, uint32_t *cap, uint32_t need, size_t elem);
 

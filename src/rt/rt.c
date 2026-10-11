@@ -38,6 +38,8 @@ pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a)
     rt->a = a;
     pt_buf_init(&rt->scratch, pt_sys_allocator());
     pt_arena_init(&rt->ar, pt_sys_allocator(), 4096);
+    pt_arena_init(&rt->prompt_ar, pt_sys_allocator(), 0);
+    pt_arena_init(&rt->skills_ar, pt_sys_allocator(), 0);
     return rt;
 }
 
@@ -146,6 +148,7 @@ void pt_rt_free(pt_rt *rt)
         drop_req(rt, 0);
     rt->closing = true;
     pt_rt_tools_free(rt);
+    pt_rt_prompt_free(rt);
     free(rt->reqs);
     free(rt->sleeps);
     free(rt->timers);
@@ -439,12 +442,22 @@ static void handle(pt_rt *rt, const pt_fx *fx)
         start_io(rt, fx);
         break;
     case PT_FX_EPOCH_MATERIALS: {
-        /* The tools as registered now; the session's system prompt (prompt
-         * files join it in M5). */
+        /* The tools as registered now; the system prompt and skills built
+         * again from their files, or kept when nothing builds them. */
         pt_materials m;
-        m.system = fx->bytes;
+        pt_buf sys, skills;
+        bool built;
+        pt_buf_init(&sys, pt_sys_allocator());
+        pt_buf_init(&skills, pt_sys_allocator());
+        built = rt->have_prompt &&
+                pt_rt_build_prompt(rt, pt_session_cwd(rt->a), pt_session_prompt(rt->a), &sys, &skills);
+        memset(&m, 0, sizeof m);
+        m.system = built ? pt_buf_str(&sys) : fx->bytes;
+        m.skills = built ? pt_buf_str(&skills) : PT_STR_NULL;
         m.tools = pt_rt_tool_defs(rt, &m.ntools);
-        pt_fx_materials(rt->a, fx->id, &m);
+        pt_fx_materials(rt->a, fx->id, rt->have_prompt && !built ? NULL : &m);
+        pt_buf_free(&sys);
+        pt_buf_free(&skills);
         break;
     }
     case PT_FX_GATE:

@@ -12,7 +12,7 @@
 
 /* ---- config.c: settings (section 19) ---- */
 
-enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_PERMS, CFG_COMPACT_MODEL, CFG_N };
+enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_PERMS, CFG_COMPACT_MODEL, CFG_SKILLS, CFG_N };
 
 typedef struct cli_config {
     char val[CFG_N][512];
@@ -20,6 +20,9 @@ typedef struct cli_config {
     char user_path[4096];   /* ~/.config/pytte/config.json */
 } cli_config;
 
+/* The user's pytte directory: $XDG_CONFIG_HOME/pytte, else ~/.config/pytte.
+ * It holds config.json, SYSTEM.md, APPEND_SYSTEM.md and skills/. */
+void cli_config_dir(char *out, size_t cap);
 /* The dotted key of a setting ("tui.thinking"). */
 const char *cli_config_key(int k);
 /* Only concrete user-facing levels (off through max). On failure, out
@@ -48,6 +51,7 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap);
 
 typedef struct cli_opts {
     const char *model, *compact_model, *system, *append_system, *script;
+    bool manual_skills; /* skills are not listed for the model (skills.auto off) */
     pt_reasoning reasoning;
     pt_perm_mode perm;
     uint32_t max_tokens, retry_base_ms, context_window;

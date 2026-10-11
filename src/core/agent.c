@@ -352,6 +352,10 @@ static void build_create(pt_agent *a)
     pt_jw_strz(w, PT_VERSION);
     pt_jw_key(w, "forked_from");
     pt_jw_null(w);
+    if (c->prompt.n) {
+        pt_jw_key(w, "prompt");
+        pt_jw_raw(w, c->prompt);
+    }
     pt_jw_obj_end(w);
     pt_core_entry_head(a, pt_core_new_id(a), "epoch", 1);
     pt_jw_key(w, "n");
@@ -361,7 +365,7 @@ static void build_create(pt_agent *a)
     pt_jw_key(w, "tools");
     pt_core_write_tool_defs(w, c->tools, c->ntools);
     pt_jw_key(w, "skills");
-    pt_jw_raw(w, PT_S("[]"));
+    pt_jw_raw(w, c->skills.n ? c->skills : PT_S("[]"));
     pt_core_entry_end(a);
     a->want_create = false;
     pt_core_commit_end(a);
@@ -784,6 +788,7 @@ pt_agent *pt_new(const pt_opts *o)
     pt_buf_init(&a->live_out, a->al);
     pt_buf_init(&a->mat_system, a->al);
     pt_buf_init(&a->mat_tools, a->al);
+    pt_buf_init(&a->mat_skills, a->al);
     for (i = 0; i < PT_FXQ; i++)
         pt_buf_init(&a->q[i].bytes, a->al);
     a->next_id = 1;
@@ -831,6 +836,7 @@ void pt_free(pt_agent *a)
     pt_buf_free(&a->live_out);
     pt_buf_free(&a->mat_system);
     pt_buf_free(&a->mat_tools);
+    pt_buf_free(&a->mat_skills);
     pt_arena_free(&a->perm);
     pt_arena_free(&a->epoch);
     pt_arena_free(&a->scratch);
@@ -863,6 +869,13 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
         pt_core_seterr(a, "the session already exists", PT_STR_NULL);
         return false;
     }
+    if (!pt_core_raw_is(a, c->skills, PT_J_ARR) || !pt_core_raw_is(a, c->prompt, PT_J_OBJ)) {
+        pt_core_seterr(a, "skills must be a JSON array and prompt an object", PT_STR_NULL);
+        return false;
+    }
+    a->create.skills = pt_arena_dup(&a->reqs, c->skills);
+    a->create.prompt = pt_arena_dup(&a->reqs, c->prompt);
+    a->prompt = pt_arena_dup(&a->perm, c->prompt);
     a->create.cwd = pt_arena_dup(&a->reqs, c->cwd);
     a->create.host = pt_arena_dup(&a->reqs, c->host);
     a->create.system = pt_arena_dup(&a->reqs, c->system);
@@ -886,7 +899,7 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
     a->loaded = true;
     a->have_session = true;
     a->cur_epoch = 1;
-    return !a->reqs.oom;
+    return !a->reqs.oom && !a->perm.oom;
 }
 
 pt_load_result pt_load_line(pt_agent *a, pt_str line, bool complete, bool last)
@@ -1044,6 +1057,20 @@ pt_str pt_doc(const pt_agent *a, pt_str key)
 pt_str pt_session_cwd(const pt_agent *a)
 {
     return a->cwd.n ? a->cwd : a->create.cwd;
+}
+
+pt_str pt_session_prompt(const pt_agent *a)
+{
+    return a->prompt;
+}
+
+bool pt_core_raw_is(pt_agent *a, pt_str raw, pt_jtype kind)
+{
+    const pt_json *j;
+    if (!raw.n)
+        return true;
+    j = pt_json_parse(raw, &a->scratch, NULL);
+    return j && pt_json_is(j, kind);
 }
 
 uint32_t pt_entry_count(const pt_agent *a)

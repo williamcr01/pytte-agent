@@ -86,6 +86,53 @@ bool pt_rt_watch(pt_rt *rt, int fd, pt_rt_fn fn, void *ud);
 void pt_rt_unwatch(pt_rt *rt, int fd);
 int64_t pt_rt_now(pt_rt *rt);
 
+/* ---- prompt files and skills (sections 14.1 and 14.2) ----
+ * Looked up in four roots, later ones winning: ~/.agents and the user's
+ * config directory (~/.config/pytte), then <cwd>/.agents and <cwd>/.pytte.
+ * Prompt files live in the pytte roots only: SYSTEM.md replaces the
+ * built-in system prompt and APPEND_SYSTEM.md is appended to it; for each,
+ * the project's file wins over the user's. Skills are skills/<name>/SKILL.md
+ * in every root; a later skill of the same name replaces an earlier one. */
+typedef struct pt_rt_prompt {
+    const char *base;       /* the built-in system prompt */
+    const char *home;       /* holds .agents; NULL: none */
+    const char *config_dir; /* the user's pytte directory; NULL: none */
+    bool skills_auto;       /* list skills in the system prompt, for the model to use */
+} pt_rt_prompt;
+
+/* Copied. Until set, a new epoch keeps the current system prompt. */
+bool pt_rt_set_prompt(pt_rt *rt, const pt_rt_prompt *p);
+/* Change skills_auto (from the next epoch on). */
+void pt_rt_skills_auto(pt_rt *rt, bool on);
+
+/* The system prompt and skills index (a JSON array) for a new epoch in
+ * cwd. prompt: the session's own settings (pt_session_prompt), a JSON
+ * object with optional strings "system" (replaces the system prompt and
+ * its files) and "append" (appended after the files). Rescans the skills.
+ * False when out of memory. */
+bool pt_rt_build_prompt(pt_rt *rt, pt_str cwd, pt_str prompt, pt_buf *system, pt_buf *skills);
+
+typedef struct pt_rt_skill {
+    pt_str name, description;
+    pt_str path; /* of SKILL.md */
+    bool manual; /* disable-model-invocation: only the user invokes it */
+} pt_rt_skill;
+
+/* The session's skills, sorted by name; with rescan, read again from
+ * disk. Valid until the next rescan (pt_rt_expand_skills rescans). */
+const pt_rt_skill *pt_rt_skills(pt_rt *rt, bool rescan, uint32_t *n);
+
+/* Expand the skills a message invokes: "/skill:<name> rest" and "$<name>"
+ * anywhere. Each skill's instructions come first, in a <skill> block, then
+ * the text ("rest" for /skill:). Returns 1 with out set, 0 when the text
+ * invokes no skill (out untouched), -1 with err (an unknown /skill:, a file
+ * that cannot be read, out of memory). Rescans the skills first. */
+int pt_rt_expand_skills(pt_rt *rt, pt_str text, pt_buf *out, char *err, size_t cap);
+
+/* For display: when text starts with a skill block, name is its skill and
+ * text is advanced past it. */
+bool pt_rt_skill_block(pt_str *text, pt_str *name);
+
 /* ---- permissions (section 15.5) ---- */
 typedef enum {
     PT_PERM_ASK,      /* tools that change things ask first */

@@ -331,11 +331,13 @@ void pt_fx_materials(pt_agent *a, uint32_t fx, const pt_materials *m)
     a->mat_keep = !m;
     pt_buf_reset(&a->mat_system);
     pt_buf_reset(&a->mat_tools);
+    pt_buf_reset(&a->mat_skills);
     if (m) {
         pt_buf_puts(&a->mat_system, m->system);
         pt_jw_init(&w, &a->mat_tools);
         pt_core_write_tool_defs(&w, m->tools, m->ntools);
-        if (a->mat_system.oom || a->mat_tools.oom)
+        pt_buf_puts(&a->mat_skills, m->skills.n && pt_core_raw_is(a, m->skills, PT_J_ARR) ? m->skills : PT_S("[]"));
+        if (a->mat_system.oom || a->mat_tools.oom || a->mat_skills.oom)
             a->mat_keep = true; /* the current epoch's, then */
     }
 }
@@ -346,12 +348,12 @@ static void materials_done(pt_agent *a)
     a->mat_ready = false;
 }
 
-/* The tools array of the current epoch, as it was frozen. */
-static pt_str epoch_tools(pt_agent *a)
+/* An array of the current epoch ("tools", "skills"), as it was frozen. */
+static pt_str epoch_array(pt_agent *a, const char *key)
 {
     const pt_json *r = a->nentries ? pt_json_parse(a->entries[0].raw, &a->scratch, NULL) : NULL;
-    const pt_json *tools = pt_json_get(pt_json_get(r, "data"), "tools");
-    return pt_json_is(tools, PT_J_ARR) ? tools->raw : PT_S("[]");
+    const pt_json *v = pt_json_get(pt_json_get(r, "data"), key);
+    return pt_json_is(v, PT_J_ARR) ? v->raw : PT_S("[]");
 }
 
 /* ---- the files read and modified ---- */
@@ -538,9 +540,9 @@ bool pt_compact_finish(pt_agent *a, task *t)
         pt_jw_key(w, "system");
         pt_jw_str(w, fresh ? pt_buf_str(&a->mat_system) : a->nentries ? a->entries[0].msg.text : PT_STR_NULL);
         pt_jw_key(w, "tools");
-        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_tools) : epoch_tools(a));
+        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_tools) : epoch_array(a, "tools"));
         pt_jw_key(w, "skills");
-        pt_jw_raw(w, PT_S("[]"));
+        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_skills) : epoch_array(a, "skills"));
         pt_jw_key(w, "summary");
         pt_jw_str(w, pt_buf_str(&summary));
         if ((files = collect_files(a, t)))
