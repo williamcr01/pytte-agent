@@ -18,6 +18,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 
 #include "cli/cli.h"
 
@@ -930,6 +933,11 @@ int main(int argc, char **argv)
     char warn[600], picked[64], cwd[4096];
     const char *term = getenv("TERM");
     bool tty;
+#ifdef M_ARENA_MAX
+    /* One heap: a worker thread's first malloc would otherwise reserve an
+     * arena of its own, resident for the life of the process. */
+    mallopt(M_ARENA_MAX, 1);
+#endif
     parse_args(argc, argv, &o);
     if (o.cmd_log)
         return cmd_log(&o);
