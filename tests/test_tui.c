@@ -418,9 +418,9 @@ static void test_md(void)
     MD("# Title", "{b}Title\n");
     MD("### Sub ###", "{b}Sub\n");
     MD("#hashtag", "#hashtag\n");
-    MD("- an item that wraps onto a second row", "\xe2\x80\xa2 an item that wraps onto a\n  second row\n");
-    MD("  * nested", "  \xe2\x80\xa2 nested\n");
-    MD("12. twelfth", "12. twelfth\n");
+    MD("- an item that wraps onto a second row", "{d}\xe2\x80\xa2 {}an item that wraps onto a\n  second row\n");
+    MD("  * nested", "  {d}\xe2\x80\xa2 {}nested\n");
+    MD("12. twelfth", "{d}12. {}twelfth\n");
     MD("> quoted **text**", "{d}\xe2\x94\x82 {}quoted {b}text{}\n");
     MD("---", "{d}\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
                "\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80"
@@ -441,8 +441,20 @@ static void test_md(void)
     MD("~~~~", "{d}~~~~\n");
     /* thinking: dim under everything */
     CHECK_STR(md(&m, "Let me **think**.", 31, TUI_DIM, false), "{d}Let me {bd}think{d}.\n");
+    /* a margin: every row with text starts with it, within the same width */
+    m.margin = 2;
+    MD("A long paragraph that goes on and on past the edge.", "  A long paragraph that goes\n  on and on past the edge.\n");
+    MD("", "\n");
+    MD("# Title", "  {b}Title\n");
+    MD("- item", "  {d}\xe2\x80\xa2 {}item\n");
+    MD("> quoted", "  {d}\xe2\x94\x82 {}quoted\n");
+    MD("```", "  {d}```\n");
+    CHECK_STR(md(&m, "0123456789012345678901234567890123456789", 31, 0, true),
+              "  0123456789012345678901234567\n  890123456789\n");
+    MD("```", "  {d}```\n");
+    m.margin = 0;
     m.ascii = true;
-    MD("- ascii", "- ascii\n");
+    MD("- ascii", "{d}- {}ascii\n");
 }
 
 /* ---- the input box ---- */

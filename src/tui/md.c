@@ -213,8 +213,12 @@ static int emit(pt_buf *out, pt_str first, pt_str cont, int pw, pt_str text, int
     return out->oom ? -1 : n;
 }
 
-static int plain_row(pt_buf *out, pt_str s, int base)
+static const char spaces[] = "        "; /* margins */
+
+static int plain_row(pt_buf *out, int margin, pt_str s, int base)
 {
+    if (s.n)
+        pt_buf_put(out, spaces, (size_t)margin);
     if (base)
         tui_style(out, base);
     pt_buf_puts(out, s);
@@ -224,7 +228,8 @@ static int plain_row(pt_buf *out, pt_str s, int base)
 
 int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *out)
 {
-    int width = cols > 2 ? cols - 1 : 1, rows;
+    int width = cols > 2 ? cols - 1 : 1, rows, mg = m->margin < 0 ? 0 : m->margin > 8 ? 8 : m->margin;
+    pt_str margin = {spaces, (size_t)mg};
     size_t ind;
     char ch;
     int len;
@@ -232,15 +237,15 @@ int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *o
     if (m->code) {
         if (closing_fence(m, line)) {
             m->code = false;
-            return plain_row(out, line, base | TUI_DIM);
+            return plain_row(out, mg, line, base | TUI_DIM);
         }
         if (!band)
-            return plain_row(out, line, base); /* the terminal wraps it; copies stay whole */
+            return plain_row(out, mg, line, base); /* the terminal wraps it; copies stay whole */
         pt_buf_init(&t, out->al);
         if (base)
             tui_style(&t, base);
         pt_buf_puts(&t, line);
-        rows = tui_wrap(out, pt_buf_str(&t), width, 0, false, true);
+        rows = emit(out, margin, margin, mg, pt_buf_str(&t), width, true, false);
         pt_buf_free(&t);
         return rows;
     }
@@ -248,11 +253,11 @@ int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *o
         m->code = true;
         m->fch = ch;
         m->flen = len;
-        return plain_row(out, line, base | TUI_DIM);
+        return plain_row(out, mg, line, base | TUI_DIM);
     }
     ind = indent_of(line);
     if (ind == line.n)
-        return plain_row(out, PT_STR_NULL, 0);
+        return plain_row(out, 0, PT_STR_NULL, 0);
     pt_buf_init(&t, out->al);
     pt_buf_init(&p1, out->al);
     pt_buf_init(&p2, out->al);
@@ -261,12 +266,13 @@ int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *o
     if (rule(line)) {
         int i;
         tui_style(&t, base | TUI_DIM);
-        for (i = 0; i < width; i++)
+        for (i = mg; i < width; i++)
             pt_buf_putz(&t, m->ascii ? "-" : "\xe2\x94\x80");
-        rows = plain_row(out, pt_buf_str(&t), 0);
+        rows = plain_row(out, mg, pt_buf_str(&t), 0);
     } else if (line.p[ind] == '|') { /* a table row: as it is (aligned tables can come later) */
         pt_buf_puts(&t, line);
-        rows = band ? tui_wrap(out, pt_buf_str(&t), width, 0, false, true) : plain_row(out, pt_buf_str(&t), 0);
+        rows = band ? emit(out, margin, margin, mg, pt_buf_str(&t), width, true, false)
+                    : plain_row(out, mg, pt_buf_str(&t), 0);
     } else if (ind <= 3 && line.p[ind] == '#') {
         size_t h = ind;
         while (h < line.n && line.p[h] == '#')
@@ -280,32 +286,37 @@ int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *o
         } else {
             inline_md(&t, line, base);
         }
-        rows = emit(out, PT_STR_NULL, PT_STR_NULL, 0, pt_buf_str(&t), width, band, true);
+        rows = emit(out, margin, margin, mg, pt_buf_str(&t), width, band, true);
     } else {
         /* quotes, then a list item, then a paragraph */
         size_t i = ind, k;
-        int pw = 0;
+        int pw = mg;
+        bool quoted = false;
+        pt_buf_puts(&p1, margin);
         while (i < line.n && line.p[i] == '>') {
             tui_style(&p1, base | TUI_DIM);
             pt_buf_putz(&p1, m->ascii ? "| " : "\xe2\x94\x82 ");
             pw += 2;
+            quoted = true;
             i++;
             if (i < line.n && line.p[i] == ' ')
                 i++;
             while (i < line.n && line.p[i] == ' ')
                 i++;
         }
-        if (pw)
+        if (quoted)
             tui_style(&p1, base); /* back from the dim bar */
         pt_buf_puts(&p2, pt_buf_str(&p1));
         k = i;
         if (k < line.n && (line.p[k] == '-' || line.p[k] == '*' || line.p[k] == '+') && k + 1 < line.n &&
             line.p[k + 1] == ' ') {
             size_t j;
-            for (j = 0; j < ind && pw == 0; j++) /* nesting, outside quotes */
+            for (j = 0; j < ind && !quoted; j++) /* nesting, outside quotes */
                 pt_buf_putc(&p1, ' '), pt_buf_putc(&p2, ' ');
-            pw += pw == 0 ? (int)ind : 0;
+            pw += quoted ? 0 : (int)ind;
+            tui_style(&p1, base | TUI_DIM);
             pt_buf_putz(&p1, m->ascii ? "- " : "\xe2\x80\xa2 ");
+            tui_style(&p1, base);
             pt_buf_putz(&p2, "  ");
             pw += 2;
             i = k + 2;
@@ -315,15 +326,17 @@ int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *o
                 d++;
             if (d > k && d + 1 < line.n && (line.p[d] == '.' || line.p[d] == ')') && line.p[d + 1] == ' ') {
                 size_t j;
-                for (j = 0; j < ind && pw == 0; j++)
+                for (j = 0; j < ind && !quoted; j++)
                     pt_buf_putc(&p1, ' '), pt_buf_putc(&p2, ' ');
-                pw += pw == 0 ? (int)ind : 0;
+                pw += quoted ? 0 : (int)ind;
+                tui_style(&p1, base | TUI_DIM);
                 pt_buf_put(&p1, line.p + k, d - k + 2);
+                tui_style(&p1, base);
                 for (j = k; j < d + 2; j++)
                     pt_buf_putc(&p2, ' ');
                 pw += (int)(d - k + 2);
                 i = d + 2;
-            } else if (pw == 0) {
+            } else if (!quoted) {
                 i = 0; /* a paragraph keeps its indentation */
             }
         }

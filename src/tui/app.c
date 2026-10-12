@@ -26,18 +26,24 @@ enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
 #define MAX_ITEMS 400
 #define DOUBLE_MS 1000
 
+/* The left edge is a column of marks, one per kind of row: the prompt and
+ * what the user sent, thinking, notes, tool calls that worked or failed, a
+ * question. Prose sits two columns in, beside them. */
 typedef struct syms {
-    const char *prompt, *bullet, *think, *fail, *sel, *rail, *bar, *rule, *more, *ok, *tee, *elbow, *spin[10];
+    const char *prompt, *think, *note, *ok, *fail, *ask, *sel, *bar, *more, *spin[10];
     int nspin;
 } syms;
 
-static const syms uni = {"❯", "●", "✻", "✗", "▸", "┃", "│", "─", "…", "✓", "├", "└",
+static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "…",
                          {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}, 10};
-static const syms asc = {">", "*", "*", "x", ">", "|", "|", "-", "...", "ok", "|", "`", {"-", "\\", "|", "/"}, 4};
+static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", {"-", "\\", "|", "/"}, 4};
+
+#define ACCENT TUI_MAGENTA /* the prompt, the spinner, the selection */
+#define MARGIN 2           /* where prose starts, after a mark and a space */
+#define NAME_W 6           /* a tool's name column: "bash  ", "write " */
 
 #define SPIN_MS 120  /* the activity row's frame: spinner and shimmer */
 #define TOOL_FAIL 3  /* rows of a failed tool's output kept in the scrollback */
-#define TOOL_DIFF 8  /* rows of an edit's diff */
 #define TOOL_LIVE 5  /* rows of a running tool's output in the band */
 #define TOOL_KEEP 4096 /* bytes of it kept for that */
 #define RUN_MAX 8      /* running calls the band shows; more still run */
@@ -98,15 +104,13 @@ enum { G_OK, G_FAILED, G_TIMEOUT, G_DENIED, G_CANCELLED, G_INTERRUPTED, NBAD };
 
 typedef struct grow {
     uint32_t at, n;   /* the row, styled, in grp */
-    uint32_t dat, dn; /* its details, raw lines: a diff ("- ", "+ ") or a failure's last lines */
+    uint32_t dat, dn; /* its details, raw lines: a failure's last lines */
     uint8_t cat, bad;
-    bool diff;
 } grow;
 
 /* A call that is running: its row, and the end of its output. */
 typedef struct run_call {
     uint32_t task;
-    int cat;
     char name[64];
     pt_buf id, head, out;
 } run_call;
@@ -317,10 +321,18 @@ static void out_rail(app *a, pt_buf *out, const char *rail, int rstyle, int styl
     }
 }
 
+/* A line from pytte itself, after its mark: a dim note, or a red failure. */
+static void out_note(app *a, pt_buf *out, int style, pt_str raw)
+{
+    char mark[16];
+    snprintf(mark, sizeof mark, "%s ", style & TUI_RED ? a->sy->fail : a->sy->note);
+    out_text(a, out, style, mark, style, raw, MARGIN);
+}
+
 static void out_z(app *a, int style, const char *z)
 {
     group_close(a);
-    out_text(a, &a->lines, style, NULL, 0, pt_strz(z), 0);
+    out_note(a, &a->lines, style, pt_strz(z));
 }
 
 static void out_blank(pt_buf *out)
@@ -370,55 +382,51 @@ static pt_str call_gist(app *a, pt_str args)
     return args;
 }
 
-/* A call with all of its arguments, for the full view: "● name {...}". */
+/* A call with all of its arguments, for the full view: "· name {...}". */
 static void out_call(app *a, pt_buf *out, const pt_block *b)
 {
     char head[160];
-    snprintf(head, sizeof head, "%s %.*s ", a->sy->bullet, (int)(b->name.n > 60 ? 60 : b->name.n),
-             b->name.p);
-    out_text(a, out, 0, head, TUI_BOLD, b->args, 2);
+    snprintf(head, sizeof head, "%s %.*s ", a->sy->note, (int)(b->name.n > 60 ? 60 : b->name.n), b->name.p);
+    out_text(a, out, 0, head, TUI_BOLD, b->args, MARGIN);
 }
 
-/* How each builtin tool's row reads: asking, running, done, failed. */
+/* The builtin tools: the name shown in a row, and the kind. */
 static const struct {
-    const char *name, *ask, *running, *done, *fail;
+    const char *name, *shown;
     int cat;
-} verbs[] = {
-    {"bash", "Run", "Running", "Ran", "Couldn't run", CAT_COMMAND},
-    {"bash_poll", "Check", "Checking", "Checked", "Couldn't check", CAT_COMMAND},
-    {"read", "Read", "Reading", "Read", "Couldn't read", CAT_READ},
-    {"write", "Write", "Writing", "Wrote", "Couldn't write", CAT_WRITE},
-    {"edit", "Edit", "Editing", "Edited", "Couldn't edit", CAT_EDIT},
+} tools[] = {
+    {"bash", "bash", CAT_COMMAND}, {"bash_poll", "poll", CAT_COMMAND}, {"read", "read", CAT_READ},
+    {"write", "write", CAT_WRITE}, {"edit", "edit", CAT_EDIT},
 };
-#define NVERBS (sizeof verbs / sizeof verbs[0])
+#define NTOOLS (sizeof tools / sizeof tools[0])
 
-static int verb_of(pt_str name)
+static int tool_of(pt_str name)
 {
     int i;
-    for (i = 0; i < (int)NVERBS; i++)
-        if (pt_str_eqz(name, verbs[i].name))
+    for (i = 0; i < (int)NTOOLS; i++)
+        if (pt_str_eqz(name, tools[i].name))
             return i;
     return -1;
 }
 
-/* A call on one row: the verb (another tool: its name), then the gist of
- * its arguments, dim; in a command, the programs stand out. */
-static void phrase(app *a, pt_buf *out, int vstyle, const char *verb, pt_str name, pt_str args)
+/* A call on one row: the tool's name, dim, in a column, then the gist of
+ * its arguments; in a command, the programs stand out and the rest is dim. */
+static void phrase(app *a, pt_buf *out, pt_str name, pt_str args)
 {
     pt_str g = call_gist(a, args);
     bool cmd = pt_str_eqz(name, "bash"), at_cmd = true, in_word = false, prog = false;
-    int col = 0, cur = -1;
+    int col = 0, cur = -1, ti = tool_of(name), w;
     size_t k;
-    tui_style(out, vstyle);
-    if (verb)
-        pt_buf_putz(out, verb);
-    else
-        pt_buf_put(out, name.p, name.n > 60 ? 60 : name.n);
+    tui_style(out, TUI_DIM);
+    if (ti >= 0)
+        name = pt_strz(tools[ti].shown);
+    w = (int)(name.n > 60 ? 60 : name.n);
+    pt_buf_put(out, name.p, (size_t)w);
     pt_buf_reset(&a->tmp);
     tui_clean(&a->tmp, g, &col);
     while (a->tmp.n && (a->tmp.p[a->tmp.n - 1] == '\n' || a->tmp.p[a->tmp.n - 1] == ' '))
         a->tmp.n--;
-    if (a->tmp.n)
+    for (w = w < NAME_W ? NAME_W - w : 1; a->tmp.n && w > 0; w--) /* to the column, or one space */
         pt_buf_putc(out, ' ');
     for (k = 0; k < a->tmp.n; k++) {
         char c = a->tmp.p[k] == '\n' ? ' ' : a->tmp.p[k];
@@ -436,7 +444,7 @@ static void phrase(app *a, pt_buf *out, int vstyle, const char *verb, pt_str nam
                 prog = cmd && at_cmd && !strchr("<>(", c);
                 at_cmd = false;
             }
-            st = prog ? 0 : TUI_DIM;
+            st = prog || !cmd ? 0 : TUI_DIM;
         }
         if (st != cur)
             tui_style(out, cur = st);
@@ -496,16 +504,13 @@ static pt_str last_lines(pt_str s, uint32_t n)
 }
 
 /* ---- tool calls: groups (section 16.2) ----
- * Calls in a row, with nothing shown between them, form a group: a header
- * that counts them ("● 3 tool calls · 2 commands · 1 edit"), then a row
- * for each ("├ Ran make test", "└ Edited a.c +3 / -1") with its details
- * under it: an edit's diff, a failure's last lines. One call is just its
- * row. The open group is drawn in the band, and goes to the scrollback
- * whole once something else is shown, since the header must count calls
- * that have not happened yet. */
+ * Calls in a row, with nothing shown between them, form a group: one row
+ * each, its mark in the left column, then the tool's name and the gist
+ * ("✓ bash  make test · 3s", "✗ bash  make · exit 2", "✓ edit  a.c +3 -1"),
+ * with a failure's last lines under the gist.
+ * The open group is drawn in the band, and goes to the scrollback whole
+ * once something else is shown. */
 
-static const char *const cat_one[NCAT] = {"command", "read", "write", "edit", "other"};
-static const char *const cat_many[NCAT] = {"commands", "reads", "writes", "edits", "others"};
 static const char *const bad_names[NBAD] = {"", "failed", "timed out", "denied", "cancelled", "interrupted"};
 
 static bool starts(pt_str s, const char *z)
@@ -535,11 +540,10 @@ static void put_lines(app *a, pt_str s, const char *prefix, int *left)
     }
 }
 
-/* A finished call joins the open group: its row, such as "Ran make test",
- * "Exited 2 make" or "Denied bash rm -rf build", and its details. */
+/* A finished call joins the open group: its row, such as "bash  make test",
+ * "bash  make · exit 2" or "bash  rm -rf build · denied", and its details. */
 static void group_add(app *a, const pt_entry_view *v)
 {
-    static const char *const how[NBAD] = {"", "", "Timed out", "Denied", "Cancelled", "Interrupted"};
     const pt_msg *m = v->msg;
     const pt_block *call = find_call(a, m->call_id);
     const pt_json *data, *d, *j;
@@ -547,16 +551,14 @@ static void group_add(app *a, const pt_entry_view *v)
     int64_t ms = -1, code = 0, session = 0;
     bool has_code, timed = false, stats = false, on = false;
     unsigned add = 0, del = 0;
-    int vi = verb_of(m->name), left = TOOL_DIFF;
-    int nn = (int)(m->name.n > 60 ? 60 : m->name.n);
-    char verb[160], tail[64];
-    const char *vz = NULL;
+    int ti = tool_of(m->name), left = TOOL_FAIL;
+    char seg[160], tail[64];
     grow *g;
     if (a->ngrows == GROUP_MAX)
         group_close(a);
     g = &a->grows[a->ngrows];
     memset(g, 0, sizeof *g);
-    g->cat = (uint8_t)(vi < 0 ? CAT_OTHER : verbs[vi].cat);
+    g->cat = (uint8_t)(ti < 0 ? CAT_OTHER : tools[ti].cat);
     pt_arena_reset(&a->ar);
     data = pt_json_get(pt_json_parse(v->raw, &a->ar, NULL), "data");
     d = pt_json_get(data, "details");
@@ -594,13 +596,7 @@ static void group_add(app *a, const pt_entry_view *v)
         new_ = pt_json_gets(j, "new", &a->ar);
         add = count_lines(new_);
         del = count_lines(old);
-        stats = g->diff = true;
-        put_lines(a, old, "- ", &left);
-        put_lines(a, new_, "+ ", &left);
-        if (left < 0) {
-            snprintf(verb, sizeof verb, "%s %d more lines (ctrl+o)\n", a->sy->more, -left);
-            pt_buf_putz(&a->grp, verb);
-        }
+        stats = true;
     } else if (g->bad == G_OK && g->cat == CAT_WRITE) {
         j = pt_json_parse(args, &a->ar, NULL);
         add = count_lines(pt_json_gets(j, "content", &a->ar));
@@ -608,7 +604,6 @@ static void group_add(app *a, const pt_entry_view *v)
     } else if (g->bad == G_OK && pt_str_eqz(m->name, "read")) {
         snprintf(tail, sizeof tail, " · %u lines", count_lines(text));
     } else if (g->bad == G_FAILED || g->bad == G_TIMEOUT) {
-        left = TOOL_FAIL;
         put_lines(a, last_lines(text, TOOL_FAIL), "", &left);
     }
     g->dn = (uint32_t)(a->grp.n - g->dat);
@@ -621,39 +616,30 @@ static void group_add(app *a, const pt_entry_view *v)
         secs_short(took, sizeof took, ms);
         snprintf(tail, sizeof tail, " · %s", took);
     }
-    /* the row */
-    if (g->bad == G_OK && on && pt_str_eqz(m->name, "bash")) {
-        vz = "Started";
-    } else if (g->bad == G_OK) {
-        vz = vi < 0 ? NULL : verbs[vi].done;
-    } else if (g->bad == G_FAILED && g->cat == CAT_COMMAND && has_code && code) {
-        snprintf(verb, sizeof verb, "Exited %lld", (long long)code);
-        vz = verb;
-    } else if (g->bad == G_FAILED) {
-        if (vi < 0)
-            snprintf(verb, sizeof verb, "%.*s failed", nn, m->name.p);
-        vz = vi < 0 ? verb : verbs[vi].fail;
-    } else {
-        if (g->bad == G_TIMEOUT)
-            snprintf(verb, sizeof verb, "%s", how[g->bad]);
-        else
-            snprintf(verb, sizeof verb, "%s %.*s", how[g->bad], nn, m->name.p);
-        vz = verb;
-    }
+    /* the row: the call, then what came of it */
     g->at = (uint32_t)a->grp.n;
-    phrase(a, &a->grp, g->bad ? TUI_RED : 0, vz, m->name, args);
-    if (stats) { /* "+3", "+3 / -1" */
-        snprintf(verb, sizeof verb, " +%u", add);
+    phrase(a, &a->grp, m->name, args);
+    if (stats) { /* "+3", "+3 -1" */
+        snprintf(seg, sizeof seg, " +%u", add);
         tui_style(&a->grp, TUI_GREEN);
-        pt_buf_putz(&a->grp, verb);
+        pt_buf_putz(&a->grp, seg);
         if (g->cat == CAT_EDIT) {
-            snprintf(verb, sizeof verb, " -%u", del);
-            tui_style(&a->grp, TUI_DIM);
-            pt_buf_putz(&a->grp, " /");
+            snprintf(seg, sizeof seg, " -%u", del);
             tui_style(&a->grp, TUI_RED);
-            pt_buf_putz(&a->grp, verb);
+            pt_buf_putz(&a->grp, seg);
         }
-    } else if (tail[0]) {
+    }
+    if (g->bad) {
+        if (g->bad == G_FAILED && g->cat == CAT_COMMAND && has_code && code)
+            snprintf(seg, sizeof seg, "exit %lld", (long long)code);
+        else
+            snprintf(seg, sizeof seg, "%s", bad_names[g->bad]);
+        tui_style(&a->grp, TUI_DIM);
+        pt_buf_putz(&a->grp, " · ");
+        tui_style(&a->grp, TUI_RED);
+        pt_buf_putz(&a->grp, seg);
+    }
+    if (tail[0]) {
         tui_style(&a->grp, TUI_DIM);
         pt_buf_putz(&a->grp, tail);
     }
@@ -662,7 +648,7 @@ static void group_add(app *a, const pt_entry_view *v)
     a->ngrows++;
 }
 
-/* One row: a mark ("├", "●"), then styled text, cut to the width. */
+/* One row: a mark in the left column, then styled text, cut to the width. */
 static void group_row(app *a, pt_buf *out, const char *mark, int mstyle, pt_str styled)
 {
     size_t k;
@@ -677,26 +663,24 @@ static void group_row(app *a, pt_buf *out, const char *mark, int mstyle, pt_str 
     pt_buf_putc(out, '\n');
 }
 
-/* A row's details, each line after `cont` (the tree's line, or spaces). */
-static void group_details(app *a, pt_buf *out, const grow *g, const char *cont)
+/* Under a row's gist: the column its details start at. */
+static const char detail_pad[] = "        "; /* MARGIN + NAME_W */
+
+/* A row's details, each line under the gist. */
+static void group_details(app *a, pt_buf *out, const grow *g)
 {
     pt_str s = {a->grp.p + g->dat, g->dn};
     size_t at = 0;
     while (at < s.n) {
         size_t e = at, k;
-        int col = 0, style = TUI_DIM;
+        int col = 0;
         pt_str line;
         while (e < s.n && s.p[e] != '\n')
             e++;
         line = (pt_str){s.p + at, e - at};
-        if (g->diff && starts(line, "- "))
-            style = TUI_RED;
-        else if (g->diff && starts(line, "+ "))
-            style = TUI_GREEN;
         pt_buf_reset(&a->tmp2);
+        pt_buf_putz(&a->tmp2, detail_pad);
         tui_style(&a->tmp2, TUI_DIM);
-        pt_buf_putz(&a->tmp2, cont);
-        tui_style(&a->tmp2, style);
         pt_buf_reset(&a->tmp);
         tui_clean(&a->tmp, line, &col);
         pt_buf_puts(&a->tmp2, pt_buf_str(&a->tmp));
@@ -730,99 +714,41 @@ static bool runs_oom(const app *a)
     return false;
 }
 
-/* "● 3 tool calls · 2 commands · 1 edit · 1 failed": the kinds, most
- * first, then what went wrong. */
-static void group_header(app *a, pt_buf *out, int bstyle, bool running)
-{
-    int cats[NCAT] = {0}, bads[NBAD] = {0}, i, total = a->ngrows;
-    bool used[NCAT] = {false};
-    char seg[64];
-    size_t k;
-    for (i = 0; i < a->ngrows; i++) {
-        cats[a->grows[i].cat]++;
-        bads[a->grows[i].bad]++;
-    }
-    for (i = 0; running && i < a->nruns; i++) {
-        cats[a->runs[i].cat]++;
-        total++;
-    }
-    pt_buf_reset(&a->tmp2);
-    tui_style(&a->tmp2, bstyle);
-    pt_buf_putz(&a->tmp2, a->sy->bullet);
-    tui_style(&a->tmp2, 0);
-    snprintf(seg, sizeof seg, " %d tool calls", total);
-    pt_buf_putz(&a->tmp2, seg);
-    tui_style(&a->tmp2, TUI_DIM);
-    for (;;) {
-        int best = -1, c;
-        for (c = 0; c < NCAT; c++)
-            if (cats[c] && !used[c] && (best < 0 || cats[c] > cats[best]))
-                best = c;
-        if (best < 0)
-            break;
-        used[best] = true;
-        snprintf(seg, sizeof seg, " · %d %s", cats[best], cats[best] == 1 ? cat_one[best] : cat_many[best]);
-        pt_buf_putz(&a->tmp2, seg);
-    }
-    for (i = G_FAILED; i < NBAD; i++)
-        if (bads[i]) {
-            tui_style(&a->tmp2, TUI_DIM);
-            pt_buf_putz(&a->tmp2, " · ");
-            tui_style(&a->tmp2, TUI_RED);
-            snprintf(seg, sizeof seg, "%d %s", bads[i], bad_names[i]);
-            pt_buf_putz(&a->tmp2, seg);
-        }
-    tui_style(&a->tmp2, 0);
-    k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
-    pt_buf_put(out, a->tmp2.p, k);
-    pt_buf_putc(out, '\n');
-}
-
 /* The group: whole for the scrollback; live, for the band, with its
- * newest rows only, without details, and the running calls last (the
- * newest with the end of its output). */
+ * newest rows only, without details, and the running calls last, marked
+ * by the spinner (the newest with the end of its output). */
 static void group_render(app *a, pt_buf *out, bool live)
 {
     bool running = live && a->nruns;
-    int n = a->ngrows + (running ? a->nruns : 0), i, first = 0;
-    bool single = n == 1, bad = false;
-    char cont[16], more[48];
-    if (!n)
+    int i, first = 0;
+    const char *spin = a->sy->spin[pt_sys_now_ms() / SPIN_MS % a->sy->nspin];
+    char more[48];
+    if (!a->ngrows && !running)
         return;
-    for (i = 0; i < a->ngrows; i++)
-        bad = bad || a->grows[i].bad != G_OK;
-    if (!single)
-        group_header(a, out, running ? TUI_DIM : bad ? TUI_RED : TUI_GREEN, running);
     if (live && a->ngrows > GROUP_LIVE) {
         first = a->ngrows - GROUP_LIVE;
         snprintf(more, sizeof more, "%s %d more", a->sy->more, first);
         pt_buf_reset(&a->wrap);
         tui_style(&a->wrap, TUI_DIM);
         pt_buf_putz(&a->wrap, more);
-        group_row(a, out, a->sy->tee, TUI_DIM, pt_buf_str(&a->wrap));
+        group_row(a, out, " ", 0, pt_buf_str(&a->wrap));
     }
     for (i = first; i < a->ngrows; i++) {
         const grow *g = &a->grows[i];
-        bool last = i == a->ngrows - 1 && !running;
         if (g->at + g->n > a->grp.n || g->dat + g->dn > a->grp.n)
             break; /* out of memory: paint() says so */
-        if (single)
-            group_row(a, out, a->sy->bullet, g->bad ? TUI_RED : TUI_GREEN, (pt_str){a->grp.p + g->at, g->n});
-        else
-            group_row(a, out, last ? a->sy->elbow : a->sy->tee, TUI_DIM, (pt_str){a->grp.p + g->at, g->n});
-        if (!live) { /* under the row's text */
-            snprintf(cont, sizeof cont, "%s   ", single || last ? " " : a->sy->bar);
-            group_details(a, out, g, cont);
-        }
+        group_row(a, out, g->bad ? a->sy->fail : a->sy->ok, g->bad ? TUI_RED : TUI_GREEN | TUI_DIM,
+                  (pt_str){a->grp.p + g->at, g->n});
+        if (!live)
+            group_details(a, out, g);
     }
-    for (i = 0; running && i + 1 < a->nruns; i++)
-        group_row(a, out, a->sy->tee, TUI_DIM, pt_buf_str(&a->runs[i].head));
-    if (running) { /* the newest: its row, and the end of its output */
+    for (i = 0; running && i < a->nruns; i++)
+        group_row(a, out, spin, ACCENT, pt_buf_str(&a->runs[i].head));
+    if (running) { /* the end of the newest one's output */
         const run_call *r = &a->runs[a->nruns - 1];
         pt_str o = pt_buf_str(&r->out), rows;
         size_t at = o.n;
         int lines = 0;
-        group_row(a, out, single ? a->sy->bullet : a->sy->elbow, TUI_DIM, pt_buf_str(&r->head));
         while (at && o.p[at - 1] == '\n')
             at--;
         o.n = at;
@@ -835,8 +761,7 @@ static void group_render(app *a, pt_buf *out, bool live)
         if (!o.n)
             return;
         pt_buf_reset(&a->diff);
-        snprintf(cont, sizeof cont, "  %s", a->sy->bar);
-        out_rail(a, &a->diff, cont, TUI_DIM, TUI_DIM, (pt_str){o.p + at, o.n - at}, 0);
+        out_rail(a, &a->diff, detail_pad + 1, 0, TUI_DIM, (pt_str){o.p + at, o.n - at}, 0);
         rows = pt_buf_str(&a->diff); /* its last TOOL_LIVE rows */
         at = rows.n;
         for (lines = 0; at && lines <= TOOL_LIVE; at--)
@@ -864,6 +789,7 @@ static void out_thinking(app *a, pt_buf *out, pt_str text, int64_t ms, bool full
         tui_md m;
         memset(&m, 0, sizeof m);
         m.ascii = a->ascii;
+        m.margin = MARGIN;
         out_md(a, out, &m, text, TUI_DIM);
     } else if (a->thinking == TH_COLLAPSED) {
         if (ms >= 1000)
@@ -905,37 +831,35 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
     if (strcmp(v->kind, "epoch") == 0 && v->epoch > 1) {
         char line[120];
         out_blank(out);
-        snprintf(line, sizeof line, "%s Compacted: the model continues from a summary%s", a->sy->think,
+        snprintf(line, sizeof line, "compacted: the model continues from a summary%s",
                  full ? ":" : " (ctrl+o shows it)");
-        out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
+        out_note(a, out, TUI_DIM, pt_strz(line));
         if (full)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->summary, 0);
         if (full && v->files.n)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->files, 0);
     } else if (is_note(v) && !full) { /* its "- session ..." lines */
         pt_str text = m->text;
-        char line[400];
         size_t at = 0, e;
         out_blank(out);
         while (at < text.n) {
             for (e = at; e < text.n && text.p[e] != '\n'; e++)
                 ;
-            if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ') {
-                snprintf(line, sizeof line, "%s %.*s", a->sy->think, (int)(e - at - 2), text.p + at + 2);
-                out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
-            }
+            if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ')
+                out_note(a, out, TUI_DIM, (pt_str){text.p + at + 2, e - at - 2});
             at = e + 1;
         }
-    } else if (strcmp(v->kind, "user") == 0) {
+    } else if (strcmp(v->kind, "user") == 0) { /* as it looked at the prompt */
         pt_str text = m->text, name;
-        char line[120];
+        char line[120], mark[16];
         out_blank(out);
+        snprintf(mark, sizeof mark, "%s ", a->sy->prompt);
         while (pt_rt_skill_block(&text, &name)) { /* a skill's instructions: just its name */
             snprintf(line, sizeof line, "skill %.*s", (int)(name.n > 64 ? 64 : name.n), name.p);
-            out_rail(a, out, a->sy->rail, TUI_DIM, TUI_DIM, pt_strz(line), 0);
+            out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
         }
         if (text.n)
-            out_rail(a, out, a->sy->rail, TUI_DIM, TUI_BOLD, text, 0);
+            out_text(a, out, TUI_BOLD, mark, ACCENT | TUI_BOLD, text, MARGIN);
     } else if (strcmp(v->kind, "assistant") == 0) {
         bool any = false;
         out_blank(out);
@@ -947,6 +871,7 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
                 tui_md md;
                 memset(&md, 0, sizeof md);
                 md.ascii = a->ascii;
+                md.margin = MARGIN;
                 out_md(a, out, &md, b->text, 0);
                 any = true;
             } else if (b->kind == PT_BLOCK_TOOL_CALL) {
@@ -956,15 +881,13 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
             }
         }
         if (m->stop == PT_STOP_ABORTED || m->stop == PT_STOP_ERROR)
-            out_text(a, out, TUI_DIM, NULL, 0, any ? PT_S("(interrupted)") : PT_S("(interrupted, nothing arrived)"), 0);
+            out_note(a, out, TUI_DIM, any ? PT_S("interrupted") : PT_S("interrupted, nothing arrived"));
     } else if (strcmp(v->kind, "tool_result") == 0) { /* else it joins a group */
         out_rail(a, out, a->sy->bar, TUI_DIM, m->is_error ? TUI_RED | TUI_DIM : TUI_DIM, m->text, 0);
     } else if (strcmp(v->kind, "error") == 0) {
-        char p[16];
-        snprintf(p, sizeof p, "%s ", a->sy->fail);
-        out_text(a, out, TUI_RED, p, TUI_RED, error_message(a, v->raw), 2);
+        out_note(a, out, TUI_RED, error_message(a, v->raw));
     } else if (strcmp(v->kind, "note") == 0) {
-        out_text(a, out, TUI_DIM, NULL, 0, m->text, 0);
+        out_note(a, out, TUI_DIM, m->text);
     }
 }
 
@@ -1027,6 +950,7 @@ static void live_begin(app *a, int kind)
     a->live_kind = kind;
     memset(&a->md, 0, sizeof a->md);
     a->md.ascii = a->ascii;
+    a->md.margin = MARGIN;
 }
 
 static void on_ai(app *a, const pt_ai_event *ev)
@@ -1130,7 +1054,7 @@ static void on_entries(app *a)
             live_end(a);
             if (v.msg->stop == PT_STOP_ABORTED || v.msg->stop == PT_STOP_ERROR) {
                 begin_msg(a);
-                out_z(a, TUI_DIM, a->printed ? "(interrupted)" : "(interrupted, nothing arrived)");
+                out_z(a, TUI_DIM, a->printed ? "interrupted" : "interrupted, nothing arrived");
             }
             a->streamed = false;
             a->started = false;
@@ -1156,25 +1080,21 @@ static void on_event(void *ud, const pt_event *ev)
         if (pt_str_eqz(ev->outcome, "started"))
             a->phase = PH_COMPACT;
         else if (pt_str_eqz(ev->outcome, "failed")) {
-            snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
-                     ev->error.p);
             group_close(a);
-            out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(line), 2);
+            out_note(a, &a->lines, TUI_RED, ev->error);
         }
         break;
     case PT_E_TOOL_START:
         a->phase = PH_TOOL;
         if (a->nruns < RUN_MAX) {
             run_call *r = &a->runs[a->nruns++];
-            int vi = verb_of(ev->name);
             r->task = ev->task;
-            r->cat = vi < 0 ? CAT_OTHER : verbs[vi].cat;
             snprintf(r->name, sizeof r->name, "%.*s", (int)(ev->name.n > 60 ? 60 : ev->name.n), ev->name.p);
             pt_buf_reset(&r->id);
             pt_buf_puts(&r->id, ev->call_id);
             pt_buf_reset(&r->out);
             pt_buf_reset(&r->head);
-            phrase(a, &r->head, 0, vi < 0 ? NULL : verbs[vi].running, ev->name, ev->args);
+            phrase(a, &r->head, ev->name, ev->args);
         }
         break;
     case PT_E_TOOL_OUTPUT: {
@@ -1207,9 +1127,7 @@ static void on_event(void *ud, const pt_event *ev)
     case PT_E_RUN_DONE:
         group_close(a);
         if (pt_str_eqz(ev->outcome, "failed")) {
-            snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
-                     ev->error.p);
-            out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(line), 2);
+            out_note(a, &a->lines, TUI_RED, ev->error);
         } else {
             /* What the spinner said, kept: how long the run took. */
             char took[32];
@@ -1218,7 +1136,7 @@ static void on_event(void *ud, const pt_event *ev)
                 snprintf(took, sizeof took, "<1s");
             else
                 secs_short(took, sizeof took, ms);
-            snprintf(line, sizeof line, "Worked for %s", took);
+            snprintf(line, sizeof line, "worked for %s", took);
             out_blank(&a->lines);
             out_z(a, TUI_DIM, line);
         }
@@ -1226,9 +1144,7 @@ static void on_event(void *ud, const pt_event *ev)
         break;
     case PT_E_FATAL:
         group_close(a);
-        snprintf(line, sizeof line, "%s %.*s", a->sy->fail, (int)(ev->error.n > 500 ? 500 : ev->error.n),
-                 ev->error.p);
-        out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(line), 2);
+        out_note(a, &a->lines, TUI_RED, ev->error);
         break;
     default:
         break;
@@ -1449,54 +1365,6 @@ static void row(app *a, pt_str styled)
     tui_frame_row(&a->frame, styled, a->cols);
 }
 
-/* The activity row: a spinner, then what the run is doing with a bright
- * band sweeping across the word, then the time and the hint. */
-static void spinner_row(app *a, int64_t now)
-{
-    char line[400];
-    const char *what = a->phase == PH_THINK     ? "Thinking"
-                       : a->phase == PH_WRITE   ? "Writing"
-                       : a->phase == PH_COMPACT ? "Compacting"
-                                                : "Waiting";
-    char running[80];
-    int64_t frame = now / SPIN_MS;
-    char el[32];
-    const char *spin = a->sy->spin[frame % a->sy->nspin];
-    const char *hint = now - a->esc_at < DOUBLE_MS ? "esc again to interrupt" : "esc esc to interrupt";
-    int n, i, at;
-    if (a->phase == PH_TOOL && a->nruns == 1) {
-        snprintf(running, sizeof running, "Running %s", a->runs[0].name);
-        what = running;
-    } else if (a->phase == PH_TOOL && a->nruns) {
-        snprintf(running, sizeof running, "Running %d calls", a->nruns);
-        what = running;
-    }
-    pt_buf_reset(&a->tmp);
-    tui_style(&a->tmp, TUI_BOLD);
-    pt_buf_putz(&a->tmp, spin);
-    pt_buf_putc(&a->tmp, ' ');
-    if (a->phase == PH_RETRY) {
-        int64_t left = (a->retry_until - now + 999) / 1000;
-        tui_style(&a->tmp, TUI_DIM);
-        snprintf(line, sizeof line, "Retrying in %llds · %s · %.*s", (long long)(left > 0 ? left : 0), hint,
-                 (int)(a->retry_err.n > 200 ? 200 : a->retry_err.n), a->retry_err.p);
-        pt_buf_putz(&a->tmp, line);
-    } else {
-        n = (int)strlen(what);
-        at = (int)(frame % (n + 8)) - 3; /* the band: three letters, then a pause */
-        for (i = 0; i < n; i++) {
-            if (i == 0 || i == at || i == at + 3)
-                tui_style(&a->tmp, i >= at && i < at + 3 ? 0 : TUI_DIM);
-            pt_buf_putc(&a->tmp, what[i]);
-        }
-        tui_style(&a->tmp, TUI_DIM);
-        secs_short(el, sizeof el, now - a->run_at);
-        snprintf(line, sizeof line, " · %s · %s", el, hint);
-        pt_buf_putz(&a->tmp, line);
-    }
-    row(a, pt_buf_str(&a->tmp));
-}
-
 static void blank_row(app *a)
 {
     row(a, PT_STR_NULL);
@@ -1520,35 +1388,37 @@ static void tokens_short(char *out, size_t cap, uint64_t n)
         memmove(out + n - 3, "M", 2);
 }
 
-/* Below the input: the model (without its provider) and effort, or what
- * the keys do while a menu is open. */
+/* Below the input, dim and still while a run goes on: the model (without
+ * its provider), effort and context used; what the keys do while a menu
+ * or a question is open; or why the run is waiting. */
 static void status_row(app *a, int64_t now, int total, int sel)
 {
     char line[600];
     const char *model = strchr(a->model, '/');
     int n;
     pt_buf_reset(&a->tmp);
+    pt_buf_putz(&a->tmp, "  ");
+    tui_style(&a->tmp, TUI_DIM);
     if (now - a->ctrlc_at < DOUBLE_MS) {
-        tui_style(&a->tmp, TUI_DIM);
         pt_buf_putz(&a->tmp, "ctrl-c again to quit");
+    } else if (a->running && now - a->esc_at < DOUBLE_MS) {
+        pt_buf_putz(&a->tmp, "esc again to interrupt");
     } else if (a->asked) {
-        tui_style(&a->tmp, TUI_DIM);
         pt_buf_putz(&a->tmp, "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
     } else if (a->menu == MENU_SETTINGS) {
-        tui_style(&a->tmp, TUI_DIM);
         pt_buf_putz(&a->tmp, "↑↓ select · ←→ change · enter edit · esc close");
     } else if (a->menu != MENU_NONE) {
-        tui_style(&a->tmp, TUI_DIM);
-        snprintf(line, sizeof line, "↑↓ select · tab complete · enter run · esc close%s", total > 1 ? " · " : "");
-        pt_buf_putz(&a->tmp, line);
+        pt_buf_putz(&a->tmp, "↑↓ select · tab complete · enter run · esc close");
         if (total > 1) {
-            snprintf(line, sizeof line, "%d/%d", sel + 1, total);
+            snprintf(line, sizeof line, " · %d/%d", sel + 1, total);
             pt_buf_putz(&a->tmp, line);
         }
+    } else if (a->running && a->phase == PH_RETRY) {
+        snprintf(line, sizeof line, "retrying · %.*s", (int)(a->retry_err.n > 200 ? 200 : a->retry_err.n),
+                 a->retry_err.p);
+        pt_buf_putz(&a->tmp, line);
     } else {
-        tui_style(&a->tmp, TUI_BOLD);
         pt_buf_putz(&a->tmp, model ? model + 1 : a->model[0] ? a->model : "no model");
-        tui_style(&a->tmp, TUI_DIM);
         n = snprintf(line, sizeof line, " · %s", pt_reasoning_name(a->o.reasoning));
         if (a->ctx_window) { /* the context used, of the model's window */
             char used[16], all[16];
@@ -1563,18 +1433,25 @@ static void status_row(app *a, int64_t now, int total, int sel)
     row(a, pt_buf_str(&a->tmp));
 }
 
+/* A choice in a list under the input, the selection marked. */
+static void pick(app *a, bool on)
+{
+    pt_buf_reset(&a->tmp);
+    pt_buf_putz(&a->tmp, "  ");
+    tui_style(&a->tmp, ACCENT | TUI_BOLD);
+    pt_buf_putz(&a->tmp, on ? a->sy->sel : " ");
+    tui_style(&a->tmp, on ? TUI_BOLD : 0);
+    pt_buf_putc(&a->tmp, ' ');
+}
+
 static void menu_row(app *a, int i)
 {
     bool on = i == a->sel;
-    pt_buf_reset(&a->tmp);
-    tui_style(&a->tmp, TUI_BOLD);
-    pt_buf_putz(&a->tmp, on ? a->sy->sel : " ");
-    pt_buf_putc(&a->tmp, ' ');
+    pick(a, on);
     if (a->menu == MENU_SETTINGS) {
         int k = settings[i].k;
         char v[600];
-        tui_style(&a->tmp, on ? TUI_BOLD : 0);
-        snprintf(v, sizeof v, "%-10s ", settings[i].name);
+        snprintf(v, sizeof v, "%-14s", settings[i].name);
         pt_buf_putz(&a->tmp, v);
         tui_style(&a->tmp, TUI_CYAN);
         pt_buf_putz(&a->tmp, a->cfg->val[k][0] ? a->cfg->val[k] : "(none)");
@@ -1585,7 +1462,6 @@ static void menu_row(app *a, int i)
         }
     } else {
         int col = 0;
-        tui_style(&a->tmp, on ? TUI_BOLD : 0);
         if (a->menu == MENU_CMD)
             pt_buf_putc(&a->tmp, '/');
         tui_clean(&a->tmp, item_label(a, i), &col);
@@ -1623,44 +1499,47 @@ static bool asking(app *a)
 static void ask_row(app *a, int i)
 {
     char line[300];
-    bool on = i == a->ask_sel;
-    pt_buf_reset(&a->tmp);
-    tui_style(&a->tmp, TUI_BOLD);
-    pt_buf_putz(&a->tmp, on ? a->sy->sel : " ");
-    tui_style(&a->tmp, on ? TUI_BOLD : 0);
+    pick(a, i == a->ask_sel);
     if (i == 0)
-        snprintf(line, sizeof line, " 1. Yes");
+        snprintf(line, sizeof line, "1  yes");
     else if (i == 1 && a->ask_prefix[0])
-        snprintf(line, sizeof line, " 2. Yes, and allow %.*s \"%s\" this session", (int)a->ask.name.n,
+        snprintf(line, sizeof line, "2  yes, and allow %.*s \"%s\" this session", (int)a->ask.name.n,
                  a->ask.name.p, a->ask_prefix);
     else if (i == 1)
-        snprintf(line, sizeof line, " 2. Yes, and allow %.*s this session", (int)a->ask.name.n, a->ask.name.p);
+        snprintf(line, sizeof line, "2  yes, and allow %.*s this session", (int)a->ask.name.n, a->ask.name.p);
     else
-        snprintf(line, sizeof line, " 3. No (esc)");
+        snprintf(line, sizeof line, "3  no (esc)");
     pt_buf_putz(&a->tmp, line);
     row(a, pt_buf_str(&a->tmp));
 }
 
-/* The question: the call on one row ("● Run make test"), then the choices. */
+/* The question: a blank row while there is room, the call on one row
+ * ("? bash  make test"), then the choices. */
 static void ask_rows(app *a, int n)
 {
-    int col = 0, vi = verb_of(a->ask.name), i;
+    int col = 0, i;
     size_t k;
+    if (n > 4) {
+        blank_row(a);
+        n--;
+    }
     pt_buf_reset(&a->tmp2);
-    tui_style(&a->tmp2, TUI_BOLD);
-    pt_buf_putz(&a->tmp2, a->sy->bullet);
+    tui_style(&a->tmp2, ACCENT | TUI_BOLD);
+    pt_buf_putz(&a->tmp2, a->sy->ask);
     tui_style(&a->tmp2, 0);
     pt_buf_putc(&a->tmp2, ' ');
-    if (vi < 0 && a->ask.prompt.n) { /* another tool: its name and what it asks */
+    if (tool_of(a->ask.name) < 0 && a->ask.prompt.n) { /* another tool: its name and what it asks */
         size_t at = a->tmp2.n;
+        tui_style(&a->tmp2, TUI_DIM);
         pt_buf_put(&a->tmp2, a->ask.name.p, a->ask.name.n > 60 ? 60 : a->ask.name.n);
+        tui_style(&a->tmp2, 0);
         pt_buf_putc(&a->tmp2, ' ');
         tui_clean(&a->tmp2, a->ask.prompt, &col);
         for (k = at; k < a->tmp2.n; k++)
             if (a->tmp2.p[k] == '\n')
                 a->tmp2.p[k] = ' ';
     } else {
-        phrase(a, &a->tmp2, 0, vi < 0 ? NULL : verbs[vi].ask, a->ask.name, a->ask.args);
+        phrase(a, &a->tmp2, a->ask.name, a->ask.args);
     }
     k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
     a->tmp2.n = k;
@@ -1672,7 +1551,9 @@ static void ask_rows(app *a, int n)
 /* Build the band (16.2.2) within its height budget. */
 static void build_frame(app *a, int64_t now)
 {
-    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, act, st, gaps, i, first, top, nask;
+    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, st, gap, i, first, top, nask;
+    /* while a run is active, the prompt's mark is the spinner */
+    const char *mark = a->running && !a->asked ? a->sy->spin[now / SPIN_MS % a->sy->nspin] : a->sy->prompt;
     size_t secret = secret_at(pt_buf_str(&a->in.text));
     int total = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->nitems;
     int sel = a->menu == MENU_SETTINGS ? a->set_sel : a->sel;
@@ -1689,45 +1570,43 @@ static void build_frame(app *a, int64_t now)
     }
     if (a->live_kind != LIVE_NONE && a->live.n) {
         tui_md copy = a->md;
+        if (!a->started) /* where the message's blank line will be */
+            pt_buf_putc(live_rows, '\n');
         tui_md_line(&copy, pt_buf_str(&a->live), a->cols, a->live_kind == LIVE_THINK ? TUI_DIM : 0, true,
                     live_rows);
     }
     for (i = 0; (size_t)i < live_rows->n; i++)
         live_n += live_rows->p[i] == '\n';
     a->asked = asking(a);
-    nask = a->asked ? 4 : 0;
-    act = a->running && !nask ? 1 : 0;
+    nask = a->asked ? 5 : 0;
     nq = a->running ? (int)(a->nq > 3 ? 4 : a->nq) : 0;
     nmenu = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->menu != MENU_NONE ? a->nitems : 0;
     if (nmenu > 8)
         nmenu = 8;
     if (nask)
         nmenu = 0;
-    st = 1;
-    gaps = 2;
+    st = gap = 1;
     show = a->rows / 3 < 8 ? a->rows / 3 : 8;
     if (show < 1)
         show = 1;
     tui_input_layout(&a->in, w > 3 ? w - 2 : 1, show);
     show = a->in.nrows < show ? a->in.nrows : show;
     if (tiny) {
-        live_n = act = nq = nmenu = st = gaps = 0;
+        live_n = nq = nmenu = st = gap = 0;
         show = 1;
         nask = nask ? 1 : 0;
     }
     /* drop parts until it fits */
-    while (live_n + nask + act + nq + show + nmenu + st + gaps > avail) {
-        int over = live_n + nask + act + nq + show + nmenu + st + gaps - avail;
+    while (live_n + nask + nq + gap + show + nmenu + st > avail) {
+        int over = live_n + nask + nq + gap + show + nmenu + st - avail;
         if (nmenu) {
             nmenu = nmenu > over ? nmenu - over : 0;
         } else if (nq > 1) {
             nq = 1;
         } else if (live_n) {
             live_n = live_n > over ? live_n - over : 0;
-        } else if (gaps) {
-            gaps = 0;
-        } else if (act) {
-            act = 0;
+        } else if (gap) {
+            gap = 0;
         } else if (st) {
             st = 0;
         } else if (nq) {
@@ -1760,8 +1639,6 @@ static void build_frame(app *a, int64_t now)
     }
     if (nask)
         ask_rows(a, nask);
-    if (act)
-        spinner_row(a, now);
     for (i = 0; i < nq; i++) {
         char more[48];
         pt_buf_reset(&a->tmp);
@@ -1773,15 +1650,15 @@ static void build_frame(app *a, int64_t now)
             int col = 0;
             pt_str q = pt_buf_str(&a->queue[i].text);
             long nl = pt_str_find(q, '\n');
-            pt_buf_putz(&a->tmp, "  queued: ");
+            pt_buf_putz(&a->tmp, "  queued · ");
             if (nl >= 0)
                 q.n = (size_t)nl;
             tui_clean(&a->tmp, q, &col);
         }
         row(a, pt_buf_str(&a->tmp));
     }
-    /* the input box, with a blank row above and below */
-    if (gaps)
+    /* the input box after a blank row, the prompt's mark on its first row */
+    if (gap)
         blank_row(a);
     first = a->frame.n;
     top = a->in.scroll;
@@ -1789,8 +1666,8 @@ static void build_frame(app *a, int64_t now)
         const tui_irow *r = &a->in.rows[i];
         size_t pre;
         pt_buf_reset(&a->tmp);
-        tui_style(&a->tmp, TUI_BOLD);
-        pt_buf_putz(&a->tmp, a->sy->rail);
+        tui_style(&a->tmp, ACCENT | TUI_BOLD);
+        pt_buf_putz(&a->tmp, i == 0 ? mark : " ");
         tui_style(&a->tmp, 0);
         pt_buf_putc(&a->tmp, ' ');
         pre = a->tmp.n;
@@ -1809,8 +1686,8 @@ static void build_frame(app *a, int64_t now)
     }
     if (a->frame.n == first) { /* nothing laid out: an empty prompt */
         pt_buf_reset(&a->tmp);
-        tui_style(&a->tmp, TUI_BOLD);
-        pt_buf_putz(&a->tmp, a->sy->rail);
+        tui_style(&a->tmp, ACCENT | TUI_BOLD);
+        pt_buf_putz(&a->tmp, mark);
         tui_style(&a->tmp, 0);
         pt_buf_putc(&a->tmp, ' ');
         row(a, pt_buf_str(&a->tmp));
@@ -1837,8 +1714,6 @@ static void build_frame(app *a, int64_t now)
             menu_row(a, i);
         a->sel = save;
     }
-    if (gaps)
-        blank_row(a);
     if (st)
         status_row(a, now, total, sel);
 }
@@ -1948,7 +1823,7 @@ static void finish_setting(app *a)
         job->active = false;
         if (!job->ok) {
             group_close(a);
-            out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(job->err), 2);
+            out_note(a, &a->lines, TUI_RED, pt_strz(job->err));
         } else {
             for (i = 0; i < NSETTINGS && settings[i].k != job->key; i++)
                 ;
@@ -2147,7 +2022,7 @@ static bool open_session(app *a, const char *id)
                                     on_event, a, a->err, sizeof a->err);
     if (!a->opening) {
         group_close(a);
-        out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(a->err), 2);
+        out_note(a, &a->lines, TUI_RED, pt_strz(a->err));
         a->code = 1;
         return false;
     }
@@ -2280,7 +2155,7 @@ static void cmd_ps(app *a)
                      v[i].status, v[i].command);
         else
             snprintf(line, sizeof line, "session %u · running %s · %.200s", v[i].session, took, v[i].command);
-        out_text(a, &a->lines, TUI_DIM, NULL, 0, pt_strz(line), 2);
+        out_note(a, &a->lines, TUI_DIM, pt_strz(line));
     }
 }
 
@@ -2674,7 +2549,7 @@ static void finish_session(app *a)
     a->opening = NULL;
     if (rc) {
         group_close(a);
-        out_text(a, &a->lines, TUI_RED, NULL, 0, pt_strz(a->err), 2);
+        out_note(a, &a->lines, TUI_RED, pt_strz(a->err));
         a->urgent = true;
         if (a->fallback[0]) {
             char back[64];
@@ -3199,8 +3074,8 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         char head[100];
         pt_buf first;
         pt_buf_init(&first, pt_sys_allocator());
-        snprintf(head, sizeof head, " v%s · /help for commands", PT_VERSION);
-        out_text(&a, &first, TUI_DIM, "pytte", TUI_BOLD, pt_strz(head), 0);
+        snprintf(head, sizeof head, " %s · /help for commands", PT_VERSION);
+        out_text(&a, &first, TUI_DIM, "pytte", ACCENT | TUI_BOLD, pt_strz(head), 0);
         pt_buf_puts(&first, pt_buf_str(&a.lines));
         pt_buf_reset(&a.lines);
         pt_buf_puts(&a.lines, pt_buf_str(&first));

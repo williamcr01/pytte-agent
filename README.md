@@ -130,7 +130,7 @@ it to end (at least 5 seconds per poll), or stops it. The footer counts
 the ones still running, `/ps` lists them and `/stop` stops them; they
 end when pytte does. When one ends and nothing has read it by the time
 the model is idle, pytte starts a turn with a note saying so (shown as
-`✻ session 8 ended with exit code 0: make test`), and the model reads it
+`· session 8 ended with exit code 0: make test`), and the model reads it
 and carries on; a command the user stopped with `/stop` gets no note. `read` shows a file with
 line numbers. `write` replaces a whole file atomically. `edit` replaces
 text that must match exactly once, and refuses when the file changed since

@@ -195,6 +195,7 @@ typedef struct tui_md {
     char fch;   /* its fence character and length */
     int flen;
     bool ascii; /* ASCII symbols */
+    int margin; /* spaces before every row with text (0-8) */
 } tui_md;
 
 /* Render one complete source line (no newline) as styled rows, each
@@ -202,7 +203,8 @@ typedef struct tui_md {
  * (dim for thinking). band: for the band, where code lines are cut into
  * rows and widths are w_max; otherwise code and table lines are left for
  * the terminal to wrap. Returns the rows added. Advances the fence state;
- * render a copy to show an unfinished line. */
+ * render a copy to show an unfinished line. Rows start with m->margin
+ * spaces, within the same cols. */
 int tui_md_line(tui_md *m, pt_str line, int cols, int base, bool band, pt_buf *out);
 
 /* ---- input.c: the input box (16.2.8) ---- */

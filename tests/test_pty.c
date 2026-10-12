@@ -322,11 +322,22 @@ static bool wait_for(pty *p, const char *text, int ms)
 }
 
 /* Until no run is active (the activity line is gone). */
+/* A run is active: the spinner is the prompt's mark (and a running call's). */
+static bool busy(pty *p)
+{
+    static const char *const spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    size_t i;
+    for (i = 0; i < sizeof spin / sizeof spin[0]; i++)
+        if (has(p, spin[i]))
+            return true;
+    return false;
+}
+
 static bool wait_idle(pty *p, int ms)
 {
     int64_t end = pt_sys_now_ms() + ms;
     pump(p, 50);
-    while (has(p, "to interrupt")) {
+    while (busy(p)) {
         if (pt_sys_now_ms() > end || p->eof) {
             fprintf(stderr, "    still running; the screen:\n%s\n", p->scratch.p);
             return false;
@@ -404,17 +415,17 @@ static void test_chat(void)
     CHECK(p.v->kitty == 1); /* the query was answered: flags pushed */
     CHECK(p.v->paste);
     keys(&p, "hi there");
-    CHECK(wait_for(&p, "┃ hi there", 2000));
+    CHECK(wait_for(&p, "› hi there", 2000));
     keys(&p, "\r");
     CHECK(wait_for(&p, "Hello from the faux provider! Nothing here touched the network.", 5000));
-    CHECK(wait_for(&p, "✻ thought", 2000));
+    CHECK(wait_for(&p, "∴ thought", 2000));
     CHECK(wait_idle(&p, 3000));
-    CHECK(wait_for(&p, "network.\n\nWorked for ", 1000)); /* the spinner's time, kept */
-    CHECK(wait_for(&p, "\nfaux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
+    CHECK(wait_for(&p, "network.\n\n· worked for ", 1000)); /* the spinner's time, kept */
+    CHECK(wait_for(&p, "  faux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
     CHECK(finish(&p, 3000) == 0);
-    CHECK(has(&p, "┃ hi there"));
-    CHECK(has(&p, "\n\nto continue this session: pytte -r 20")); /* the session's id */
+    CHECK(has(&p, "› hi there"));
+    CHECK(has(&p, "\n\n· to continue this session: pytte -r 20")); /* the session's id */
     modes_restored(&p);
     CHECK(!p.v->paste);
     {
@@ -427,7 +438,7 @@ static void test_chat(void)
         pty_free(&p);
         CHECK(id[0] != 0);
         pty_start(&p, 24, 80, again);
-        CHECK(wait_for(&p, "┃ hi there\n", 3000));
+        CHECK(wait_for(&p, "› hi there\n", 3000));
         keys(&p, "\x04");
         CHECK(finish(&p, 3000) == 0);
         pty_free(&p);
@@ -460,8 +471,8 @@ static void test_kill9(void)
     pty_free(&p);
     /* the transcript is the same after pytte -c, with the partial marked */
     pty_start(&p, 24, 80, again);
-    CHECK(wait_for(&p, "┃ list the files", 3000));
-    CHECK(wait_for(&p, "(interrupted)", 3000));
+    CHECK(wait_for(&p, "› list the files", 3000));
+    CHECK(wait_for(&p, "· interrupted", 3000));
     CHECK(wait_for(&p, "and resume.\n", 8000));
     CHECK(wait_idle(&p, 3000));
     keys(&p, "\x04"); /* Ctrl-D, legacy */
@@ -483,11 +494,11 @@ static void test_suspend_and_signals(void)
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "draft text");
-    CHECK(wait_for(&p, "┃ draft text", 2000));
+    CHECK(wait_for(&p, "› draft text", 2000));
     keys(&p, "\x1b[122;5u"); /* Ctrl-Z */
     CHECK(wait_for(&p, "[stopped]", 2000));
     CHECK(p.v->kitty == 0 && !p.v->paste); /* restored while stopped */
-    CHECK(wait_for(&p, "┃ draft text", 3000)); /* continued: drawn again */
+    CHECK(wait_for(&p, "› draft text", 3000)); /* continued: drawn again */
     pump(&p, 100);
     CHECK(p.v->kitty == 1 && p.v->paste);
     /* a resize storm */
@@ -541,7 +552,7 @@ static void test_resize_while_streaming(void)
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "list the files\r");
-    CHECK(wait_for(&p, "esc esc to interrupt", 3000));
+    CHECK(wait_for(&p, "The user wants a listing", 3000));
     for (i = 0; i < 40; i++) {
         memset(&ws, 0, sizeof ws);
         ws.ws_row = 24;
@@ -551,9 +562,8 @@ static void test_resize_while_streaming(void)
         pump(&p, 25 + (i * 13) % 30);
     }
     CHECK(wait_idle(&p, 10000));
-    CHECK(count(&p, "esc esc to interrupt") == 0);
     CHECK(count(&p, "The user wants a listing") == 0); /* the live tail of the thinking */
-    CHECK(count(&p, "┃ list the files") == 1);
+    CHECK(count(&p, "› list the files") == 1);
     CHECK(count(&p, "Let me look at the files first.") == 1);
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
@@ -571,19 +581,19 @@ static void test_interrupt_and_queue(void)
     keys(&p, "list the files\r");
     CHECK(wait_for(&p, "Let me look at the files first.\n", 5000));
     keys(&p, "and then?\r");
-    CHECK(wait_for(&p, "queued: and then?", 2000));
+    CHECK(wait_for(&p, "queued · and then?", 2000));
     CHECK(wait_for(&p, "No tools are", 5000));
     /* the call shows the gist of its arguments, then how it ended */
-    CHECK(wait_for(&p, "● Couldn't run ls\n    Invalid arguments: $: missing required property command", 1000));
+    CHECK(wait_for(&p, "✗ bash  ls · failed\n        Invalid arguments: $: missing required property command", 1000));
     keys(&p, "\x1b[27u");
     CHECK(wait_for(&p, "esc again to interrupt", 1000));
     keys(&p, "\x1b[27u");
-    CHECK(wait_for(&p, "(interrupted)", 2000));
+    CHECK(wait_for(&p, "· interrupted", 2000));
     /* the queued input goes next; the script's last turn answers it */
-    CHECK(wait_for(&p, "┃ and then?", 3000));
+    CHECK(wait_for(&p, "› and then?", 3000));
     CHECK(wait_for(&p, "and resume.\n", 8000));
     CHECK(wait_idle(&p, 3000));
-    CHECK(!has(&p, "queued:"));
+    CHECK(!has(&p, "queued ·"));
     keys(&p, "\x1b[100;5u");
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
@@ -604,29 +614,27 @@ static void test_tool_rendering(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
     CHECK(wait_for(&p, /* the band: the commands run at once, and rows come as they end */
-                   "● 3 tool calls · 3 commands · 1 failed\n"
-                   "├ Ran echo 31\n"
-                   "├ Exited 2 echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2\n"
-                   "└ Running echo started; sleep 1; echo finished\n"
-                   "  │ started\n",
+                   "✓ bash  echo 31\n"
+                   "✗ bash  echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2 · exit 2\n",
+                   3000));
+    CHECK(wait_for(&p, /* the running call last, by the spinner, with the end of its output */
+                   " bash  echo started; sleep 1; echo finished\n"
+                   "        started\n",
                    3000));
     CHECK(wait_for(&p, "Fixed.", 5000));
-    CHECK(has(&p, "Looking.\n\n"
-                  "● 6 tool calls · 3 commands · 1 read · 1 write · 1 edit · 1 failed\n"
-                  "├ Ran echo 31\n"
-                  "├ Exited 2 echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2\n"
-                  "│   two\n"
-                  "│   band.c:88: error\n"
-                  "│   make: Error 1\n"
-                  "├ Ran echo started; sleep 1; echo finished · 1s\n"
-                  "├ Wrote build/test/render.c +2\n"
-                  "├ Read build/test/render.c · 2 lines\n"
-                  "└ Edited build/test/render.c +1 / -1\n"
-                  "    - int up = cur;\n"
-                  "    + int up = b->cur;\n"
+    CHECK(has(&p, "  Looking.\n\n"
+                  "✓ bash  echo 31\n"
+                  "✗ bash  echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2 · exit 2\n"
+                  "        two\n"
+                  "        band.c:88: error\n"
+                  "        make: Error 1\n"
+                  "✓ bash  echo started; sleep 1; echo finished · 1s\n"
+                  "✓ write build/test/render.c +2\n"
+                  "✓ read  build/test/render.c · 2 lines\n"
+                  "✓ edit  build/test/render.c +1 -1\n"
                   "\n"
-                  "Fixed."));
-    CHECK(!has(&p, "│   one"));
+                  "  Fixed."));
+    CHECK(!has(&p, "        one"));
     CHECK(!has(&p, "[exit code 2]"));
     CHECK(wait_idle(&p, 3000));
     keys(&p, "\x04");
@@ -635,10 +643,10 @@ static void test_tool_rendering(void)
     pty_free(&p);
     /* resumed, the log gives the same group, once */
     pty_start(&p, 30, 100, again);
-    CHECK(wait_for(&p, "└ Edited build/test/render.c +1 / -1\n    - int up = cur;\n", 3000));
+    CHECK(wait_for(&p, "✓ edit  build/test/render.c +1 -1\n", 3000));
     CHECK(wait_for(&p, "faux · ", 3000));
     pump(&p, 300);
-    CHECK(!has(&p, "Fixed.\n\n┃ go"));
+    CHECK(!has(&p, "Fixed.\n\n› go"));
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
     pty_free(&p);
@@ -659,11 +667,11 @@ static void test_background_note(void)
     CHECK(wait_for(&p, "It runs in the background.", 5000));
     CHECK(wait_for(&p, "It printed built.", 8000));
     CHECK(has(&p, "It runs in the background.\n\n"
-                  "Worked for "));
-    CHECK(has(&p, "Worked for 1s\n\n"
-                  "✻ session 8 ended with exit code 0: sleep 2; echo built\n\n"
-                  "● Checked session 8\n\n"
-                  "It printed built."));
+                  "· worked for "));
+    CHECK(has(&p, "· worked for 1s\n\n"
+                  "· session 8 ended with exit code 0: sleep 2; echo built\n\n"
+                  "✓ poll  session 8\n\n"
+                  "  It printed built."));
     CHECK(!has(&p, "[pytte]")); /* the note is not shown as typed */
     CHECK(wait_idle(&p, 3000));
     keys(&p, "\x04");
@@ -688,15 +696,14 @@ static void test_background(void)
     CHECK(wait_for(&p, "· 1 in background (/ps)", 3000)); /* the footer */
     CHECK(wait_for(&p, "Done.", 20000));
     CHECK(has(&p, "Starting it.\n\n"
-                  "● 7 tool calls · 7 commands · 2 failed\n"
-                  "├ Started echo first; sleep 8.5; echo second; exit 3 · still running as session 8\n"
-                  "├ Checked session 8 · still running\n"
-                  "├ Exited 3 session 8 · 2s\n"
-                  "│   second\n"
-                  "├ Couldn't check session 8\n"));
-    CHECK(has(&p, "├ Started echo up; sleep 100 · still running as session 19\n"));
-    CHECK(has(&p, "├ Checked session 19 (stop)\n") || has(&p, "└ Checked session 19 (stop)\n"));
-    CHECK(has(&p, "Started echo left; sleep 100 · still running as session 24\n"));
+                  "✓ bash  echo first; sleep 8.5; echo second; exit 3 · still running as session 8\n"
+                  "✓ poll  session 8 · still running\n"
+                  "✗ poll  session 8 · exit 3 · 2s\n"
+                  "        second\n"
+                  "✗ poll  session 8 · failed\n"));
+    CHECK(has(&p, "✓ bash  echo up; sleep 100 · still running as session 19\n"));
+    CHECK(has(&p, "✓ poll  session 19 (stop)\n"));
+    CHECK(has(&p, "✓ bash  echo left; sleep 100 · still running as session 24\n"));
     CHECK(!has(&p, "[still running"));
     CHECK(wait_idle(&p, 3000));
     /* one left running: the footer counts it, /ps lists it, /stop ends it */
@@ -726,18 +733,17 @@ static void test_approval(void)
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
-    CHECK(wait_for(&p, "1. Yes", 3000));
-    CHECK(has(&p, "● Run echo hi-from-bash; echo second-line"));
-    CHECK(has(&p, "2. Yes, and allow bash \"echo\" this session"));
+    CHECK(wait_for(&p, "  › 1  yes", 3000));
+    CHECK(has(&p, "? bash  echo hi-from-bash; echo second-line"));
+    CHECK(has(&p, "2  yes, and allow bash \"echo\" this session"));
     CHECK(has(&p, "esc no"));
     keys(&p, "1");
-    CHECK(wait_for(&p, "● Ran echo hi-from-bash; echo second-line\n", 3000));
-    CHECK(wait_for(&p, "● Run touch should-not-exist", 3000));
-    CHECK(wait_for(&p, "3. No (esc)", 3000));
+    CHECK(wait_for(&p, "✓ bash  echo hi-from-bash; echo second-line\n", 3000));
+    CHECK(wait_for(&p, "? bash  touch should-not-exist", 3000));
+    CHECK(wait_for(&p, "3  no (esc)", 3000));
     keys(&p, "\x1b[27u");
-    CHECK(wait_for(&p, "● 2 tool calls · 2 commands · 1 denied\n"
-                       "├ Ran echo hi-from-bash; echo second-line\n"
-                       "└ Denied bash touch should-not-exist\n",
+    CHECK(wait_for(&p, "✓ bash  echo hi-from-bash; echo second-line\n"
+                       "✗ bash  touch should-not-exist · denied\n",
                    3000));
     CHECK(wait_for(&p, "All done with tools.", 3000));
     CHECK(wait_idle(&p, 3000));
@@ -760,7 +766,7 @@ static void test_compaction(void)
     CHECK(wait_for(&p, "One. Lorem", 3000));
     CHECK(wait_idle(&p, 3000));
     keys(&p, "/compact\r");
-    CHECK(wait_for(&p, "Compacted: the model continues from a summary (ctrl+o shows it)", 3000));
+    CHECK(wait_for(&p, "compacted: the model continues from a summary (ctrl+o shows it)", 3000));
     CHECK(wait_idle(&p, 3000));
     keys(&p, "/compact\r");
     CHECK(wait_for(&p, "nothing to compact yet", 3000));
@@ -776,9 +782,9 @@ static void test_compaction(void)
     keys(&p, "q5\r");
     CHECK(wait_for(&p, "Five. Neque", 5000));
     CHECK(wait_idle(&p, 3000));
-    if (count(&p, "Compacted: the model") != 2) /* the second time by itself */
+    if (count(&p, "compacted: the model") != 2) /* the second time by itself */
         fprintf(stderr, "%s\n", p.scratch.p);
-    CHECK(count(&p, "Compacted: the model") == 2);
+    CHECK(count(&p, "compacted: the model") == 2);
     keys(&p, "/usage\r");
     CHECK(wait_for(&p, "faux/faux: ", 3000));
     CHECK(has(&p, "requests"));
@@ -813,20 +819,20 @@ static void test_skills(void)
         pump(&p, 20); /* 0 only until the session is open */
     CHECK(has(&p, "/100k") && !has(&p, " 0/100k"));
     keys(&p, "check $ga");
-    CHECK(wait_for(&p, "▸ $garden  reads the soil", 1000));
+    CHECK(wait_for(&p, "  › $garden  reads the soil", 1000));
     keys(&p, "\r"); /* picks the skill; the message goes on */
-    CHECK(wait_for(&p, "┃ check $garden \n", 1000));
+    CHECK(wait_for(&p, "› check $garden \n", 1000));
     keys(&p, "now\r");
-    CHECK(wait_for(&p, "┃ skill garden\n┃ check $garden now", 3000));
+    CHECK(wait_for(&p, "› skill garden\n› check $garden now", 3000));
     CHECK(wait_for(&p, "Hello from the faux", 3000));
     CHECK(!has(&p, "Look at the soil")); /* the instructions are the model's */
     CHECK(wait_idle(&p, 3000));
     keys(&p, "/sk");
-    CHECK(wait_for(&p, "▸ /skill:garden  reads the soil", 1000));
+    CHECK(wait_for(&p, "  › /skill:garden  reads the soil", 1000));
     keys(&p, "\t");
-    CHECK(wait_for(&p, "┃ /skill:garden \n", 1000));
+    CHECK(wait_for(&p, "› /skill:garden \n", 1000));
     keys(&p, "go\r");
-    CHECK(wait_for(&p, "┃ skill garden\n┃ go", 3000));
+    CHECK(wait_for(&p, "› skill garden\n› go", 3000));
     CHECK(wait_idle(&p, 3000));
     keys(&p, "/skill:nope x\r");
     CHECK(wait_for(&p, "no skill named nope", 1000));
@@ -849,19 +855,19 @@ static void test_commands(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
-    CHECK(wait_for(&p, "▸ /model    set the model", 1000)); /* descriptions in a column */
+    CHECK(wait_for(&p, "  › /model    set the model", 1000)); /* descriptions in a column */
     CHECK(wait_for(&p, "enter run · esc close · 1/14", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
-    CHECK(wait_for(&p, "▸ /quit", 1000));
+    CHECK(wait_for(&p, "  › /quit", 1000));
     CHECK(wait_for(&p, "14/14", 1000));
     keys(&p, "\x1b[B");
-    CHECK(wait_for(&p, "▸ /model", 1000));
+    CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");
-    CHECK(wait_for(&p, "┃ /thinking ", 1000));
+    CHECK(wait_for(&p, "› /thinking ", 1000));
     CHECK(wait_for(&p, "collapsed", 1000));
     keys(&p, "full\r");
-    CHECK(wait_for(&p, "\nswitched thinking: full\n", 1000));
-    CHECK(!has(&p, "┃ /thinking")); /* a command is not echoed, only what it did */
+    CHECK(wait_for(&p, "\n· switched thinking: full\n", 1000));
+    CHECK(!has(&p, "› /thinking")); /* a command is not echoed, only what it did */
     snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "\"tui\": {\"thinking\": \"full\"}"));
@@ -890,13 +896,13 @@ static void test_commands(void)
     keys(&p, "/model faux/faux\x1b");
     pump(&p, 100);
     keys(&p, "\r");
-    CHECK(wait_for(&p, "\nswitched model: faux/faux\n", 1000));
+    CHECK(wait_for(&p, "\n· switched model: faux/faux\n", 1000));
     CHECK(wait_for(&p, "faux · high", 1000));
     keys(&p, "/model nosuch/provider\r");
     CHECK(wait_for(&p, "nosuch/provider: ", 1000));
     /* a model is always named: the menu lists no bare providers */
     keys(&p, "/model anthropic");
-    CHECK(wait_for(&p, "▸ anthropic/claude-fable-5 ", 1000));
+    CHECK(wait_for(&p, "  › anthropic/claude-fable-5 ", 1000));
     CHECK(!has(&p, "anthropic  Anthropic"));
     keys(&p, "\x1b"); /* Esc closes the menu, so Enter sends what was typed */
     pump(&p, 100);
@@ -905,7 +911,7 @@ static void test_commands(void)
     keys(&p, "/settings model anthropic\x1b");
     pump(&p, 100);
     keys(&p, "\r");
-    CHECK(wait_for(&p, "\n\nanthropic: no model given", 1000));
+    CHECK(wait_for(&p, "\n\n✗ anthropic: no model given", 1000));
     CHECK(!has(&p, "saved model")); /* refused: nothing was saved */
     keys(&p, "/status\r");
     CHECK(wait_for(&p, "kitty keys on", 1000));
@@ -915,9 +921,9 @@ static void test_commands(void)
     CHECK(wait_for(&p, "unknown command /nope", 1000));
     /* /login: the key is masked, saved to auth.json, and kept out of the history */
     keys(&p, "/login anthr\t");
-    CHECK(wait_for(&p, "┃ /login anthropic ", 1000));
+    CHECK(wait_for(&p, "› /login anthropic ", 1000));
     keys(&p, "sk-test-123");
-    CHECK(wait_for(&p, "┃ /login anthropic ***********", 1000));
+    CHECK(wait_for(&p, "› /login anthropic ***********", 1000));
     CHECK(!has(&p, "sk-test"));
     keys(&p, "\r");
     CHECK(wait_for(&p, "saved the Anthropic key to ", 1000));
@@ -937,7 +943,7 @@ static void test_commands(void)
     CHECK(wait_idle(&p, 5000));
     keys(&p, "/quit\r");
     CHECK(finish(&p, 3000) == 0);
-    CHECK(has(&p, "A greeting. Answer briefly.\nHello from the faux provider!")); /* in the scrollback */
+    CHECK(has(&p, "A greeting. Answer briefly.\n  Hello from the faux provider!")); /* in the scrollback */
     modes_restored(&p);
     pty_free(&p);
     pty_start(&p, 24, 80, args);
@@ -960,13 +966,13 @@ static void test_history_pager_draft(void)
     keys(&p, "first question\r");
     CHECK(wait_idle(&p, 5000));
     keys(&p, "\x1b[A");
-    CHECK(wait_for(&p, "┃ first question", 1000));
+    CHECK(wait_for(&p, "› first question", 1000));
     keys(&p, "\x03"); /* Ctrl-C clears it */
     keys(&p, "/settings pager cat\r");
     CHECK(wait_for(&p, "saved pager: cat", 1000));
     keys(&p, "\x0f"); /* Ctrl-O: the thinking in full, through cat */
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 2000));
-    CHECK(wait_for(&p, "┃ ", 1000));
+    CHECK(wait_for(&p, "› ", 1000));
     keys(&p, "unsent words");
     pump(&p, 1300); /* saved at most once a second */
     kill(p.pid, SIGTERM);
@@ -974,7 +980,7 @@ static void test_history_pager_draft(void)
     modes_restored(&p);
     pty_free(&p);
     pty_start(&p, 24, 80, again);
-    CHECK(wait_for(&p, "┃ unsent words", 3000));
+    CHECK(wait_for(&p, "› unsent words", 3000));
     keys(&p, "\x03\x03");
     pump(&p, 100);
     keys(&p, "\x03");
@@ -1019,10 +1025,10 @@ static void test_early_input(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     CHECK(p.v->kitty == 0);
     keys(&p, "early prompt\rremaining draft");
-    CHECK(wait_for(&p, "┃ remaining draft", 1000));
+    CHECK(wait_for(&p, "› remaining draft", 1000));
     /* A late CPR is dropped; late kitty negotiation still enables keys. */
     keys(&p, "\x1b[1;1R\x1b[?0u\x1b[?1;2c");
-    CHECK(p.v->kitty == 1 && has(&p, "┃ remaining draft"));
+    CHECK(p.v->kitty == 1 && has(&p, "› remaining draft"));
     kill(p.pid, SIGTERM);
     fd = open(fifo, O_WRONLY);
     CHECK(fd >= 0);
@@ -1039,7 +1045,7 @@ static void test_early_input(void)
     CHECK(log && pt_str_contains((pt_str){log, n}, PT_S("\"event\":\"close\"")));
     free(log);
     pty_start(&p, 24, 80, again);
-    CHECK(wait_for(&p, "┃ remaining draft", 3000));
+    CHECK(wait_for(&p, "› remaining draft", 3000));
     CHECK(wait_idle(&p, 5000));
     keys(&p, "\x03\x04");
     CHECK(finish(&p, 3000) == 0);
@@ -1063,7 +1069,7 @@ static void test_blocked_settings(void)
     unlink(path);
     CHECK(mkfifo(path, 0600) == 0);
     keys(&p, "/settings thinking hidden\rstill typing");
-    CHECK(wait_for(&p, "┃ still typing", 1000));
+    CHECK(wait_for(&p, "› still typing", 1000));
     fd = open(path, O_WRONLY);
     CHECK(fd >= 0);
     if (fd >= 0) {
