@@ -218,6 +218,16 @@ void tui_band_redraw(tui_band *b)
     b->clear = true;
 }
 
+void tui_band_clear(tui_band *b)
+{
+    pt_buf_putz(&b->out, "\x1b[H\x1b[2J\x1b[3J");
+    b->h = 0;
+    b->cur = 0;
+    b->up = 0;
+    b->clear = false;
+    b->gap = false;
+}
+
 void tui_band_erase(tui_band *b)
 {
     up(b, b->up);

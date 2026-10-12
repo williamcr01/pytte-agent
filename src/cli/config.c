@@ -1,7 +1,7 @@
 /* Settings (section 19): built-in defaults, the user file, the project
  * file, then PYTTE_* variables; flags are applied by the caller. Settings
  * changed in the TUI are written back to the user file, one key at a time,
- * leaving every other byte of the file as it was (19.4). */
+ * keeping every other key; the file is rewritten indented (19.4). */
 #define _POSIX_C_SOURCE 200809L
 #include "cli/cli.h"
 
@@ -135,6 +135,38 @@ static size_t off(pt_str src, pt_str inner)
     return (size_t)(inner.p - src.p);
 }
 
+/* v indented by depth levels of two spaces, scalars copied as they were.
+ * Empty containers stay on one line. */
+static void pretty(pt_buf *b, const pt_json *v, int depth)
+{
+    const pt_json *m;
+    char open, close;
+    int i;
+    if (!pt_json_is(v, PT_J_OBJ) && !pt_json_is(v, PT_J_ARR)) {
+        pt_buf_puts(b, v->raw);
+        return;
+    }
+    open = pt_json_is(v, PT_J_OBJ) ? '{' : '[';
+    close = open == '{' ? '}' : ']';
+    pt_buf_putc(b, open);
+    for (m = v->child; m; m = m->next) {
+        pt_buf_putz(b, m == v->child ? "\n" : ",\n");
+        for (i = 0; i <= depth; i++)
+            pt_buf_putz(b, "  ");
+        if (open == '{') {
+            pt_json_quote(b, m->key);
+            pt_buf_putz(b, ": ");
+        }
+        pretty(b, m, depth + 1);
+    }
+    if (v->child) {
+        pt_buf_putc(b, '\n');
+        for (i = 0; i < depth; i++)
+            pt_buf_putz(b, "  ");
+    }
+    pt_buf_putc(b, close);
+}
+
 bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *err, size_t cap)
 {
     pt_arena ar;
@@ -205,7 +237,31 @@ bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *
         snprintf(err, cap, "out of memory building setting");
         goto done;
     }
-    ok = true;
+    /* Indent the result. It parses: value is JSON and src parsed. */
+    {
+        pt_arena ar2;
+        pt_buf b;
+        pt_arena_init(&ar2, pt_sys_allocator(), 0);
+        pt_buf_init(&b, pt_sys_allocator());
+        root = pt_json_parse(pt_buf_str(out), &ar2, &e);
+        if (!root) {
+            snprintf(err, cap, "not a JSON value: %.*s", (int)value.n, value.p);
+        } else {
+            pretty(&b, root, 0);
+            pt_buf_putc(&b, '\n');
+            if (b.oom) {
+                snprintf(err, cap, "out of memory building setting");
+            } else {
+                pt_buf_reset(out);
+                pt_buf_puts(out, pt_buf_str(&b));
+                ok = !out->oom;
+                if (!ok)
+                    snprintf(err, cap, "out of memory building setting");
+            }
+        }
+        pt_buf_free(&b);
+        pt_arena_free(&ar2);
+    }
 done:
     pt_arena_free(&ar);
     return ok;

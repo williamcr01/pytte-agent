@@ -185,6 +185,9 @@ void tui_band_commit(tui_band *b, pt_str lines, const tui_frame *f);
 void tui_band_resize(tui_band *b, int rows, int cols);
 /* Repaint everything from the top (Ctrl-L). */
 void tui_band_redraw(tui_band *b);
+/* Empty the screen and the terminal's scrollback; the next paint starts
+ * at the top row (/new, /resume). */
+void tui_band_clear(tui_band *b);
 /* Erase the band, leaving the cursor where its top was (exit, suspend). */
 void tui_band_erase(tui_band *b);
 

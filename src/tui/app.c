@@ -30,19 +30,17 @@ enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
  * what the user sent, thinking, notes, tool calls that worked or failed, a
  * question. Prose sits two columns in, beside them. */
 typedef struct syms {
-    const char *prompt, *think, *note, *ok, *fail, *ask, *sel, *bar, *more, *spin[10];
-    int nspin;
+    const char *prompt, *think, *note, *ok, *fail, *ask, *sel, *bar, *more, *dot;
 } syms;
 
-static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "…",
-                         {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}, 10};
-static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", {"-", "\\", "|", "/"}, 4};
+static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "…", "•"};
+static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", "*"};
 
 #define ACCENT TUI_MAGENTA /* the prompt, the spinner, the selection */
 #define MARGIN 2           /* where prose starts, after a mark and a space */
 #define NAME_W 6           /* a tool's name column: "bash  ", "write " */
 
-#define SPIN_MS 120  /* the activity row's frame: spinner and shimmer */
+#define BLINK_MS 500 /* the activity mark: on for the first half of each second of the clock */
 #define TOOL_FAIL 3  /* rows of a failed tool's output kept in the scrollback */
 #define TOOL_LIVE 5  /* rows of a running tool's output in the band */
 #define TOOL_KEEP 4096 /* bytes of it kept for that */
@@ -183,6 +181,8 @@ typedef struct app {
     bool running;
     int phase;
     int64_t run_at, retry_until;
+    int64_t wait_at; /* the run waits for an answer since then: its clock stands still */
+    int64_t tick;    /* the clock's half second last painted */
     pt_buf retry_err;
     /* the running calls, in the order they started */
     run_call runs[RUN_MAX];
@@ -215,7 +215,7 @@ typedef struct app {
     int64_t esc_at, ctrlc_at;
     /* pacing */
     bool dirty, urgent;
-    int64_t last_paint, spin_at, winch_at, keys_at;
+    int64_t last_paint, winch_at, keys_at;
     int interval;
     bool draft_dirty;
     int64_t draft_at;
@@ -464,6 +464,20 @@ static void secs_short(char *out, size_t cap, int64_t ms)
         snprintf(out, cap, "%lldm %llds", t / 60, t % 60);
     else
         snprintf(out, cap, "%lldh %lldm", t / 3600, t / 60 % 60);
+}
+
+/* How long the run has worked: the time spent waiting for an answer to a
+ * question does not count. */
+static int64_t run_clock(const app *a, int64_t now)
+{
+    return (a->wait_at ? a->wait_at : now) - a->run_at;
+}
+
+/* The activity mark blinks with the clock, lighting as its seconds change;
+ * it stays lit while the clock stands still. */
+static const char *blink(const app *a, int64_t now)
+{
+    return a->wait_at || run_clock(a, now) / BLINK_MS % 2 == 0 ? a->sy->dot : " ";
 }
 
 /* The call a result answers: searched from the newest entry back. */
@@ -720,12 +734,12 @@ static bool runs_oom(const app *a)
 
 /* The group: whole for the scrollback; live, for the band, with its
  * newest rows only, without details, and the running calls last, marked
- * by the spinner (the newest with the end of its output). */
+ * by the blinking dot (the newest with the end of its output). */
 static void group_render(app *a, pt_buf *out, bool live)
 {
     bool running = live && a->nruns;
     int i, first = 0;
-    const char *spin = a->sy->spin[pt_sys_now_ms() / SPIN_MS % a->sy->nspin];
+    const char *mark = blink(a, pt_sys_now_ms());
     char more[48];
     if (!a->ngrows && !running)
         return;
@@ -747,7 +761,7 @@ static void group_render(app *a, pt_buf *out, bool live)
             group_details(a, out, g);
     }
     for (i = 0; running && i < a->nruns; i++)
-        group_row(a, out, spin, ACCENT, pt_buf_str(&a->runs[i].head));
+        group_row(a, out, mark, ACCENT | TUI_BOLD, pt_buf_str(&a->runs[i].head));
     if (running) { /* the end of the newest one's output */
         const run_call *r = &a->runs[a->nruns - 1];
         pt_str o = pt_buf_str(&r->out), rows;
@@ -796,10 +810,16 @@ static void out_thinking(app *a, pt_buf *out, pt_str text, int64_t ms, bool full
         m.margin = MARGIN;
         out_md(a, out, &m, text, TUI_DIM);
     } else if (a->thinking == TH_COLLAPSED) {
-        if (ms >= 1000)
-            snprintf(line, sizeof line, "%s thought for %llds", a->sy->think, (long long)(ms / 1000));
-        else
-            snprintf(line, sizeof line, "%s thought", a->sy->think);
+        char took[32];
+        if (ms < 0) /* from the log, which does not time thinking */
+            took[0] = 0;
+        else if (ms < 1000)
+            snprintf(took, sizeof took, " for <1s");
+        else {
+            snprintf(took, sizeof took, " for ");
+            secs_short(took + 5, sizeof took - 5, ms);
+        }
+        snprintf(line, sizeof line, "%s thought%s", a->sy->think, took);
         out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
     }
 }
@@ -870,7 +890,7 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
         for (i = 0; i < m->nblocks; i++) {
             const pt_block *b = &m->blocks[i];
             if (b->kind == PT_BLOCK_THINKING && (b->text.n || full)) {
-                out_thinking(a, out, b->text, 0, full);
+                out_thinking(a, out, b->text, -1, full);
             } else if (b->kind == PT_BLOCK_TEXT) {
                 tui_md md;
                 memset(&md, 0, sizeof md);
@@ -1133,9 +1153,9 @@ static void on_event(void *ud, const pt_event *ev)
         if (pt_str_eqz(ev->outcome, "failed")) {
             out_note(a, &a->lines, TUI_RED, ev->error);
         } else {
-            /* What the spinner said, kept: how long the run took. */
+            /* What the clock said, kept: how long the run took. */
             char took[32];
-            int64_t ms = pt_sys_now_ms() - a->run_at;
+            int64_t ms = run_clock(a, pt_sys_now_ms());
             if (ms < 1000)
                 snprintf(took, sizeof took, "<1s");
             else
@@ -1145,6 +1165,7 @@ static void on_event(void *ud, const pt_event *ev)
             out_z(a, TUI_DIM, line);
         }
         a->run_at = pt_sys_now_ms(); /* a queued input runs next */
+        a->wait_at = 0;
         break;
     case PT_E_FATAL:
         group_close(a);
@@ -1392,8 +1413,8 @@ static void tokens_short(char *out, size_t cap, uint64_t n)
         memmove(out + n - 3, "M", 2);
 }
 
-/* Below the input, dim and still while a run goes on: the model (without
- * its provider), effort and context used; what the keys do while a menu
+/* Below the input, dim and still while a run goes on: the permission
+ * mode, the model (without its provider), effort and context used; what the keys do while a menu
  * or a question is open; or why the run is waiting. */
 static void status_row(app *a, int64_t now, int total, int sel)
 {
@@ -1422,6 +1443,8 @@ static void status_row(app *a, int64_t now, int total, int sel)
                  a->retry_err.p);
         pt_buf_putz(&a->tmp, line);
     } else {
+        pt_buf_putz(&a->tmp, pt_perm_name(a->o.perm));
+        pt_buf_putz(&a->tmp, " · ");
         pt_buf_putz(&a->tmp, model ? model + 1 : a->model[0] ? a->model : "no model");
         n = snprintf(line, sizeof line, " · %s", pt_reasoning_name(a->o.reasoning));
         if (a->ctx_window) { /* the context used, of the model's window */
@@ -1434,6 +1457,39 @@ static void status_row(app *a, int64_t now, int total, int sel)
             snprintf(line + n, sizeof line - (size_t)n, " · %u in background (/ps)", a->nbg);
         pt_buf_putz(&a->tmp, line);
     }
+    row(a, pt_buf_str(&a->tmp));
+}
+
+/* Above the input while a run is active: the blinking dot, what the run is
+ * doing, and its clock ("• thinking · 12s"). Only the clock moves. */
+static void activity_row(app *a, int64_t now)
+{
+    char what[120], el[32];
+    if (a->asked)
+        snprintf(what, sizeof what, "waiting for you");
+    else if (a->phase == PH_RETRY) {
+        int64_t left = (a->retry_until - now + 999) / 1000;
+        snprintf(what, sizeof what, "retrying in %llds", (long long)(left > 0 ? left : 0));
+    } else if (a->phase == PH_TOOL && a->nruns == 1)
+        snprintf(what, sizeof what, "running %s", a->runs[0].name);
+    else if (a->phase == PH_TOOL && a->nruns)
+        snprintf(what, sizeof what, "running %d calls", a->nruns);
+    else
+        snprintf(what, sizeof what, "%s", a->phase == PH_THINK     ? "thinking"
+                                          : a->phase == PH_WRITE   ? "writing"
+                                          : a->phase == PH_COMPACT ? "compacting"
+                                                                   : "working");
+    secs_short(el, sizeof el, run_clock(a, now));
+    pt_buf_reset(&a->tmp);
+    tui_style(&a->tmp, ACCENT | TUI_BOLD);
+    pt_buf_putz(&a->tmp, blink(a, now));
+    tui_style(&a->tmp, 0);
+    pt_buf_putc(&a->tmp, ' ');
+    pt_buf_putz(&a->tmp, what);
+    tui_style(&a->tmp, TUI_DIM);
+    pt_buf_putz(&a->tmp, " · ");
+    pt_buf_putz(&a->tmp, el);
+    tui_style(&a->tmp, 0);
     row(a, pt_buf_str(&a->tmp));
 }
 
@@ -1555,9 +1611,7 @@ static void ask_rows(app *a, int n)
 /* Build the band (16.2.2) within its height budget. */
 static void build_frame(app *a, int64_t now)
 {
-    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, st, gap, i, first, top, nask;
-    /* while a run is active, the prompt's mark is the spinner */
-    const char *mark = a->running && !a->asked ? a->sy->spin[now / SPIN_MS % a->sy->nspin] : a->sy->prompt;
+    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, st, gap, act, i, first, top, nask;
     size_t secret = secret_at(pt_buf_str(&a->in.text));
     int total = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->nitems;
     int sel = a->menu == MENU_SETTINGS ? a->set_sel : a->sel;
@@ -1582,7 +1636,14 @@ static void build_frame(app *a, int64_t now)
     for (i = 0; (size_t)i < live_rows->n; i++)
         live_n += live_rows->p[i] == '\n';
     a->asked = asking(a);
+    if (a->running && a->asked && !a->wait_at) /* the clock stands still while the user decides */
+        a->wait_at = now;
+    else if (a->wait_at && !a->asked) {
+        a->run_at += now - a->wait_at;
+        a->wait_at = 0;
+    }
     nask = a->asked ? 5 : 0;
+    act = a->running ? 1 : 0;
     nq = a->running ? (int)(a->nq > 3 ? 4 : a->nq) : 0;
     nmenu = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->menu != MENU_NONE ? a->nitems : 0;
     if (nmenu > 8)
@@ -1596,13 +1657,13 @@ static void build_frame(app *a, int64_t now)
     tui_input_layout(&a->in, w > 3 ? w - 2 : 1, show);
     show = a->in.nrows < show ? a->in.nrows : show;
     if (tiny) {
-        live_n = nq = nmenu = st = gap = 0;
+        live_n = nq = nmenu = st = gap = act = 0;
         show = 1;
         nask = nask ? 1 : 0;
     }
     /* drop parts until it fits */
-    while (live_n + nask + nq + gap + show + nmenu + st > avail) {
-        int over = live_n + nask + nq + gap + show + nmenu + st - avail;
+    while (live_n + nask + nq + gap + act + show + nmenu + st > avail) {
+        int over = live_n + nask + nq + gap + act + show + nmenu + st - avail;
         if (nmenu) {
             nmenu = nmenu > over ? nmenu - over : 0;
         } else if (nq > 1) {
@@ -1611,6 +1672,8 @@ static void build_frame(app *a, int64_t now)
             live_n = live_n > over ? live_n - over : 0;
         } else if (gap) {
             gap = 0;
+        } else if (act) {
+            act = 0;
         } else if (st) {
             st = 0;
         } else if (nq) {
@@ -1661,9 +1724,12 @@ static void build_frame(app *a, int64_t now)
         }
         row(a, pt_buf_str(&a->tmp));
     }
-    /* the input box after a blank row, the prompt's mark on its first row */
+    /* the input box after a blank row and the activity, the prompt's mark
+     * on its first row */
     if (gap)
         blank_row(a);
+    if (act)
+        activity_row(a, now);
     first = a->frame.n;
     top = a->in.scroll;
     for (i = top; i < a->in.nrows && i < top + show; i++) {
@@ -1671,7 +1737,7 @@ static void build_frame(app *a, int64_t now)
         size_t pre;
         pt_buf_reset(&a->tmp);
         tui_style(&a->tmp, ACCENT | TUI_BOLD);
-        pt_buf_putz(&a->tmp, i == 0 ? mark : " ");
+        pt_buf_putz(&a->tmp, i == 0 ? a->sy->prompt : " ");
         tui_style(&a->tmp, 0);
         pt_buf_putc(&a->tmp, ' ');
         pre = a->tmp.n;
@@ -1691,7 +1757,7 @@ static void build_frame(app *a, int64_t now)
     if (a->frame.n == first) { /* nothing laid out: an empty prompt */
         pt_buf_reset(&a->tmp);
         tui_style(&a->tmp, ACCENT | TUI_BOLD);
-        pt_buf_putz(&a->tmp, mark);
+        pt_buf_putz(&a->tmp, a->sy->prompt);
         tui_style(&a->tmp, 0);
         pt_buf_putc(&a->tmp, ' ');
         row(a, pt_buf_str(&a->tmp));
@@ -2079,6 +2145,9 @@ static void switch_session(app *a, const char *id)
         a->code = 0; /* allocation failed before the old session was handed off */
         return;
     }
+    pt_buf_reset(&a->lines); /* the old session's last lines: cleared anyway */
+    tui_band_clear(&a->band);
+    a->urgent = true;
     tui_input_set(&a->in, PT_STR_NULL);
     a->code = 0;
 }
@@ -2936,8 +3005,8 @@ static int timeout_ms(app *a, int64_t now)
         AT(a->last_paint + a->interval);
     if (tui_keys_pending(&a->keys))
         AT(a->keys_at + 30);
-    if (a->running) {
-        due = a->spin_at + SPIN_MS;
+    if (a->running && !a->wait_at) { /* the clock's next half second */
+        due = now + BLINK_MS - run_clock(a, now) % BLINK_MS;
         AT(due);
     }
     if (now - a->esc_at < DOUBLE_MS)
@@ -3129,6 +3198,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
             set_dirty(&a);
             if (a.running) {
                 a.run_at = now;
+                a.wait_at = 0;
                 a.phase = PH_WAIT;
             }
         }
@@ -3181,8 +3251,8 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
                 a.urgent = true;
             }
         }
-        if (a.running && now - a.spin_at >= SPIN_MS) {
-            a.spin_at = now;
+        if (a.running && !a.wait_at && run_clock(&a, now) / BLINK_MS != a.tick) {
+            a.tick = run_clock(&a, now) / BLINK_MS;
             set_dirty(&a);
         }
         if (now - a.esc_at < DOUBLE_MS + 50 || now - a.ctrlc_at < DOUBLE_MS + 50)

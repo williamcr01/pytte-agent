@@ -40,7 +40,7 @@ bool cli_config_save(cli_config *c, int k, const char *v, char *err, size_t cap)
 /* Persist one setting without mutating the caller's configuration. */
 bool cli_config_write(const char *path, int k, const char *v, char *err, size_t cap);
 /* Set key (dotted: "tui.thinking") to a JSON value in the file's text,
- * changing nothing else. False with err when the text is not a JSON
+ * keeping every other member; out is indented by two spaces. False with err when the text is not a JSON
  * object, or the path is not made of objects. */
 bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *err, size_t cap);
 /* Replace a file atomically (temporary file, fsync, rename), keeping the

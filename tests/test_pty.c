@@ -322,14 +322,22 @@ static bool wait_for(pty *p, const char *text, int ms)
 }
 
 /* Until no run is active (the activity line is gone). */
-/* A run is active: the spinner is the prompt's mark (and a running call's). */
+/* A run is active: the activity row above the input shows its clock. Its
+ * dot blinks, so the row starts with "• " or two spaces. */
 static bool busy(pty *p)
 {
-    static const char *const spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    static const char *const what[] = {"working · ", "thinking · ", "writing · ", "compacting · ",
+                                       "waiting for you · ", "running ", "retrying in "};
+    char row[64];
     size_t i;
-    for (i = 0; i < sizeof spin / sizeof spin[0]; i++)
-        if (has(p, spin[i]))
+    for (i = 0; i < sizeof what / sizeof what[0]; i++) {
+        snprintf(row, sizeof row, "\n• %s", what[i]);
+        if (has(p, row))
             return true;
+        snprintf(row, sizeof row, "\n  %s", what[i]);
+        if (has(p, row))
+            return true;
+    }
     return false;
 }
 
@@ -421,7 +429,7 @@ static void test_chat(void)
     CHECK(wait_for(&p, "∴ thought", 2000));
     CHECK(wait_idle(&p, 3000));
     CHECK(wait_for(&p, "network.\n\n· worked for ", 1000)); /* the spinner's time, kept */
-    CHECK(wait_for(&p, "  faux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
+    CHECK(wait_for(&p, "  ask · faux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
     CHECK(finish(&p, 3000) == 0);
     CHECK(has(&p, "› hi there"));

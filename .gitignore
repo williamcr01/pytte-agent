@@ -1,8 +1,9 @@
 /build/
-/.tools/
 *.o
 *.d
 crash-*
 leak-*
 timeout-*
 .env
+.pi/
+.claude/worktrees

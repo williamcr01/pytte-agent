@@ -521,7 +521,7 @@ static void test_input(void)
     pt_buf_free(&f);
 }
 
-/* Settings written back to the user file: one key changes (19.4). */
+/* Settings written back to the user file: one key changes, indented (19.4). */
 static pt_str set(const char *src, const char *key, const char *value, bool *ok)
 {
     char err[200];
@@ -534,15 +534,17 @@ static void test_config_set(void)
 {
     bool ok;
     CHECK_STR(set("{\n  \"model\": \"x\",\n  \"tui\": {\"thinking\": \"collapsed\"}\n}\n", "tui.thinking", "\"full\"", &ok),
-              "{\n  \"model\": \"x\",\n  \"tui\": {\"thinking\": \"full\"}\n}\n");
+              "{\n  \"model\": \"x\",\n  \"tui\": {\n    \"thinking\": \"full\"\n  }\n}\n");
     CHECK(ok);
-    CHECK_STR(set("{\"model\": \"x\"}", "tui.pager", "\"less\"", &ok), "{\"model\": \"x\", \"tui\": {\"pager\": \"less\"}}");
+    CHECK_STR(set("{\"model\": \"x\"}", "tui.pager", "\"less\"", &ok),
+              "{\n  \"model\": \"x\",\n  \"tui\": {\n    \"pager\": \"less\"\n  }\n}\n");
     CHECK(ok);
-    CHECK_STR(set("{ \"tui\": {} }", "tui.symbols", "\"ascii\"", &ok), "{ \"tui\": {\"symbols\": \"ascii\"} }");
+    CHECK_STR(set("{ \"tui\": {} }", "tui.symbols", "\"ascii\"", &ok), "{\n  \"tui\": {\n    \"symbols\": \"ascii\"\n  }\n}\n");
     CHECK(ok);
-    CHECK_STR(set("{\"tui\": {\"a\": 1}}", "tui.b", "2", &ok), "{\"tui\": {\"a\": 1, \"b\": 2}}");
+    CHECK_STR(set("{\"tui\": {\"a\": [1, {}, []]}}", "tui.b", "2", &ok),
+              "{\n  \"tui\": {\n    \"a\": [\n      1,\n      {},\n      []\n    ],\n    \"b\": 2\n  }\n}\n");
     CHECK(ok);
-    CHECK_STR(set("", "model", "\"m\"", &ok), "{\"model\": \"m\"}\n");
+    CHECK_STR(set("", "model", "\"m\"", &ok), "{\n  \"model\": \"m\"\n}\n");
     CHECK(ok);
     set("{\"model\": \"x\",}", "model", "\"y\"", &ok); /* does not parse: never written */
     CHECK(!ok);
