@@ -878,7 +878,7 @@ static void test_commands(void)
     CHECK(!has(&p, "› /thinking")); /* a command is not echoed, only what it did */
     snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
-    CHECK(cfg && strstr(cfg, "\"tui\": {\"thinking\": \"full\"}"));
+    CHECK(cfg && strstr(cfg, "\"tui\": {\n    \"thinking\": \"full\"\n  }"));
     free(cfg);
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "switched effort: high", 1000));
@@ -937,7 +937,7 @@ static void test_commands(void)
     CHECK(wait_for(&p, "saved the Anthropic key to ", 1000));
     snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
-    CHECK(cfg && strstr(cfg, "{\"anthropic\": {\"key\": \"sk-test-123\"}}"));
+    CHECK(cfg && strstr(cfg, "{\n  \"anthropic\": {\n    \"key\": \"sk-test-123\"\n  }\n}\n"));
     free(cfg);
     snprintf(path, sizeof path, "%s/pytte/history", state_dir);
     cfg = pt_sys_read_file(path, &n);
@@ -1090,8 +1090,8 @@ static void test_blocked_settings(void)
     modes_restored(&p);
     pty_free(&p);
     text = pt_sys_read_file(path, &n);
-    CHECK(text && pt_str_contains((pt_str){text, n}, PT_S("\"untouched\":42")));
-    CHECK(text && pt_str_contains((pt_str){text, n}, PT_S("\"thinking\":\"full\"")));
+    CHECK(text && pt_str_contains((pt_str){text, n}, PT_S("\"untouched\": 42")));
+    CHECK(text && pt_str_contains((pt_str){text, n}, PT_S("\"thinking\": \"full\"")));
     free(text);
 }
 
