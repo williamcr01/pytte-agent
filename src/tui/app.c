@@ -2141,6 +2141,9 @@ static void switch_session(app *a, const char *id)
         a->code = 0; /* allocation failed before the old session was handed off */
         return;
     }
+    pt_buf_reset(&a->lines); /* the old session's last lines: cleared anyway */
+    tui_band_clear(&a->band);
+    a->urgent = true;
     tui_input_set(&a->in, PT_STR_NULL);
     a->code = 0;
 }
