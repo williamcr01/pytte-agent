@@ -39,14 +39,14 @@ static void test_load_and_save(void)
     CHECK(old && strcmp(old, "sk-open") == 0);
     CHECK(!cli_auth_key("bad"));
     CHECK(!cli_auth_key("anthropic"));
-    /* a new key: nothing else in the file changes */
+    /* a new key: every other member is kept */
     CHECK(cli_auth_save("anthropic", PT_S("sk-ant"), err, sizeof err));
     CHECK(!err[0]);
     CHECK(strcmp(cli_auth_key("anthropic"), "sk-ant") == 0);
     text = pt_sys_read_file(path, &n);
     CHECK_STR(((pt_str){text, text ? n : 0}),
-              "{\n  \"openai\": {\"key\": \"sk-open\"},\n  \"bad\": {\"key\": \"has space\"},\n  \"other\": 1, "
-              "\"anthropic\": {\"key\": \"sk-ant\"}\n}\n");
+              "{\n  \"openai\": {\n    \"key\": \"sk-open\"\n  },\n  \"bad\": {\n    \"key\": \"has space\"\n  },\n"
+              "  \"other\": 1,\n  \"anthropic\": {\n    \"key\": \"sk-ant\"\n  }\n}\n");
     free(text);
     /* replaced: the old string stays valid */
     CHECK(cli_auth_save("openai", PT_S("sk-new"), err, sizeof err));
