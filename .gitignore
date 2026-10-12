@@ -1,5 +1,5 @@
 /build/
-/tools/
+/.tools/
 *.o
 *.d
 crash-*
