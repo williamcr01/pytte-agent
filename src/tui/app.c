@@ -55,6 +55,7 @@ static const struct {
     {"stop", "", "stop the background commands"},
     {"usage", "", "tokens used in this session, per model"},
     {"thinking", " [mode]", "how thinking is shown: collapsed, full, hidden"},
+    {"login", " [provider] [key]", "save an API key to auth.json"},
     {"settings", "", "user settings (saved)"},
     {"help", "", "commands and keys"},
     {"quit", "", "exit; it prints how to continue"},
@@ -1305,6 +1306,17 @@ static void add_skills(app *a, const char *lead, pt_str q, bool rescan)
     a->skills_menu = true;
 }
 
+/* "/login <provider> <key>": where the key starts, or 0. The key is shown
+ * masked and never reaches the input history or a saved draft. */
+static size_t secret_at(pt_str d)
+{
+    long sp;
+    if (!pt_str_starts(d, PT_S("/login ")))
+        return 0;
+    sp = pt_str_find((pt_str){d.p + 7, d.n - 7}, ' ');
+    return sp < 0 ? 0 : 7 + (size_t)sp + 1;
+}
+
 /* The word being typed: after the last space or newline. */
 static pt_str last_word(pt_str d)
 {
@@ -1410,6 +1422,12 @@ static void menu_update(app *a)
             add_list(a, levels, sizeof levels / sizeof levels[0], arg);
         } else if (pt_str_eqz(cmd, "thinking")) {
             add_list(a, th_names, 3, arg);
+        } else if (pt_str_eqz(cmd, "login") && pt_str_find(arg, ' ') < 0) {
+            const pt_ai_catalog *cat = pt_ai_builtin_catalog();
+            uint32_t i;
+            for (i = 0; i < cat->nproviders; i++)
+                if (cat->providers[i].auth != PT_AUTH_NONE && pt_str_starts(pt_strz(cat->providers[i].id), arg))
+                    add_item(a, cat->providers[i].id, strlen(cat->providers[i].id), cat->providers[i].name);
         } else if (pt_str_eqz(cmd, "resume")) {
             session_list *list = get_sessions(a, !was_sessions);
             uint32_t i;
@@ -1655,6 +1673,7 @@ static void ask_rows(app *a, int n)
 static void build_frame(app *a, int64_t now)
 {
     int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, act, st, gaps, i, first, top, nask;
+    size_t secret = secret_at(pt_buf_str(&a->in.text));
     int total = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->nitems;
     int sel = a->menu == MENU_SETTINGS ? a->set_sel : a->sel;
     bool tiny = a->cols < 20 || a->rows < 4;
@@ -1776,6 +1795,12 @@ static void build_frame(app *a, int64_t now)
         pt_buf_putc(&a->tmp, ' ');
         pre = a->tmp.n;
         pt_buf_put(&a->tmp, a->in.text.p + r->start, r->end - r->start);
+        if (secret && !a->tmp.oom) { /* same width: the key is printable ASCII */
+            size_t j;
+            for (j = r->start > secret ? r->start : secret; j < r->end; j++)
+                if (a->in.text.p[j] > ' ' && a->in.text.p[j] < 0x7f)
+                    a->tmp.p[pre + j - r->start] = '*';
+        }
         row(a, pt_buf_str(&a->tmp));
         if (i == a->in.cur_row) {
             a->frame.cur_row = a->frame.n - 1;
@@ -2051,7 +2076,7 @@ static void save_draft(app *a)
     if (!a->open)
         return;
     draft_path(a, p, sizeof p);
-    if (a->in.text.n)
+    if (a->in.text.n && !secret_at(pt_buf_str(&a->in.text)))
         pt_sys_write_file(p, a->in.text.p, a->in.text.n);
     else
         unlink(p);
@@ -2116,7 +2141,8 @@ static bool session_empty(app *a)
 static bool open_session(app *a, const char *id)
 {
     a->opening = cli_session_begin(&a->s, &a->o, id, !a->history_ready,
-                                    a->open ? pt_buf_str(&a->in.text) : PT_STR_NULL,
+                                    a->open && !secret_at(pt_buf_str(&a->in.text)) ? pt_buf_str(&a->in.text)
+                                                                                   : PT_STR_NULL,
                                     a->open && session_empty(a),
                                     on_event, a, a->err, sizeof a->err);
     if (!a->opening) {
@@ -2325,6 +2351,68 @@ static void cmd_help(app *a)
           "interrupt or quit · ctrl-d quit · ctrl-t thinking · ctrl-o details · ctrl-z suspend · ctrl-l redraw");
 }
 
+/* "/login": where each provider's key comes from. "/login <provider>":
+ * ready for the key. "/login <provider> <key>": save it. */
+static void cmd_login(app *a, pt_str arg)
+{
+    const pt_ai_catalog *cat = pt_ai_builtin_catalog();
+    const pt_provider *p = NULL;
+    pt_str name = arg, key = PT_STR_NULL;
+    long sp = pt_str_find(arg, ' ');
+    char msg[4400], err[600], path[4200];
+    uint32_t i;
+    if (sp >= 0) {
+        name.n = (size_t)sp;
+        key = pt_str_trim((pt_str){arg.p + sp + 1, arg.n - (size_t)sp - 1});
+    }
+    for (i = 0; i < cat->nproviders; i++)
+        if (cat->providers[i].auth != PT_AUTH_NONE && pt_str_eqz(name, cat->providers[i].id))
+            p = &cat->providers[i];
+    if (!arg.n) {
+        for (i = 0; i < cat->nproviders; i++) {
+            const pt_provider *q = &cat->providers[i];
+            const char *env = q->key_env[0] ? getenv(q->key_env[0]) : NULL;
+            if (q->auth == PT_AUTH_NONE)
+                continue;
+            snprintf(msg, sizeof msg, "%s: %s%s", q->id,
+                     env && *env ? "from " : cli_auth_key(q->id) ? "saved in auth.json" : "no key",
+                     env && *env ? q->key_env[0] : "");
+            out_z(a, TUI_DIM, msg);
+        }
+        out_z(a, TUI_DIM, "/login <provider> saves a key; a key in the environment comes first");
+        return;
+    }
+    if (!p) {
+        snprintf(msg, sizeof msg, "not a provider: %.*s", (int)(name.n > 100 ? 100 : name.n), name.p);
+        out_z(a, TUI_RED, msg);
+        return;
+    }
+    if (!key.n) {
+        snprintf(msg, sizeof msg, "/login %s ", p->id);
+        tui_input_set(&a->in, pt_strz(msg));
+        snprintf(msg, sizeof msg, "paste the %s API key and press enter", p->name);
+        out_z(a, TUI_DIM, msg);
+        return;
+    }
+    if (!cli_auth_valid(key)) {
+        out_z(a, TUI_RED, "not an API key: it has spaces or control characters");
+        return;
+    }
+    if (!cli_auth_save(p->id, key, err, sizeof err)) {
+        out_z(a, TUI_RED, err);
+        return;
+    }
+    cli_auth_path(path, sizeof path);
+    snprintf(msg, sizeof msg, "saved the %s key to %s", p->name, path);
+    out_z(a, TUI_DIM, msg);
+    if (err[0])
+        out_z(a, TUI_RED, err);
+    if (p->key_env[0] && getenv(p->key_env[0]) && *getenv(p->key_env[0])) {
+        snprintf(msg, sizeof msg, "%s is set in the environment and is used instead", p->key_env[0]);
+        out_z(a, TUI_DIM, msg);
+    }
+}
+
 static bool valid_setting(int s, const char *v)
 {
     int i;
@@ -2449,6 +2537,8 @@ static void run_command(app *a, pt_str line)
                      a->cfg->val[settings[s].k][0] ? a->cfg->val[settings[s].k] : "(none)",
                      a->cfg->src[settings[s].k]);
         out_z(a, TUI_DIM, msg);
+    } else if (pt_str_eqz(cmd, "login")) {
+        cmd_login(a, arg);
     } else if (pt_str_eqz(cmd, "help")) {
         cmd_help(a);
     } else if (pt_str_eqz(cmd, "quit") || pt_str_eqz(cmd, "exit")) {
@@ -2647,7 +2737,9 @@ static void submit(app *a)
     bool command;
     if (!text.n)
         return;
-    if (a->history_ready) {
+    if (secret_at(text)) {
+        /* the key stays out of the history */
+    } else if (a->history_ready) {
         if (!tui_hist_add(&a->in, text))
             out_z(a, TUI_RED, "out of memory adding to input history");
         history_append(a, text);
@@ -2655,7 +2747,7 @@ static void submit(app *a)
         tui_hist_line(&a->pending_history, text);
     }
     command = text.p[0] == '/' && pt_str_find(text, '\n') < 0 && !pt_str_starts(text, PT_S("/skill:"));
-    if (command && !a->opening) {
+    if (command && (!a->opening || secret_at(text))) { /* a key is never queued */
         pt_buf_reset(&a->command);
         pt_buf_puts(&a->command, text);
         if (a->command.oom) {
@@ -2706,7 +2798,7 @@ static bool complete(app *a)
     } else { /* replace the last word */
         pt_buf_put(&nd, d.p, (size_t)(last_word(d).p - d.p));
         pt_buf_puts(&nd, label);
-        if (label.n && label.p[0] == '$')
+        if ((label.n && label.p[0] == '$') || pt_str_starts(d, PT_S("/login "))) /* then the key */
             pt_buf_putc(&nd, ' ');
     }
     changed = !pt_str_eq(pt_buf_str(&nd), d);

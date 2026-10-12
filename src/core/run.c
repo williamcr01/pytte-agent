@@ -108,6 +108,7 @@ bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
     if (p->key_env[0]) {
         pt_buf_putz(&m, ": set ");
         pt_buf_putz(&m, p->key_env[0]);
+        pt_buf_putz(&m, " or run /login");
     }
     pt_core_fail(a, PT_FATAL_CONFIG, "", pt_buf_str(&m));
     pt_buf_free(&m);

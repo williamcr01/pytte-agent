@@ -307,9 +307,14 @@ static int64_t sys_now(void *ud)
 
 static bool credentials(void *ud, const pt_provider *p, pt_credentials *out)
 {
-    const char *which;
+    const char *which, *key;
     (void)ud;
-    return pt_ai_find_key(p, pt_sys_env, NULL, out, &which);
+    if (pt_ai_find_key(p, pt_sys_env, NULL, out, &which))
+        return true;
+    if (!(key = cli_auth_key(p->id)))
+        return false;
+    out->api_key = pt_strz(key);
+    return true;
 }
 
 void cli_session_free(cli_session *s)

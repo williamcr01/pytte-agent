@@ -47,6 +47,24 @@ bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *
  * old file's mode, or 0600 for a new one. */
 bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap);
 
+/* ---- config.c: API keys ----
+ * Keys saved by /login live in auth.json next to config.json, by provider:
+ * {"anthropic": {"key": "..."}}. A key in the environment comes first.
+ * These are safe to call from any thread. */
+
+/* $XDG_CONFIG_HOME/pytte/auth.json, else ~/.config/pytte/auth.json. */
+void cli_auth_path(char *out, size_t cap);
+/* Printable ASCII without spaces, 1 to 4096 bytes. */
+bool cli_auth_valid(pt_str key);
+/* The provider's saved key, or NULL. The file is read on first use; the
+ * string stays valid until the process exits, even after a new save. */
+const char *cli_auth_key(const char *provider);
+/* Save the provider's key to auth.json (0600 when created), changing
+ * nothing else in the file, and use it from now on. False with err when
+ * it could not be saved; true with a non-empty err when it was saved but
+ * this process could not take it. */
+bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap);
+
 /* ---- session.c: opening sessions ---- */
 
 typedef struct cli_opts {

@@ -850,10 +850,10 @@ static void test_commands(void)
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
     CHECK(wait_for(&p, "▸ /model    set the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/13", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "enter run · esc close · 1/14", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "▸ /quit", 1000));
-    CHECK(wait_for(&p, "13/13", 1000));
+    CHECK(wait_for(&p, "14/14", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "▸ /model", 1000));
     keys(&p, "th\t");
@@ -913,6 +913,24 @@ static void test_commands(void)
     CHECK(wait_for(&p, "esc esc interrupt", 1000));
     keys(&p, "/nope\r");
     CHECK(wait_for(&p, "unknown command /nope", 1000));
+    /* /login: the key is masked, saved to auth.json, and kept out of the history */
+    keys(&p, "/login anthr\t");
+    CHECK(wait_for(&p, "┃ /login anthropic ", 1000));
+    keys(&p, "sk-test-123");
+    CHECK(wait_for(&p, "┃ /login anthropic ***********", 1000));
+    CHECK(!has(&p, "sk-test"));
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "saved the Anthropic key to ", 1000));
+    snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(cfg && strstr(cfg, "{\"anthropic\": {\"key\": \"sk-test-123\"}}"));
+    free(cfg);
+    snprintf(path, sizeof path, "%s/pytte/history", state_dir);
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(!cfg || !strstr(cfg, "sk-test"));
+    free(cfg);
+    keys(&p, "/login\r");
+    CHECK(wait_for(&p, "anthropic: saved in auth.json", 1000));
     /* thinking is shown in full now */
     keys(&p, "hi\r");
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 5000));

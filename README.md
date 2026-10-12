@@ -52,7 +52,7 @@ request bytes are sent. Other TLS backends keep their normal trust handling.
 ## pytte
 
 ```sh
-export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, OPENROUTER_API_KEY
+export ANTHROPIC_API_KEY=...   # or OPENAI_API_KEY, OPENROUTER_API_KEY; or /login in the TUI
 
 build/pytte                                  # the TUI, new session (model: anthropic/claude-opus-5-5)
 build/pytte -m openai/gpt-5 --effort high    # another model
@@ -73,8 +73,13 @@ Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft (twice
 on an empty one quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/status`,
-`/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/help`, `/quit`. Settings are saved to
+`/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/help`, `/quit`. Settings are saved to
 `~/.config/pytte/config.json`.
+
+`/login <provider>` asks for an API key (shown masked, kept out of the input
+history) and saves it to `~/.config/pytte/auth.json` (mode 0600), so no
+exported variable is needed. A key in the environment still comes first;
+`/login` alone shows where each provider's key comes from.
 
 The footer shows the selected model, effort and context use of the model's
 window (`12k/200k`). It counts what the next request sends: the provider's

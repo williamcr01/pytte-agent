@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -297,6 +298,162 @@ bool cli_config_write(const char *path, int k, const char *v, char *err, size_t 
         ok = cli_write_atomic(path, pt_buf_str(&out), err, cap);
     }
 done:
+    pt_buf_free(&value);
+    pt_buf_free(&out);
+    free(text);
+    return ok;
+}
+
+/* ---- API keys (auth.json) ---- */
+
+/* A key, kept for the life of the process: a replaced key stays reachable
+ * through older, so a pointer handed out never dangles. */
+typedef struct auth_key {
+    struct auth_key *older;
+    char key[1];
+} auth_key;
+
+static struct {
+    char provider[64];
+    auth_key *key;
+} auth[16];
+static int nauth;
+static bool auth_loaded;
+static pthread_mutex_t auth_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void cli_auth_path(char *out, size_t cap)
+{
+    char dir[4000];
+    cli_config_dir(dir, sizeof dir);
+    snprintf(out, cap, "%s/auth.json", dir);
+}
+
+bool cli_auth_valid(pt_str key)
+{
+    size_t i;
+    if (!key.n || key.n > 4096)
+        return false;
+    for (i = 0; i < key.n; i++)
+        if ((unsigned char)key.p[i] <= ' ' || (unsigned char)key.p[i] >= 0x7f)
+            return false;
+    return true;
+}
+
+/* Under auth_lock. False when out of memory or slots. */
+static bool auth_put(const char *provider, pt_str key)
+{
+    auth_key *k;
+    int i;
+    if (strlen(provider) >= sizeof auth[0].provider)
+        return false;
+    for (i = 0; i < nauth && strcmp(auth[i].provider, provider) != 0; i++)
+        ;
+    if (i == nauth && nauth == (int)(sizeof auth / sizeof auth[0]))
+        return false;
+    if (!(k = (auth_key *)malloc(sizeof *k + key.n)))
+        return false;
+    memcpy(k->key, key.p, key.n);
+    k->key[key.n] = 0;
+    if (i == nauth) {
+        snprintf(auth[nauth].provider, sizeof auth[0].provider, "%s", provider);
+        auth[nauth++].key = NULL;
+    }
+    k->older = auth[i].key;
+    auth[i].key = k;
+    return true;
+}
+
+/* Under auth_lock: {"anthropic": {"key": "..."}, ...}. A file that cannot
+ * be read or parsed gives no keys. */
+static void auth_load(void)
+{
+    char path[4200];
+    size_t n;
+    char *text;
+    pt_arena ar;
+    const pt_json *j, *m;
+    pt_json_err e;
+    auth_loaded = true;
+    cli_auth_path(path, sizeof path);
+    if (!(text = pt_sys_read_file(path, &n)))
+        return;
+    pt_arena_init(&ar, pt_sys_allocator(), 0);
+    j = pt_json_parse((pt_str){text, n}, &ar, &e);
+    for (m = pt_json_is(j, PT_J_OBJ) ? j->child : NULL; m; m = m->next) {
+        const pt_json *v = pt_json_is(m, PT_J_OBJ) ? pt_json_get(m, "key") : NULL;
+        char provider[64];
+        pt_str key;
+        if (!pt_json_is(v, PT_J_STR) || m->key.n >= sizeof provider || memchr(m->key.p, 0, m->key.n))
+            continue;
+        key = pt_json_str(v, &ar);
+        if (!cli_auth_valid(key))
+            continue;
+        snprintf(provider, sizeof provider, "%.*s", (int)m->key.n, m->key.p);
+        auth_put(provider, key);
+    }
+    pt_arena_free(&ar);
+    free(text);
+}
+
+const char *cli_auth_key(const char *provider)
+{
+    const char *key = NULL;
+    int i;
+    pthread_mutex_lock(&auth_lock);
+    if (!auth_loaded)
+        auth_load();
+    for (i = 0; i < nauth; i++)
+        if (strcmp(auth[i].provider, provider) == 0)
+            key = auth[i].key->key;
+    pthread_mutex_unlock(&auth_lock);
+    return key;
+}
+
+bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap)
+{
+    char path[4200], dotted[80];
+    size_t n = 0;
+    char *text;
+    pt_buf value, out;
+    bool ok = false;
+    if (!cli_auth_valid(key)) {
+        snprintf(err, cap, "not an API key");
+        return false;
+    }
+    if (strlen(provider) >= sizeof auth[0].provider || strchr(provider, '.')) {
+        snprintf(err, cap, "not a provider: %s", provider);
+        return false;
+    }
+    cli_auth_path(path, sizeof path);
+    snprintf(dotted, sizeof dotted, "%s.key", provider);
+    pthread_mutex_lock(&auth_lock);
+    if (!auth_loaded)
+        auth_load();
+    errno = 0;
+    text = pt_sys_read_file(path, &n);
+    if (!text && errno != ENOENT) {
+        snprintf(err, cap, "cannot read %s: %s", path, strerror(errno));
+        pthread_mutex_unlock(&auth_lock);
+        return false;
+    }
+    pt_buf_init(&value, pt_sys_allocator());
+    pt_buf_init(&out, pt_sys_allocator());
+    pt_json_quote(&value, key);
+    if (value.oom) {
+        snprintf(err, cap, "out of memory saving the key");
+    } else if (!cli_json_set(text ? (pt_str){text, n} : PT_S("{}\n"), dotted, pt_buf_str(&value), &out, err,
+                             cap)) { /* never overwrite a file that does not parse */
+        char why[256];
+        snprintf(why, sizeof why, "%s", err);
+        snprintf(err, cap, "not saved, %s: %s", path, why);
+    } else if (cli_write_atomic(path, pt_buf_str(&out), err, cap)) {
+        ok = true;
+        if (!auth_put(provider, key)) /* saved; this process still has the old one */
+            snprintf(err, cap, "saved; restart pytte to use it");
+        else
+            err[0] = 0;
+    }
+    pthread_mutex_unlock(&auth_lock);
     pt_buf_free(&value);
     pt_buf_free(&out);
     free(text);
