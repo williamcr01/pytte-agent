@@ -1388,8 +1388,8 @@ static void tokens_short(char *out, size_t cap, uint64_t n)
         memmove(out + n - 3, "M", 2);
 }
 
-/* Below the input, dim and still while a run goes on: the model (without
- * its provider), effort and context used; what the keys do while a menu
+/* Below the input, dim and still while a run goes on: the permission
+ * mode, the model (without its provider), effort and context used; what the keys do while a menu
  * or a question is open; or why the run is waiting. */
 static void status_row(app *a, int64_t now, int total, int sel)
 {
@@ -1418,6 +1418,8 @@ static void status_row(app *a, int64_t now, int total, int sel)
                  a->retry_err.p);
         pt_buf_putz(&a->tmp, line);
     } else {
+        pt_buf_putz(&a->tmp, pt_perm_name(a->o.perm));
+        pt_buf_putz(&a->tmp, " · ");
         pt_buf_putz(&a->tmp, model ? model + 1 : a->model[0] ? a->model : "no model");
         n = snprintf(line, sizeof line, " · %s", pt_reasoning_name(a->o.reasoning));
         if (a->ctx_window) { /* the context used, of the model's window */

@@ -421,7 +421,7 @@ static void test_chat(void)
     CHECK(wait_for(&p, "∴ thought", 2000));
     CHECK(wait_idle(&p, 3000));
     CHECK(wait_for(&p, "network.\n\n· worked for ", 1000)); /* the spinner's time, kept */
-    CHECK(wait_for(&p, "  faux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
+    CHECK(wait_for(&p, "  ask · faux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
     CHECK(finish(&p, 3000) == 0);
     CHECK(has(&p, "› hi there"));
