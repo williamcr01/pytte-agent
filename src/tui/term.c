@@ -5,6 +5,7 @@
  * The terminal is never set O_NONBLOCK (R8): its open file description is
  * shared with the shell. Reads happen after poll() said there is input. */
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE /* syscall */
 #define _DARWIN_C_SOURCE /* TIOCGWINSZ */
 #include "tui/tui.h"
 
@@ -21,6 +22,7 @@
 #include <unistd.h>
 #ifdef __linux__
 #include <sys/prctl.h>
+#include <sys/syscall.h>
 #endif
 
 #include "drv/drv.h"
@@ -76,26 +78,56 @@ static void put_all(int fd, const char *p, size_t n)
 
 /* ---- the watchdog ---- */
 
-static void watchdog(int rd, int out)
+/* The watchdog is a fork of this process: it shares our pages until it
+ * touches one, and each libc function it calls faults its own stretch of
+ * libc text into it for good. So on Linux it calls syscall() and nothing
+ * else, and is made by the raw fork system call: glibc's fork() runs its
+ * child-side reinitialisation over much of libc, which the watchdog never
+ * needs (raw, it is only safe while this process has a single thread).
+ * Its signals are blocked by the parent before the fork. */
+#ifdef __linux__
+#define dog_read(fd, p, n) syscall(SYS_read, (fd), (p), (n))
+#define dog_write(fd, p, n) syscall(SYS_write, (fd), (p), (n))
+#define dog_close(fd) syscall(SYS_close, (fd))
+#define dog_exit() syscall(SYS_exit_group, 0)
+#else
+#define dog_read(fd, p, n) read((fd), (p), (n))
+#define dog_write(fd, p, n) write((fd), (p), (n))
+#define dog_close(fd) close(fd)
+#define dog_exit() _exit(0)
+#endif
+#if defined(__linux__) && defined(SYS_fork)
+#define dog_fork() ((pid_t)syscall(SYS_fork))
+#else
+#define dog_fork() fork()
+#endif
+
+static void dog_put(int fd, const char *p, size_t n)
+{
+    while (n) {
+        long w = (long)dog_write(fd, p, n);
+        if (w < 0 && errno == EINTR)
+            continue;
+        if (w <= 0)
+            return;
+        p += w;
+        n -= (size_t)w;
+    }
+}
+
+static void watchdog(int rd, int out, long max)
 {
     char buf[64];
     bool kitty = false, clean = false;
-    long max = sysconf(_SC_OPEN_MAX), fd;
+    long fd;
 #ifdef __linux__
-    prctl(PR_SET_NAME, "pytte-watchdog"); /* so killall pytte spares it */
+    syscall(SYS_prctl, PR_SET_NAME, "pytte-watchdog", 0, 0, 0); /* so killall pytte spares it */
 #endif
-    signal(SIGINT, SIG_IGN);
-    signal(SIGQUIT, SIG_IGN);
-    signal(SIGTSTP, SIG_IGN);
-    signal(SIGTTOU, SIG_IGN);
-    signal(SIGPIPE, SIG_IGN);
-    if (max < 0 || max > 4096)
-        max = 4096;
     for (fd = 0; fd < max; fd++)
         if (fd != rd && fd != out)
-            close((int)fd);
+            dog_close((int)fd);
     for (;;) {
-        ssize_t n = read(rd, buf, sizeof buf), i;
+        long n = (long)dog_read(rd, buf, sizeof buf), i;
         if (n < 0 && errno == EINTR)
             continue;
         if (n <= 0)
@@ -111,11 +143,12 @@ static void watchdog(int rd, int out)
     }
     if (!clean) { /* the parent died without restoring */
         if (kitty)
-            put_all(out, "\x1b[<u", 4);
+            dog_put(out, "\x1b[<u", 4);
         /* the cursor is in the input box: clear it and the rest of the band */
-        put_all(out, "\x1b[?2004l\x1b[?2026l\x1b[?25h\x1b[0m\r\x1b[J", 30);
+        dog_put(out, "\x1b[?2004l\x1b[?2026l\x1b[?25h\x1b[0m\r\x1b[J", 30);
     }
-    _exit(0);
+    for (;;)
+        dog_exit();
 }
 
 static void tell(tui_term *t, char c)
@@ -193,12 +226,26 @@ tui_term *tui_term_new(void)
     pt_buf_init(&t->tb, pt_sys_allocator());
     /* The watchdog first, while this process holds nothing else. */
     if (pipe(dp) == 0) {
+        sigset_t quiet, old;
+        long max = sysconf(_SC_OPEN_MAX);
+        if (max < 0 || max > 4096)
+            max = 4096;
+        /* blocked, the watchdog's signals are ignored: ^C, ^\, ^Z, a
+         * background write, a closed pipe */
+        sigemptyset(&quiet);
+        sigaddset(&quiet, SIGINT);
+        sigaddset(&quiet, SIGQUIT);
+        sigaddset(&quiet, SIGTSTP);
+        sigaddset(&quiet, SIGTTOU);
+        sigaddset(&quiet, SIGPIPE);
         fflush(NULL);
-        pid = fork();
+        sigprocmask(SIG_BLOCK, &quiet, &old);
+        pid = dog_fork();
         if (pid == 0) {
-            close(dp[1]);
-            watchdog(dp[0], t->out);
+            dog_close(dp[1]);
+            watchdog(dp[0], t->out, max);
         }
+        sigprocmask(SIG_SETMASK, &old, NULL);
         close(dp[0]);
         if (pid > 0) {
             t->dog = dp[1];

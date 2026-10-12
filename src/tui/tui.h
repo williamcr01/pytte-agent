@@ -282,9 +282,9 @@ enum { /* signals, as tui_term_signals reports them */
 };
 
 /* Start the watchdog: before the store is opened, before curl, before
- * anything else holds a file (it must not inherit the session's lock).
- * Then install the signal handlers. NULL when stdin or stdout is not a
- * terminal. */
+ * anything else holds a file (it must not inherit the session's lock),
+ * while this process has a single thread. Then install the signal
+ * handlers. NULL when stdin or stdout is not a terminal. */
 tui_term *tui_term_new(void);
 /* Raw mode, bracketed paste, and the startup queries: cursor position,
  * kitty keyboard (when kitty is true) and DA1. */
