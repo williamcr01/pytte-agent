@@ -641,14 +641,197 @@ static void t_find(void *ud, pt_rt *rt, const pt_fx *fx)
 
 /* ---- grep ---- */
 
+/* Text every match contains, found fast (Horspool): only lines that have
+ * it go to the regular expression. */
+typedef struct needle {
+    unsigned char *p;
+    size_t n;
+    size_t skip[256];
+    unsigned char fold[256]; /* case folding, or the identity */
+} needle;
+
 typedef struct grep_state {
     search *s;
     regex_t re, glob;
     bool have_glob;
+    needle lit; /* lit.n == 0: none */
     int64_t limit, found, context;
     uint64_t big, binary; /* files skipped */
     bool full, files_only;
 } grep_state;
+
+static bool ere_special(char c)
+{
+    return strchr(".[]()*+?{}|^$\\", c) != NULL;
+}
+
+/* The longest text every match of an ERE contains, into out: a run of
+ * plain characters outside groups, classes and alternations. A character
+ * a quantifier may drop (*, ?, {) is not part of it. Empty when there is
+ * none (any | at the top makes every part optional). */
+static void required_text(const char *re, pt_buf *out)
+{
+    size_t best_at = 0, best_n = 0, run_at = 0, i = 0, n = strlen(re);
+    int depth = 0;
+    pt_buf_reset(out);
+    for (i = 0; i < n; i++) /* an alternation at the top: nothing is required */
+        if (re[i] == '\\')
+            i++;
+        else if (re[i] == '(')
+            depth++;
+        else if (re[i] == ')')
+            depth--;
+        else if (re[i] == '|' && depth <= 0)
+            return;
+    depth = 0;
+    for (i = 0; i < n;) {
+        char c = re[i];
+        bool plain = false;
+        size_t next = i + 1;
+        if (c == '\\' && i + 1 < n && ere_special(re[i + 1])) {
+            plain = true;
+            c = re[i + 1];
+            next = i + 2;
+        } else if (!ere_special(c)) {
+            plain = true;
+        }
+        if (plain && next < n && (re[next] == '*' || re[next] == '?' || re[next] == '{'))
+            plain = false; /* optional: ends the run */
+        if (plain) {
+            pt_buf_putc(out, c);
+            if (next < n && re[next] == '+') { /* one at least, then anything */
+                plain = false;
+                next++;
+            }
+        }
+        if (!plain) { /* the run ends: keep the longest */
+            if (out->n - run_at > best_n) {
+                best_at = run_at;
+                best_n = out->n - run_at;
+            }
+            if (c == '[') { /* skip the class */
+                next = i + 1;
+                if (next < n && re[next] == '^')
+                    next++;
+                if (next < n && re[next] == ']')
+                    next++;
+                while (next < n && re[next] != ']')
+                    next++;
+                next++;
+            } else if (c == '(') { /* skip the group */
+                depth = 1;
+                for (next = i + 1; next < n && depth; next++)
+                    if (re[next] == '\\')
+                        next++;
+                    else if (re[next] == '(')
+                        depth++;
+                    else if (re[next] == ')')
+                        depth--;
+            } else if (c == '\\' && i + 1 < n) {
+                next = i + 2; /* \w, \1 and the like */
+            }
+            if (next < n && (re[next] == '*' || re[next] == '?' || re[next] == '+'))
+                next++;
+            else if (next < n && re[next] == '{')
+                while (next < n && re[next++] != '}')
+                    ;
+            run_at = out->n;
+        }
+        i = next;
+    }
+    if (out->n - run_at > best_n) {
+        best_at = run_at;
+        best_n = out->n - run_at;
+    }
+    memmove(out->p, out->p + best_at, best_n);
+    out->n = best_n;
+}
+
+static void needle_init(needle *nd, unsigned char *p, size_t n, bool icase)
+{
+    size_t i;
+    for (i = 0; i < 256; i++) {
+        nd->fold[i] = (unsigned char)(icase && i >= 'A' && i <= 'Z' ? i + 32 : i);
+        nd->skip[i] = n;
+    }
+    for (i = 0; i < n; i++)
+        p[i] = nd->fold[p[i]];
+    for (i = 0; i + 1 < n; i++)
+        nd->skip[p[i]] = n - 1 - i;
+    if (icase) /* both cases of a letter skip alike */
+        for (i = 'A'; i <= 'Z'; i++)
+            nd->skip[i] = nd->skip[i + 32];
+    nd->p = p;
+    nd->n = n;
+}
+
+/* The first occurrence of the needle in [p, end), or NULL. */
+static const char *needle_find(const needle *nd, const char *p, const char *end)
+{
+    const unsigned char *h = (const unsigned char *)p, *e = (const unsigned char *)end;
+    size_t m = nd->n, k;
+    if (m == 1) { /* one byte: memchr, for each case */
+        const unsigned char *a = (const unsigned char *)memchr(h, nd->p[0], (size_t)(e - h)), *b = NULL;
+        if (nd->fold['A'] == 'a' && nd->p[0] >= 'a' && nd->p[0] <= 'z')
+            b = (const unsigned char *)memchr(h, nd->p[0] - 32, (size_t)(e - h));
+        return (const char *)(a && b ? (a < b ? a : b) : a ? a : b);
+    }
+    while ((size_t)(e - h) >= m) {
+        unsigned char last = nd->fold[h[m - 1]];
+        if (last == nd->p[m - 1]) {
+            for (k = 0; k + 1 < m && nd->fold[h[k]] == nd->p[k]; k++)
+                ;
+            if (k + 1 == m)
+                return (const char *)h;
+        }
+        h += nd->skip[h[m - 1]];
+    }
+    return NULL;
+}
+
+/* The start of the next line from p (inside [base, end)) with a match,
+ * or NULL. */
+static char *next_match(grep_state *g, char *base, char *p, char *end)
+{
+    regmatch_t m;
+    while (p < end) {
+        if (g->lit.n) { /* only lines with the needle */
+            char *at = (char *)needle_find(&g->lit, p, end), *ls, *le;
+            char saved;
+            bool hit;
+            if (!at)
+                return NULL;
+            for (ls = at; ls > p && ls[-1] != '\n'; ls--)
+                ;
+            le = (char *)memchr(at, '\n', (size_t)(end - at));
+            if (!le)
+                le = end;
+            saved = *le;
+            *le = 0; /* the line alone */
+            hit = regexec(&g->re, ls, 0, NULL, ls > base && ls[-1] != '\n' ? REG_NOTBOL : 0) == 0;
+            *le = saved;
+            if (hit)
+                return ls;
+            p = le + 1;
+            continue;
+        }
+        /* The rest at once: REG_NEWLINE keeps a match on one line. It
+         * stops at a NUL; the search goes on after one. */
+        if (regexec(&g->re, p, 1, &m, p > base && p[-1] != '\n' ? REG_NOTBOL : 0) == 0) {
+            char *at = p + m.rm_so;
+            if (at >= end)
+                return NULL;
+            while (at > base && at[-1] != '\n')
+                at--;
+            return at;
+        }
+        p = (char *)memchr(p, 0, (size_t)(end - p));
+        if (!p)
+            return NULL;
+        p++;
+    }
+    return NULL;
+}
 
 /* One output line: "path:N:text" (a match) or "path-N-text" (context),
  * text cut at LINE_BYTES. False when the output is full. */
@@ -734,11 +917,18 @@ static const char *line_before(const char *base, const char *p)
     return p;
 }
 
+/* The line at p: its end (its newline, or end). */
+static char *line_end(char *p, char *end)
+{
+    char *nl = (char *)memchr(p, '\n', (size_t)(end - p));
+    return nl ? nl : end;
+}
+
 static bool grep_visit(void *ud, walk *w, const char *abs, size_t len, bool is_dir)
 {
     grep_state *g = (grep_state *)ud;
     search *s = g->s;
-    char *p, *end, *shown_to; /* shown_to: lines before it are in the output */
+    char *base, *p, *end, *shown_to; /* shown_to: lines before it are in the output */
     uint64_t line = 1, after = 0;
     bool any = false;
     int r;
@@ -749,66 +939,69 @@ static bool grep_visit(void *ud, walk *w, const char *abs, size_t len, bool is_d
         w->unreadable += r < 0;
         return true;
     }
-    p = s->file.p;
+    base = p = shown_to = s->file.p;
     end = p + s->file.n;
-    shown_to = p;
     while (p < end) {
-        char *nl = (char *)memchr(p, '\n', (size_t)(end - p));
-        char *stop = nl ? nl : end;
-        bool hit;
-        char saved = *stop;
-        *stop = 0; /* regexec reads up to a NUL */
-        hit = regexec(&g->re, p, 0, NULL, 0) == 0;
-        *stop = saved;
-        if (hit) {
-            if (g->found == g->limit) {
-                g->full = true;
-                return false;
-            }
-            if (g->files_only) {
-                size_t mark = s->out.n;
-                put_shown(&s->out, w, abs);
-                pt_buf_putc(&s->out, '\n');
-                if (!room(s, 0)) {
-                    s->out.n = mark;
-                    g->full = true;
-                    return false;
-                }
-                g->found++;
-                return true;
-            }
-            if (g->context) { /* the lines before it, not shown yet */
-                const char *q = p;
-                uint64_t k = 0, at;
-                while (k < (uint64_t)g->context && q > shown_to) {
-                    q = line_before(s->file.p, q);
-                    k++;
-                }
-                if (any || s->out.n) {
-                    if (q != shown_to || !any)
-                        pt_buf_putz(&s->out, "--\n");
-                }
-                for (at = line - k; q < p; at++) {
-                    const char *e = (const char *)memchr(q, '\n', (size_t)(p - q));
-                    if (!put_line(g, w, abs, at, q, (size_t)(e - q), '-'))
-                        return false;
-                    q = e + 1;
-                }
-            }
-            if (!put_line(g, w, abs, line, p, (size_t)(stop - p), ':'))
-                return false;
-            g->found++;
-            any = true;
-            after = (uint64_t)g->context;
-            shown_to = nl ? nl + 1 : end;
-        } else if (after) {
+        char *hit = next_match(g, base, p, end), *stop;
+        /* the lines after the last match, up to context of them */
+        while (after && p < end && (!hit || p < hit)) {
+            stop = line_end(p, end);
             if (!put_line(g, w, abs, line, p, (size_t)(stop - p), '-'))
                 return false;
             after--;
-            shown_to = nl ? nl + 1 : end;
+            line++;
+            p = shown_to = stop < end ? stop + 1 : end;
         }
+        if (!hit)
+            break;
+        while (p < hit) { /* count the lines skipped */
+            char *nl = (char *)memchr(p, '\n', (size_t)(hit - p));
+            if (!nl)
+                break;
+            line++;
+            p = nl + 1;
+        }
+        p = hit;
+        if (g->found == g->limit) {
+            g->full = true;
+            return false;
+        }
+        if (g->files_only) {
+            size_t mark = s->out.n;
+            put_shown(&s->out, w, abs);
+            pt_buf_putc(&s->out, '\n');
+            if (!room(s, 0)) {
+                s->out.n = mark;
+                g->full = true;
+                return false;
+            }
+            g->found++;
+            return true;
+        }
+        if (g->context) { /* the lines before it, not shown yet */
+            const char *q = p;
+            uint64_t k = 0, at;
+            while (k < (uint64_t)g->context && q > shown_to) {
+                q = line_before(base, q);
+                k++;
+            }
+            if ((any || s->out.n) && (q != shown_to || !any))
+                pt_buf_putz(&s->out, "--\n");
+            for (at = line - k; q < p; at++) {
+                const char *e = (const char *)memchr(q, '\n', (size_t)(p - q));
+                if (!put_line(g, w, abs, at, q, (size_t)(e - q), '-'))
+                    return false;
+                q = e + 1;
+            }
+        }
+        stop = line_end(p, end);
+        if (!put_line(g, w, abs, line, p, (size_t)(stop - p), ':'))
+            return false;
+        g->found++;
+        any = true;
+        after = (uint64_t)g->context;
         line++;
-        p = nl ? nl + 1 : end;
+        p = shown_to = stop < end ? stop + 1 : end;
     }
     return true;
 }
@@ -821,7 +1014,9 @@ static void t_grep(void *ud, pt_rt *rt, const pt_fx *fx)
     grep_state g;
     struct stat st;
     walk w;
-    int flags = REG_EXTENDED | REG_NOSUB, rc;
+    int flags = REG_EXTENDED | REG_NEWLINE, rc; /* a match stays on its line */
+    bool literal, icase;
+    pt_str text;
     args = begin(s, fx);
     pattern = arg_str(s, args, "pattern");
     glob = arg_str(s, args, "glob");
@@ -840,10 +1035,21 @@ static void t_grep(void *ud, pt_rt *rt, const pt_fx *fx)
         done(rt, fx->id, PT_S("pattern is required"), true);
         return;
     }
-    if (pt_json_truthy(pt_json_get(args, "ignore_case")))
+    icase = pt_json_truthy(pt_json_get(args, "ignore_case"));
+    literal = pt_json_truthy(pt_json_get(args, "literal"));
+    if (icase)
         flags |= REG_ICASE;
+    /* The needle first: the whole pattern, or the text it requires. */
+    if (literal) {
+        text = pt_arena_dup(&s->ar, pt_strz(pattern));
+    } else {
+        required_text(pattern, &s->re);
+        text = pt_arena_dup(&s->ar, pt_buf_str(&s->re));
+    }
+    if (text.n && text.p && !s->ar.oom)
+        needle_init(&g.lit, (unsigned char *)text.p, text.n, icase);
     pt_buf_reset(&s->re);
-    if (pt_json_truthy(pt_json_get(args, "literal"))) {
+    if (literal) {
         const char *c;
         for (c = pattern; *c; c++)
             re_char(&s->re, *c);

@@ -87,7 +87,11 @@ run auto \
     '"name": "find", "args": {"pattern": "src/**/*.h"}' \
     '"name": "find", "args": {"pattern": "*", "path": "src/"}' \
     '"name": "ls", "args": {}' \
-    '"name": "ls", "args": {"path": "src", "limit": 1}'
+    '"name": "ls", "args": {"path": "src", "limit": 1}' \
+    '"name": "grep", "args": {"pattern": "^int", "path": "src"}' \
+    '"name": "grep", "args": {"pattern": "x;$|FOO", "path": "src"}' \
+    '"name": "grep", "args": {"pattern": "RETURN fo+", "ignore_case": true, "path": "src"}' \
+    '"name": "grep", "args": {"pattern": "[0-9]", "path": "src", "context": 1}'
 check "grep skips .git, ignored and binary files" is 0 'keep.log:1:foo
 src/a.c:3:    return foo(1);
 src/sub/b.h:1:int foo(int x)'
@@ -122,6 +126,14 @@ src/
 x.log'
 check "ls: the limit, said" is 12 'a.c
 [1 more entries; raise limit, or use find]'
+check "grep: ^ holds at line starts only" is 13 'src/a.c:1:int main(void)
+src/sub/b.h:1:int foo(int x)'
+check "grep: an alternation and \$, over a whole file" is 14 'src/sub/b.h:3:    return x;
+src/sub/b.h:5:/* FOO */'
+check "grep: required text, any case" is 15 'src/a.c:3:    return foo(1);'
+check "grep: a class, with context" is 16 'src/a.c-2-{
+src/a.c:3:    return foo(1);
+src/a.c-4-}'
 
 # ---- read ----
 seq 1 3000 >lines.txt
