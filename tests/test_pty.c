@@ -322,14 +322,22 @@ static bool wait_for(pty *p, const char *text, int ms)
 }
 
 /* Until no run is active (the activity line is gone). */
-/* A run is active: the spinner is the prompt's mark (and a running call's). */
+/* A run is active: the activity row above the input shows its clock. Its
+ * dot blinks, so the row starts with "• " or two spaces. */
 static bool busy(pty *p)
 {
-    static const char *const spin[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
+    static const char *const what[] = {"working · ", "thinking · ", "writing · ", "compacting · ",
+                                       "waiting for you · ", "running ", "retrying in "};
+    char row[64];
     size_t i;
-    for (i = 0; i < sizeof spin / sizeof spin[0]; i++)
-        if (has(p, spin[i]))
+    for (i = 0; i < sizeof what / sizeof what[0]; i++) {
+        snprintf(row, sizeof row, "\n• %s", what[i]);
+        if (has(p, row))
             return true;
+        snprintf(row, sizeof row, "\n  %s", what[i]);
+        if (has(p, row))
+            return true;
+    }
     return false;
 }
 
