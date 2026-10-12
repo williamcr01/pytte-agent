@@ -136,10 +136,22 @@ typedef struct pt_model {
     pt_compat compat;
 } pt_model;
 
+/* A catalog's model. It holds no pointers, so a static table of them needs
+ * no load-time relocation and stays in shared read-only pages. */
+enum { PT_MODEL_ID_CAP = 52, PT_MODEL_NAME_CAP = 48 };
+typedef struct pt_model_entry {
+    uint8_t provider; /* index into the catalog's providers */
+    char id[PT_MODEL_ID_CAP], name[PT_MODEL_NAME_CAP];
+    bool reasoning, images;
+    uint32_t context_window, max_tokens; /* 0 = unknown */
+    pt_cost cost;
+    pt_compat compat;
+} pt_model_entry;
+
 typedef struct pt_ai_catalog {
     const pt_provider *providers;
     uint32_t nproviders;
-    const pt_model *models;
+    const pt_model_entry *models; /* by provider, then id in strcmp order */
     uint32_t nmodels;
 } pt_ai_catalog;
 

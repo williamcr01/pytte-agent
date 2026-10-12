@@ -22,15 +22,25 @@ static pt_compat merge(const pt_compat *m, const pt_compat *p, const pt_compat *
     return c;
 }
 
+/* strcmp of a slice and a C string. */
+static int cmp_id(pt_str s, const char *z)
+{
+    size_t i;
+    for (i = 0; i < s.n && z[i]; i++)
+        if (s.p[i] != z[i])
+            return (unsigned char)s.p[i] < (unsigned char)z[i] ? -1 : 1;
+    return i < s.n ? 1 : z[i] ? -1 : 0;
+}
+
 bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_arena *a,
                    const char **why)
 {
     pt_str pid = ref, mid = {"", 0};
     long slash = pt_str_find(ref, '/');
     const pt_provider *p = NULL;
-    const pt_model *m = NULL;
+    const pt_model_entry *m = NULL;
     const char *api;
-    uint32_t i;
+    uint32_t i, at = 0, lo, hi;
     static const pt_compat none;
 
     *why = NULL;
@@ -41,7 +51,7 @@ bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_a
     }
     for (i = 0; i < cat->nproviders; i++)
         if (pt_str_eqz(pid, cat->providers[i].id))
-            p = &cat->providers[i];
+            p = &cat->providers[at = i];
     if (!p) {
         *why = "unknown provider";
         return false;
@@ -50,14 +60,36 @@ bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_a
         *why = "no model given: use provider/model-id";
         return false;
     }
-    for (i = 0; i < cat->nmodels; i++)
-        if (pt_str_eqz(pid, cat->models[i].provider) && pt_str_eqz(mid, cat->models[i].id))
-            m = &cat->models[i];
+    /* A binary search: a scan would bring the whole table into memory. */
+    lo = 0;
+    hi = cat->nmodels;
+    while (lo < hi) {
+        const pt_model_entry *e = &cat->models[lo + (hi - lo) / 2];
+        int c = e->provider != at ? (e->provider < at ? 1 : -1) : cmp_id(mid, e->id);
+        if (!c) {
+            m = e;
+            break;
+        }
+        if (c > 0)
+            lo = (uint32_t)(e - cat->models) + 1;
+        else
+            hi = (uint32_t)(e - cat->models);
+    }
 
     out->provider = p;
     out->known = m != NULL;
     if (m) {
-        out->model = *m;
+        pt_model *d = &out->model;
+        d->provider = p->id;
+        d->id = m->id;
+        d->name = m->name;
+        d->api = NULL;
+        d->context_window = m->context_window;
+        d->max_tokens = m->max_tokens;
+        d->reasoning = m->reasoning;
+        d->images = m->images;
+        d->cost = m->cost;
+        d->compat = m->compat;
     } else {
         /* Not in the catalog: allowed, with the provider's defaults. */
         pt_model *d = &out->model;

@@ -1,6 +1,9 @@
 /* Built-in providers (data) and the API registry. */
 #include "ai.h"
 
+/* The order of providers[]: what the model table's rows name. */
+enum { PROV_ANTHROPIC, PROV_OPENAI, PROV_OPENROUTER, PROV_FAUX };
+
 static const pt_provider providers[] = {
     {
         .id = "anthropic",
@@ -57,9 +60,9 @@ static const pt_provider providers[] = {
 
 /* The models come from scripts/gen_models.py (make models). A model that is
  * not listed still works, with its provider's defaults. */
-static const pt_model models[] = {
+static const pt_model_entry models[] = {
 #include "models.gen.inc"
-    {"faux", "faux", "Faux", NULL, 100000, 4096, true, false, {0, 0, 0, 0}, {0}},
+    {PROV_FAUX, "faux", "Faux", true, false, 100000, 4096, {0, 0, 0, 0}, {0}},
 };
 
 static const pt_ai_catalog builtin = {

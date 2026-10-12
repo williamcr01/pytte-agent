@@ -396,9 +396,9 @@ static void list_models(void)
         printf("%s (%s, %s)%s%s%s\n", p->id, p->name, p->api, key ? "  key: " : "", key ? key : "",
                key ? (getenv(key) && *getenv(key) ? " (set)" : " (not set)") : "");
         for (j = 0; j < cat->nmodels; j++) {
-            const pt_model *m = &cat->models[j];
+            const pt_model_entry *m = &cat->models[j];
             char ref[128];
-            if (strcmp(m->provider, p->id) != 0)
+            if (m->provider != i)
                 continue;
             snprintf(ref, sizeof ref, "%s/%s", p->id, m->id);
             printf("  %-30s %8lu ctx %7lu out%s\n", ref, (unsigned long)m->context_window,
@@ -480,7 +480,7 @@ static bool has_models(const pt_ai_catalog *cat, const char *provider)
 {
     uint32_t i;
     for (i = 0; i < cat->nmodels; i++)
-        if (strcmp(cat->models[i].provider, provider) == 0)
+        if (strcmp(cat->providers[cat->models[i].provider].id, provider) == 0)
             return true;
     return false;
 }

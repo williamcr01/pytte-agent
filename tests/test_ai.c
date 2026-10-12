@@ -126,6 +126,28 @@ static void test_resolve(void)
     CHECK(!pt_ai_resolve(pt_ai_builtin_catalog(), PT_S("nope/x"), &t, &A, &why) && why);
 }
 
+/* Resolution is a binary search: every model must be found as itself. */
+static void test_catalog_sorted(void)
+{
+    const pt_ai_catalog *cat = pt_ai_builtin_catalog();
+    char ref[128];
+    uint32_t i;
+    for (i = 0; i < cat->nmodels; i++) {
+        const pt_model_entry *e = &cat->models[i];
+        pt_ai_target t;
+        const char *why;
+        CHECK(e->provider < cat->nproviders);
+        if (i) {
+            const pt_model_entry *p = &cat->models[i - 1];
+            CHECK(p->provider < e->provider || (p->provider == e->provider && strcmp(p->id, e->id) < 0));
+        }
+        snprintf(ref, sizeof ref, "%s/%s", cat->providers[e->provider].id, e->id);
+        CHECK(pt_ai_resolve(cat, pt_strz(ref), &t, &A, &why) && t.known);
+        CHECK(strcmp(t.model.id, e->id) == 0 && strcmp(t.model.name, e->name) == 0);
+        CHECK(t.model.context_window == e->context_window && t.model.cost.input == e->cost.input);
+    }
+}
+
 static const char *fake_env(void *ud, const char *name)
 {
     (void)ud;
@@ -661,6 +683,7 @@ int main(void)
 {
     pt_arena_init(&A, T_AL, 0);
     RUN(test_resolve);
+    RUN(test_catalog_sorted);
     RUN(test_keys);
     RUN(test_anthropic_request);
     RUN(test_anthropic_folding_and_bad_args);

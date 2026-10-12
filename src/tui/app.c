@@ -1222,7 +1222,8 @@ static void add_models(app *a, pt_str q)
     char ref[256];
     uint32_t i;
     for (i = 0; i < cat->nmodels; i++) {
-        int n = snprintf(ref, sizeof ref, "%s/%s", cat->models[i].provider, cat->models[i].id);
+        int n = snprintf(ref, sizeof ref, "%s/%s", cat->providers[cat->models[i].provider].id,
+                         cat->models[i].id);
         if (n > 0 && (size_t)n < sizeof ref && pt_str_icontains(pt_strz(ref), q))
             add_item(a, ref, (size_t)n, cat->models[i].name);
     }
