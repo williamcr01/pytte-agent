@@ -251,6 +251,9 @@ typedef struct pt_tool_result {
     pt_str details;  /* a JSON object for humans and tools (exit code, duration, blob), or empty */
     /* Optionally replace one doc in the same commit (a JSON value). */
     pt_str doc_key, doc_value;
+    /* Optionally an image the model sees after content: a stored blob's
+     * ref ("sha256:<hex>", durable before this call) and its MIME type. */
+    pt_str image, image_mime;
 } pt_tool_result;
 
 /* A TOOL ended (also after PT_FX_CANCEL: with what it produced). Copied. */

@@ -207,9 +207,37 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
                 pt_jw_strz(&w, "tool_result");
                 pt_jw_key(&w, "tool_use_id");
                 pt_jw_str(&w, m->call_id);
-                if (m->text.n) {
+                if (pt_ai_sends_image(t, m)) {
                     pt_jw_key(&w, "content");
-                    pt_jw_str(&w, m->text);
+                    pt_jw_arr(&w);
+                    if (m->text.n) {
+                        pt_jw_obj(&w);
+                        pt_jw_key(&w, "type");
+                        pt_jw_strz(&w, "text");
+                        pt_jw_key(&w, "text");
+                        pt_jw_str(&w, m->text);
+                        pt_jw_obj_end(&w);
+                    }
+                    pt_jw_obj(&w);
+                    pt_jw_key(&w, "type");
+                    pt_jw_strz(&w, "image");
+                    pt_jw_key(&w, "source");
+                    pt_jw_obj(&w);
+                    pt_jw_key(&w, "type");
+                    pt_jw_strz(&w, "base64");
+                    pt_jw_key(&w, "media_type");
+                    pt_jw_str(&w, m->image_mime);
+                    pt_jw_key(&w, "data");
+                    pt_jw_base64(&w, NULL, m->image);
+                    pt_jw_obj_end(&w);
+                    pt_jw_obj_end(&w);
+                    pt_jw_arr_end(&w);
+                } else {
+                    pt_str text = pt_ai_result_text(t, m, a);
+                    if (text.n) {
+                        pt_jw_key(&w, "content");
+                        pt_jw_str(&w, text);
+                    }
                 }
                 if (m->is_error) {
                     pt_jw_key(&w, "is_error");

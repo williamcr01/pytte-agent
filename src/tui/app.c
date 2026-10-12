@@ -396,7 +396,8 @@ static const struct {
     int cat;
 } tools[] = {
     {"bash", "bash", CAT_COMMAND}, {"bash_poll", "poll", CAT_COMMAND}, {"read", "read", CAT_READ},
-    {"write", "write", CAT_WRITE}, {"edit", "edit", CAT_EDIT},
+    {"write", "write", CAT_WRITE}, {"edit", "edit", CAT_EDIT}, {"grep", "grep", CAT_READ},
+    {"find", "find", CAT_READ}, {"ls", "ls", CAT_READ},
 };
 #define NTOOLS (sizeof tools / sizeof tools[0])
 
@@ -590,17 +591,20 @@ static void group_add(app *a, const pt_entry_view *v)
     tail[0] = 0;
     g->dat = (uint32_t)a->grp.n;
     if (g->bad == G_OK && g->cat == CAT_EDIT) {
-        pt_str old, new_;
+        const pt_json *e;
         j = pt_json_parse(args, &a->ar, NULL);
-        old = pt_json_gets(j, "old", &a->ar);
-        new_ = pt_json_gets(j, "new", &a->ar);
-        add = count_lines(new_);
-        del = count_lines(old);
+        for (e = pt_json_is(pt_json_get(j, "edits"), PT_J_ARR) ? pt_json_get(j, "edits")->child : NULL; e;
+             e = e->next) {
+            add += count_lines(pt_json_gets(e, "new", &a->ar));
+            del += count_lines(pt_json_gets(e, "old", &a->ar));
+        }
         stats = true;
     } else if (g->bad == G_OK && g->cat == CAT_WRITE) {
         j = pt_json_parse(args, &a->ar, NULL);
         add = count_lines(pt_json_gets(j, "content", &a->ar));
         stats = true;
+    } else if (g->bad == G_OK && pt_str_eqz(m->name, "read") && pt_json_get(data, "image")) {
+        snprintf(tail, sizeof tail, " · image");
     } else if (g->bad == G_OK && pt_str_eqz(m->name, "read")) {
         snprintf(tail, sizeof tail, " · %u lines", count_lines(text));
     } else if (g->bad == G_FAILED || g->bad == G_TIMEOUT) {

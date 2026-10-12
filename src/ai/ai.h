@@ -89,4 +89,13 @@ void pt_classify_status(int status, pt_str message, pt_ai_error *out);
  * and results stay matched. Returns id itself when it is already fine. */
 pt_str pt_fix_tool_id(pt_str id, uint32_t max, pt_arena *a);
 
+/* A tool result's image goes to the target: it has one, and the model
+ * takes images. */
+bool pt_ai_sends_image(const pt_ai_target *t, const pt_msg *m);
+/* A tool result's text for the target: its own, and a note when it has an
+ * image the model cannot be sent. */
+pt_str pt_ai_result_text(const pt_ai_target *t, const pt_msg *m, pt_arena *a);
+/* The image as a data URL string: "data:<mime>;base64,...". */
+void pt_ai_image_url(pt_jw *w, const pt_msg *m, pt_arena *a);
+
 #endif

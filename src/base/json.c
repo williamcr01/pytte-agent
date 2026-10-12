@@ -649,6 +649,42 @@ void pt_jw_strz(pt_jw *w, const char *z)
     pt_jw_str(w, pt_strz(z));
 }
 
+void pt_jw_base64(pt_jw *w, const char *prefix, pt_str bytes)
+{
+    static const char abc[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const unsigned char *in = (const unsigned char *)bytes.p;
+    size_t np = prefix ? strlen(prefix) : 0, groups = bytes.n / 3 + (bytes.n % 3 != 0), i;
+    char *o;
+    before_value(w);
+    if (groups > (SIZE_MAX - np - 2) / 4) {
+        w->b->oom = true;
+        return;
+    }
+    if (!pt_buf_reserve(w->b, 2 + np + 4 * groups)) /* once: no growth per byte */
+        return;
+    o = w->b->p + w->b->n;
+    *o++ = '"';
+    if (np)
+        memcpy(o, prefix, np);
+    o += np;
+    for (i = 0; i + 2 < bytes.n; i += 3) {
+        uint32_t v = (uint32_t)in[i] << 16 | (uint32_t)in[i + 1] << 8 | in[i + 2];
+        *o++ = abc[v >> 18];
+        *o++ = abc[(v >> 12) & 63];
+        *o++ = abc[(v >> 6) & 63];
+        *o++ = abc[v & 63];
+    }
+    if (i < bytes.n) {
+        uint32_t v = (uint32_t)in[i] << 16 | (i + 1 < bytes.n ? (uint32_t)in[i + 1] << 8 : 0);
+        *o++ = abc[v >> 18];
+        *o++ = abc[(v >> 12) & 63];
+        *o++ = i + 1 < bytes.n ? abc[(v >> 6) & 63] : '=';
+        *o++ = '=';
+    }
+    *o++ = '"';
+    w->b->n = (size_t)(o - w->b->p);
+}
+
 void pt_jw_int(pt_jw *w, int64_t v)
 {
     before_value(w);

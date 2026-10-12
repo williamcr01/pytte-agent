@@ -9,7 +9,8 @@ OpenAI and OpenRouter. The core (`libpytte`) commits every step to a session
 log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
 few rows at the bottom and leaves the rest to the terminal's scrollback.
-The model works with five tools (bash, bash_poll, read, write, edit);
+The model works with eight tools (bash, bash_poll, read, write, edit, grep,
+find, ls);
 each call is a durable task, so a crash never runs an unsafe call twice.
 When the conversation nears the model's context window, pytte compacts it
 into a summary and carries on, so sessions outlive any one window.
@@ -132,21 +133,34 @@ end when pytte does. When one ends and nothing has read it by the time
 the model is idle, pytte starts a turn with a note saying so (shown as
 `· session 8 ended with exit code 0: make test`), and the model reads it
 and carries on; a command the user stopped with `/stop` gets no note. `read` shows a file with
-line numbers. `write` replaces a whole file atomically. `edit` replaces
-text that must match exactly once, and refuses when the file changed since
-the model last read it. The model sees up to 16 KB of output: the first
-4 KB and the last 12 KB. Longer output is kept whole in the session's
+line numbers, up to 2000 lines or 50 KiB, cut at a whole line, and says
+where to read on; an image (PNG, JPEG, GIF, WebP, up to 3.75 MiB and 8000
+pixels a side) goes to the model as an image, or as a note to a model that
+takes none, its bytes kept as a blob. `write` replaces a whole file
+atomically. `edit` makes one or more replacements in one call, each
+matched against the file as it was: each must match exactly once (or set
+`all`), they must not overlap, and it refuses when the file changed since
+the model last read it. `grep` (POSIX extended regular expressions, with
+`glob`, `context`, `ignore_case`, `literal` and `files_only`), `find`
+(globs; `**` crosses directories) and `ls` run in pytte itself: no shell,
+ripgrep or fd. `grep` and `find` skip `.git` and what `.gitignore` files
+ignore, from the repository's root down. Each result is bounded (matches,
+entries, 50 KiB) and says when it was cut. For `bash`, the model sees up
+to 16 KB of output: the first 4 KB and the last 12 KB. Longer output is kept whole in the session's
 `blobs/` (content-addressed, SHA-256), and the cut result names that file
 so the model can `read` or `grep` it. A prompt of 16 KB or more (a big paste) is
 stored the same way, once, and the log refers to it. Arguments are checked against each tool's JSON
 schema before anything runs.
 
 Permissions (`--permission-mode`, `$PYTTE_PERMISSION_MODE` or
-`permissions.mode` in the config): `ask` (the default) runs `read` freely
-and asks before `bash`, `write` and `edit`. The TUI asks inline: 1 yes,
+`permissions.mode` in the config): `ask` (the default) runs `read`, `grep`,
+`find`, `ls` and `bash_poll` freely and asks before `bash`, `write` and
+`edit`. The TUI asks inline: 1 yes,
 2 yes and allow the same command word (or tool) for this session, 3 or Esc
 no. Allowing `git` never allows `git status; rm -rf x`. `auto` runs
-everything. `read-only` refuses whatever may change things. In print mode
+everything. `read-only` runs only the tools that change nothing (`read`,
+`grep`, `find` and `ls`) and refuses the rest, `bash_poll` (which can
+stop a command) and allowed tools included. In print mode
 a question ends the process with exit code 3 and prints the
 `pytte approve` command that answers it.
 
@@ -169,8 +183,8 @@ waiting (a tool call needs approval), closed (detached with a run
 unfinished; resuming continues it) or crashed (its owner died without
 closing it; `pytte -r ID` recovers it).
 
-Recovery after a crash follows each tool's replay policy. `read` and
-`write` run again. A `bash` or `edit` call that was cut off is not repeated;
+Recovery after a crash follows each tool's replay policy. `read`, `grep`,
+`find`, `ls` and `write` run again. A `bash` or `edit` call that was cut off is not repeated;
 the model gets an "interrupted" result and decides what to do.
 
 ## pytte-ai

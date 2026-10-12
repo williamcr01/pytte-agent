@@ -150,6 +150,15 @@ void pt_msg_write_json(pt_jw *w, const pt_msg *m)
             pt_jw_key(w, "is_error");
             pt_jw_bool(w, true);
         }
+        if (m->image.n) { /* what it is, not its bytes */
+            pt_jw_key(w, "image");
+            pt_jw_obj(w);
+            pt_jw_key(w, "mime");
+            pt_jw_str(w, m->image_mime);
+            pt_jw_key(w, "size");
+            pt_jw_uint(w, m->image.n);
+            pt_jw_obj_end(w);
+        }
         break;
     case PT_ROLE_ASSISTANT:
         kstr(w, "api", m->api);

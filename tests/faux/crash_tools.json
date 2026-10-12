@@ -21,7 +21,7 @@
     },
     {
       "content": [
-        {"type": "tool_call", "name": "edit", "args": {"path": "notes/a.txt", "old": "two", "new": "three"}},
+        {"type": "tool_call", "name": "edit", "args": {"path": "notes/a.txt", "edits": [{"old": "two", "new": "three"}]}},
         {"type": "tool_call", "name": "bash", "args": {"command": "echo \"$PYTTE_CALL_ID\" >> runs; cat notes/a.txt"}}
       ]
     },

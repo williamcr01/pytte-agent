@@ -20,7 +20,7 @@
     },
     {
       "content": [
-        {"type": "tool_call", "name": "edit", "args": {"path": "build/test/render.c", "old": "int up = cur;", "new": "int up = b->cur;"}}
+        {"type": "tool_call", "name": "edit", "args": {"path": "build/test/render.c", "edits": [{"old": "int up = cur;", "new": "int up = b->cur;"}]}}
       ]
     },
     {

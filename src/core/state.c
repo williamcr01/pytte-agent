@@ -623,6 +623,12 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
         e->msg.name = pt_arena_dup(ea, pt_json_gets(d, "name", sa));
         e->msg.text = pt_arena_dup(ea, pt_json_gets(d, "content", sa));
         e->msg.is_error = pt_json_truthy(pt_json_get(d, "is_error"));
+        if (pt_json_is(pt_json_get(d, "image"), PT_J_OBJ)) { /* its bytes are a blob */
+            const pt_json *im = pt_json_get(d, "image");
+            e->msg.image_mime = pt_arena_dup(ea, pt_json_gets(im, "mime", sa));
+            if (!blob_text(a, pt_json_gets(im, "blob", sa), ea, &e->msg.image))
+                return false;
+        }
         break;
     case ENT_NOTE:
         e->msg.role = PT_ROLE_SYSTEM;

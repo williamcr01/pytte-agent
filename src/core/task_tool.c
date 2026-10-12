@@ -23,10 +23,10 @@ struct tool_live {
     int64_t last_live;
     bool dirty, wrote_live;
     pt_buf snap;
-    /* the result, copied: content, details, doc key, doc value */
+    /* the result, copied: content, details, doc key, doc value, image, its type */
     pt_buf result;
     pt_arena fx_arena; /* fx payload survives durable task-record replacement */
-    size_t at[4], n[4];
+    size_t at[6], n[6];
     bool is_error;
 };
 
@@ -100,7 +100,7 @@ static pt_str tail_of(pt_agent *a, task *t)
 /* ---- the end of a call ---- */
 
 typedef struct ending {
-    pt_str content, details, doc_key, doc_value;
+    pt_str content, details, doc_key, doc_value, image, image_mime;
     bool is_error, interrupted, aborted;
     const input *consumed; /* an approve answer this commit uses up */
 } ending;
@@ -141,6 +141,15 @@ static bool finish(pt_agent *a, task *t, const pt_block *call, const ending *e)
     if (e->interrupted) {
         pt_jw_key(w, "interrupted");
         pt_jw_bool(w, true);
+    }
+    if (e->image.n && e->image_mime.n) {
+        pt_jw_key(w, "image");
+        pt_jw_obj(w);
+        pt_jw_key(w, "blob");
+        pt_jw_str(w, e->image);
+        pt_jw_key(w, "mime");
+        pt_jw_str(w, e->image_mime);
+        pt_jw_obj_end(w);
     }
     pt_core_entry_end(a);
     if (e->doc_key.n && valid_json(a, e->doc_value, false))
@@ -567,13 +576,13 @@ void pt_fx_tool(pt_agent *a, uint32_t fx, const pt_tool_result *r)
 {
     task *t;
     tool_live *tl;
-    const pt_str parts[4] = {r->content, r->details, r->doc_key, r->doc_value};
+    const pt_str parts[6] = {r->content, r->details, r->doc_key, r->doc_value, r->image, r->image_mime};
     size_t total = 0;
     int i;
     if (a->fatal || !(t = find_running(a, fx)))
         return;
     tl = t->tl;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < 6; i++) {
         if (parts[i].n > SIZE_MAX - total) {
             pt_core_fail(a, PT_FATAL_OOM, "tool result is too large", PT_STR_NULL);
             return;
@@ -585,7 +594,7 @@ void pt_fx_tool(pt_agent *a, uint32_t fx, const pt_tool_result *r)
         pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
         return;
     }
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < 6; i++) {
         tl->at[i] = tl->result.n;
         tl->n[i] = parts[i].n;
         pt_buf_puts(&tl->result, parts[i]);
@@ -611,8 +620,11 @@ static bool commit_result(pt_agent *a, task *t, const pt_block *call, bool abort
     e.doc_key = tl->n[2] ? (pt_str){tl->result.p + tl->at[2], tl->n[2]} : PT_STR_NULL;
     e.doc_value = tl->n[3] ? (pt_str){tl->result.p + tl->at[3], tl->n[3]} : PT_STR_NULL;
     e.is_error = tl->is_error;
-    if (!aborted)
+    if (!aborted) {
+        e.image = tl->n[4] ? (pt_str){tl->result.p + tl->at[4], tl->n[4]} : PT_STR_NULL;
+        e.image_mime = tl->n[5] ? (pt_str){tl->result.p + tl->at[5], tl->n[5]} : PT_STR_NULL;
         return finish(a, t, call, &e);
+    }
     pt_buf_init(&b, a->al);
     pt_buf_putz(&b, aborted_text);
     if (e.content.n) {

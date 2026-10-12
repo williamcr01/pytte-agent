@@ -73,6 +73,30 @@ static pt_str wrap(pt_arena *a, const char *open, pt_str text, const char *close
     return (pt_str){p, n};
 }
 
+bool pt_ai_sends_image(const pt_ai_target *t, const pt_msg *m)
+{
+    return m->image.n && m->image_mime.n && t->model.images;
+}
+
+pt_str pt_ai_result_text(const pt_ai_target *t, const pt_msg *m, pt_arena *a)
+{
+    if (!m->image.n || pt_ai_sends_image(t, m))
+        return m->text;
+    return wrap(a, "", m->text, m->text.n ? "\n[an image was omitted: this model does not take images]"
+                                           : "[an image was omitted: this model does not take images]");
+}
+
+void pt_ai_image_url(pt_jw *w, const pt_msg *m, pt_arena *a)
+{
+    pt_str url = wrap(a, "data:", m->image_mime, ";base64,");
+    const char *z = url.p ? pt_arena_cstr(a, url) : NULL;
+    if (!z) { /* fail the request, not send it without its prefix */
+        w->b->oom = true;
+        return;
+    }
+    pt_jw_base64(w, z, m->image);
+}
+
 static bool same_source(const pt_ai_target *t, const pt_msg *m)
 {
     return pt_str_eqz(m->provider, t->provider->id) && pt_str_eqz(m->api, t->api->id);
@@ -253,7 +277,7 @@ static uint64_t estimate_tokens(const pt_ai_context *ctx)
     uint32_t i, j;
     for (i = 0; i < ctx->nmsgs; i++) {
         const pt_msg *m = &ctx->msgs[i];
-        bytes += m->text.n + 16;
+        bytes += m->text.n + 16 + (m->image.n ? 3 * PT_IMAGE_TOKENS : 0);
         for (j = 0; j < m->nblocks; j++)
             bytes += m->blocks[j].text.n + m->blocks[j].args.n + m->blocks[j].raw.n +
                      m->blocks[j].signature.n / 4 + 16;

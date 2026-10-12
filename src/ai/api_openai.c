@@ -83,6 +83,49 @@ static void write_assistant(pt_jw *w, const pt_msg *m)
     pt_jw_obj_end(w);
 }
 
+/* Tool messages hold only text: the images of the results that end at
+ * last follow them in one user message. */
+static void write_result_images(pt_jw *w, const pt_ai_target *t, const pt_ai_context *ctx, uint32_t last,
+                                pt_arena *a)
+{
+    uint32_t first = last, i;
+    bool any = false;
+    while (first > 0 && ctx->msgs[first - 1].role == PT_ROLE_TOOL_RESULT)
+        first--;
+    for (i = first; i <= last; i++) {
+        const pt_msg *m = &ctx->msgs[i];
+        if (!pt_ai_sends_image(t, m))
+            continue;
+        if (!any) {
+            pt_jw_obj(w);
+            pt_jw_key(w, "role");
+            pt_jw_strz(w, "user");
+            pt_jw_key(w, "content");
+            pt_jw_arr(w);
+            pt_jw_obj(w);
+            pt_jw_key(w, "type");
+            pt_jw_strz(w, "text");
+            pt_jw_key(w, "text");
+            pt_jw_strz(w, "The images from the tool results above, in order:");
+            pt_jw_obj_end(w);
+            any = true;
+        }
+        pt_jw_obj(w);
+        pt_jw_key(w, "type");
+        pt_jw_strz(w, "image_url");
+        pt_jw_key(w, "image_url");
+        pt_jw_obj(w);
+        pt_jw_key(w, "url");
+        pt_ai_image_url(w, m, a);
+        pt_jw_obj_end(w);
+        pt_jw_obj_end(w);
+    }
+    if (any) {
+        pt_jw_arr_end(w);
+        pt_jw_obj_end(w);
+    }
+}
+
 static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_opts *o,
                   const pt_credentials *cred, pt_http_req *out, pt_arena *a)
 {
@@ -169,8 +212,10 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
             pt_jw_key(&w, "tool_call_id");
             pt_jw_str(&w, m->call_id);
             pt_jw_key(&w, "content");
-            pt_jw_str(&w, m->text);
+            pt_jw_str(&w, pt_ai_result_text(t, m, a));
             pt_jw_obj_end(&w);
+            if (i + 1 == ctx->nmsgs || ctx->msgs[i + 1].role != PT_ROLE_TOOL_RESULT)
+                write_result_images(&w, t, ctx, i, a);
             break;
         }
     }

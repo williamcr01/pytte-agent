@@ -31,6 +31,8 @@ uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e)
     uint32_t i;
     for (i = 0; i < m->nblocks; i++)
         n += 16 + m->blocks[i].text.n + m->blocks[i].args.n + m->blocks[i].signature.n / 4;
+    if (m->image.n)
+        n += 3 * PT_IMAGE_TOKENS; /* counted as bytes / 3, below */
     if (e->kind == ENT_EPOCH)
         for (i = 0; i < a->ntools; i++)
             n += 32 + a->tools[i].name.n + a->tools[i].description.n + a->tools[i].schema.n;

@@ -133,11 +133,18 @@ void pt_rt_gate(pt_rt *rt, const pt_fx *fx)
     gist = pt_rt_gist(fx->args, &rt->ar);
     memset(&g, 0, sizeof g);
     g.kind = PT_GATE_ALLOW;
-    if (k < 0 || rt->tools[k].def.read_only || rt->perm == PT_PERM_AUTO || allowed(rt, fx->name, gist)) {
-        /* allow; an unknown tool fails when it runs */
+    if (k < 0) {
+        /* allow: an unknown tool fails when it runs */
     } else if (rt->perm == PT_PERM_READ_ONLY) {
-        g.kind = PT_GATE_DENY;
-        g.text = PT_S("pytte runs in read-only mode; this tool may change things");
+        /* Only tools that change nothing; allow rules do not apply. */
+        if (!rt->tools[k].def.read_only) {
+            g.kind = PT_GATE_DENY;
+            g.text = PT_S("pytte runs in read-only mode: only tools that change nothing run (read, grep, "
+                          "find and ls)");
+        }
+    } else if (rt->tools[k].def.read_only || rt->tools[k].no_ask || rt->perm == PT_PERM_AUTO ||
+               allowed(rt, fx->name, gist)) {
+        /* allow */
     } else {
         g.kind = PT_GATE_ASK;
         g.text = gist;
@@ -363,6 +370,27 @@ static bool blob_seal(pt_rt *rt, rt_call *c, pt_str *details, char *path, size_t
     return true;
 }
 
+bool pt_rt_put_blob(pt_rt *rt, const void *p, size_t n, char ref[72])
+{
+    pt_store *st = rt->c.store;
+    unsigned char d[32];
+    pt_sha256 sha;
+    void *h = st->blob_begin ? st->blob_begin(st) : NULL;
+    if (!h)
+        return false;
+    if (n && st->blob_write(st, h, p, n) != 0) {
+        st->blob_abort(st, h);
+        return false;
+    }
+    pt_sha256_init(&sha);
+    pt_sha256_update(&sha, p, n);
+    pt_sha256_final(&sha, d);
+    memcpy(ref, "sha256:", 7);
+    pt_hex(ref + 7, d, 32);
+    ref[71] = 0;
+    return st->blob_commit(st, h, ref + 7) == 0;
+}
+
 void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
 {
     rt_call *c = find_call(rt, fx), done;
@@ -375,7 +403,14 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
     if (!c)
         return;
     pt_buf_reset(&rt->scratch);
-    if (r->content.p) { /* given whole: cut it the same way */
+    if (r->content.p && r->whole) { /* bounded by the tool: kept as it is */
+        blob_abort(rt, c);
+        c->nospill = true;
+        pt_buf_reset(&c->head);
+        pt_buf_reset(&c->tail);
+        pt_buf_puts(&c->head, r->content);
+        c->total = r->content.n;
+    } else if (r->content.p) { /* given whole: cut it the same way */
         blob_abort(rt, c);
         c->nospill = false;
         pt_buf_reset(&c->head);
@@ -401,6 +436,8 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
     res.details = stored && !rt->scratch.oom ? (pt_str){rt->scratch.p, dn} : r->details;
     res.doc_key = r->doc_key;
     res.doc_value = r->doc_value;
+    res.image = r->image;
+    res.image_mime = r->image_mime;
     /* The slot goes back to the free part of the array, buffers and all. */
     i = (uint32_t)(c - rt->calls);
     done = *c;

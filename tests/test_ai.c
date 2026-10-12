@@ -349,6 +349,58 @@ static void test_responses_request(void)
     CHECK(pt_json_get(b, "reasoning") == NULL && pt_json_get(b, "include") == NULL);
 }
 
+/* A tool result's image: in the result for Anthropic and Responses, in a
+ * user message after the tool messages for Chat Completions, and a note
+ * for a model that takes no images. */
+static void test_images(void)
+{
+    pt_ai_target t = target("anthropic/claude-opus-5-5");
+    pt_ai_context c = conversation();
+    pt_http_req r;
+    pt_json *b;
+    conv[3].image = PT_S("abcd");
+    conv[3].image_mime = PT_S("image/png");
+    CHECK(t.model.images);
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "messages.2.content.0.type"), "tool_result");
+    CHECK_STR(jget(b, "messages.2.content.0.content.0.text"), "hi");
+    CHECK_STR(jget(b, "messages.2.content.0.content.1.type"), "image");
+    CHECK_STR(jget(b, "messages.2.content.0.content.1.source.type"), "base64");
+    CHECK_STR(jget(b, "messages.2.content.0.content.1.source.media_type"), "image/png");
+    CHECK_STR(jget(b, "messages.2.content.0.content.1.source.data"), "YWJjZA==");
+
+    t.model.images = false;
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "messages.2.content.0.content"),
+              "hi\n[an image was omitted: this model does not take images]");
+    CHECK(!pt_str_contains(r.body, PT_S("YWJjZA")));
+
+    t = target("openai/gpt-5");
+    CHECK(pt_ai_retarget(&t, PT_S("openai-completions")));
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "messages.3.role"), "tool");
+    CHECK_STR(jget(b, "messages.3.content"), "hi");
+    CHECK_STR(jget(b, "messages.4.role"), "user");
+    CHECK_STR(jget(b, "messages.4.content.1.type"), "image_url");
+    CHECK_STR(jget(b, "messages.4.content.1.image_url.url"), "data:image/png;base64,YWJjZA==");
+    CHECK_STR(jget(b, "messages.5.role"), "system");
+
+    t = target("openai/gpt-5");
+    conv[2].api = PT_S("openai-responses");
+    conv[2].provider = PT_S("openai");
+    blocks_a[0].signature = PT_S("{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[]}");
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "input.4.type"), "function_call_output");
+    CHECK_STR(jget(b, "input.4.output.0.type"), "input_text");
+    CHECK_STR(jget(b, "input.4.output.0.text"), "hi");
+    CHECK_STR(jget(b, "input.4.output.1.type"), "input_image");
+    CHECK_STR(jget(b, "input.4.output.1.image_url"), "data:image/png;base64,YWJjZA==");
+}
+
 static void test_tool_ids(void)
 {
     pt_str id = PT_S("call:with.bad/chars-and-a-very-long-tail-0123456789");
@@ -614,6 +666,7 @@ int main(void)
     RUN(test_anthropic_folding_and_bad_args);
     RUN(test_openai_request);
     RUN(test_responses_request);
+    RUN(test_images);
     RUN(test_tool_ids);
     RUN(test_cross_provider_view);
     RUN(test_faux);

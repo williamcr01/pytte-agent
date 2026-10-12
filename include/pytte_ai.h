@@ -17,7 +17,7 @@ typedef enum {
     PT_BLOCK_TEXT,      /* text */
     PT_BLOCK_THINKING,  /* text, signature, redacted */
     PT_BLOCK_TOOL_CALL, /* id, name, args (raw JSON text, exactly as received) */
-    PT_BLOCK_IMAGE,     /* later */
+    PT_BLOCK_IMAGE,     /* unused: images ride on tool results (pt_msg.image) */
     PT_BLOCK_OPAQUE     /* api + raw provider JSON, echoed back to the same api only */
 } pt_block_kind;
 
@@ -58,7 +58,14 @@ typedef struct pt_msg {
     /* tool_result */
     pt_str call_id, name;
     bool is_error;
+    /* An image after the text: its bytes and MIME type, or empty. Sent
+     * only to models that take images; others get a note instead. */
+    pt_str image, image_mime;
 } pt_msg;
+
+/* About what one image takes: providers scale large ones down to about
+ * this many tokens. */
+#define PT_IMAGE_TOKENS 1600
 
 typedef struct pt_tool {
     pt_str name, description;

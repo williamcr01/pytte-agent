@@ -161,7 +161,24 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
             pt_jw_key(&w, "call_id");
             pt_jw_str(&w, m->call_id);
             pt_jw_key(&w, "output");
-            pt_jw_str(&w, m->text);
+            if (pt_ai_sends_image(t, m)) {
+                pt_jw_arr(&w);
+                pt_jw_obj(&w);
+                pt_jw_key(&w, "type");
+                pt_jw_strz(&w, "input_text");
+                pt_jw_key(&w, "text");
+                pt_jw_str(&w, m->text);
+                pt_jw_obj_end(&w);
+                pt_jw_obj(&w);
+                pt_jw_key(&w, "type");
+                pt_jw_strz(&w, "input_image");
+                pt_jw_key(&w, "image_url");
+                pt_ai_image_url(&w, m, a);
+                pt_jw_obj_end(&w);
+                pt_jw_arr_end(&w);
+            } else {
+                pt_jw_str(&w, pt_ai_result_text(t, m, a));
+            }
             pt_jw_obj_end(&w);
             break;
         }

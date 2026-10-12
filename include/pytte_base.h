@@ -166,6 +166,9 @@ void pt_jw_uint(pt_jw *w, uint64_t v);
 void pt_jw_bool(pt_jw *w, bool v);
 void pt_jw_null(pt_jw *w);
 void pt_jw_raw(pt_jw *w, pt_str json); /* already valid JSON, written as is */
+/* A string: prefix (needs no escaping, e.g. "data:image/png;base64,"; may
+ * be NULL), then bytes in base64. bytes must not borrow w's buffer. */
+void pt_jw_base64(pt_jw *w, const char *prefix, pt_str bytes);
 /* Quoted, escaped string. Invalid UTF-8 becomes U+FFFD. s may borrow b's
  * storage; the input is preserved across buffer growth. */
 void pt_json_quote(pt_buf *b, pt_str s);

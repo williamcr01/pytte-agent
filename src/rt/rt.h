@@ -52,11 +52,16 @@ typedef struct pt_rt_tool {
      * calls finish inside run. */
     void (*cancel)(void *ud, pt_rt *rt, uint32_t fx);
     void *ud;
+    /* Runs without asking, though it may change things (bash_poll stops
+     * only what an approved bash call started). Read-only mode still
+     * denies it: only def.read_only tools run there. */
+    bool no_ask;
 } pt_rt_tool;
 
 /* Copied (strings must outlive rt). False when out of memory. */
 bool pt_rt_tool_add(pt_rt *rt, const pt_rt_tool *t);
-/* bash, bash_poll, read, write, edit (tools_builtin.c). */
+/* bash, bash_poll, read, write, edit (tools_builtin.c); grep, find, ls
+ * (tools_search.c). */
 bool pt_rt_add_builtins(pt_rt *rt);
 
 /* A bash command that went to the background. command lives until the
@@ -87,11 +92,20 @@ typedef struct pt_rt_out {
      * note appended. Long content is cut to its head and tail. */
     pt_str content, note;
     bool is_error;
+    /* content is bounded by the tool itself (and says how to see more):
+     * kept whole, never cut to its head and tail. */
+    bool whole;
     pt_str details; /* a JSON object, or empty */
     pt_str doc_key, doc_value;
+    /* An image after the text: a blob ref (pt_rt_put_blob) and its MIME
+     * type, or empty. */
+    pt_str image, image_mime;
 } pt_rt_out;
 
 void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r);
+/* Store n bytes as a blob: true with ref set ("sha256:<hex>", NUL
+ * terminated). False when the store keeps no blobs or writing failed. */
+bool pt_rt_put_blob(pt_rt *rt, const void *p, size_t n, char ref[72]);
 /* The agent the runtime drives (for a tool's lookups: pt_doc, the cwd). */
 pt_agent *pt_rt_agent(pt_rt *rt);
 /* pt_opts.blob for a store (blob_ud: the pt_store). */
@@ -158,7 +172,7 @@ bool pt_rt_skill_block(pt_str *text, pt_str *name);
 typedef enum {
     PT_PERM_ASK,      /* tools that change things ask first */
     PT_PERM_AUTO,     /* everything runs */
-    PT_PERM_READ_ONLY /* tools that change things are denied */
+    PT_PERM_READ_ONLY /* only read-only tools run; the rest are denied */
 } pt_perm_mode;
 
 bool pt_perm_parse(pt_str s, pt_perm_mode *out);

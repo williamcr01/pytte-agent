@@ -164,6 +164,17 @@ static void test_json_write(void)
     v = pt_json_parse(pt_buf_str(&b), &a, NULL);
     CHECK(v != NULL);
     CHECK_STR(pt_json_gets(v, "s", &a), "q\"b\\n\n\t\x01 \xC3\xA9 \xEF\xBF\xBD end");
+    /* base64, every padding, with and without a prefix */
+    pt_buf_reset(&b);
+    pt_jw_init(&w, &b);
+    pt_jw_arr(&w);
+    pt_jw_base64(&w, NULL, PT_STR_NULL);
+    pt_jw_base64(&w, NULL, PT_S("a"));
+    pt_jw_base64(&w, NULL, PT_S("ab"));
+    pt_jw_base64(&w, "data:x;base64,", PT_S("abc"));
+    pt_jw_base64(&w, NULL, PT_S("\xff\xfe\x00\x01"));
+    pt_jw_arr_end(&w);
+    CHECK_STR(pt_buf_str(&b), "[\"\",\"YQ==\",\"YWI=\",\"data:x;base64,YWJj\",\"//4AAQ==\"]");
     pt_buf_free(&b);
     pt_arena_free(&a);
 }

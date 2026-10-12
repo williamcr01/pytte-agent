@@ -105,6 +105,11 @@ void pt_rt_run_tool(pt_rt *rt, const pt_fx *fx);
 void pt_rt_cancel_tool(pt_rt *rt, uint32_t fx);
 void pt_rt_tools_stop(pt_rt *rt); /* closing: stop running calls */
 void pt_rt_tools_free(pt_rt *rt);
+/* tools_search.c: grep, find and ls, with their state */
+typedef struct search search;
+search *pt_rt_search_new(pt_rt *rt);
+void pt_rt_search_free(search *s);
+void pt_rt_search_tools(search *s, pt_rt_tool t[3]);
 /* prompt.c */
 void pt_rt_prompt_free(pt_rt *rt);
 /* Grow a malloc'd array to hold need items (doubling). */
