@@ -46,7 +46,7 @@ typedef struct builtins {
     pt_buf spans; /* an edit's spans, reused */
     search *search; /* grep, find and ls */
     pt_arena ar; /* arguments of one call */
-    const char *unset[16]; /* API key variables: never passed to tools */
+    const char **unset; /* API key variables, NULL-ended: never passed to tools */
 } builtins;
 
 struct job {
@@ -1349,6 +1349,7 @@ static void builtins_free(void *ud)
             job_free(j);
     }
     free(b->io);
+    free(b->unset);
     pt_buf_free(&b->out);
     pt_buf_free(&b->doc);
     pt_buf_free(&b->spans);
@@ -1360,12 +1361,16 @@ static void builtins_free(void *ud)
 bool pt_rt_add_builtins(pt_rt *rt)
 {
     builtins *b = (builtins *)calloc(1, sizeof *b);
-    const pt_ai_catalog *cat = pt_ai_builtin_catalog();
+    const pt_ai_catalog *cat = rt->c.catalog ? rt->c.catalog : pt_ai_builtin_catalog();
     pt_rt_tool t[8];
     uint32_t i, k, n = 0;
-    if (!b || !(b->io = (char *)malloc(CHUNK)) || !(b->search = pt_rt_search_new(rt))) {
-        if (b)
+    if (!b || !(b->io = (char *)malloc(CHUNK)) ||
+        !(b->unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *b->unset)) ||
+        !(b->search = pt_rt_search_new(rt))) {
+        if (b) {
             free(b->io);
+            free(b->unset);
+        }
         free(b);
         return false;
     }
@@ -1375,7 +1380,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     pt_buf_init(&b->spans, pt_sys_allocator());
     pt_arena_init(&b->ar, pt_sys_allocator(), 4096);
     for (i = 0; i < cat->nproviders; i++)
-        for (k = 0; k < 4 && cat->providers[i].key_env[k] && n + 1 < 16; k++)
+        for (k = 0; k < 4 && cat->providers[i].key_env[k]; k++)
             b->unset[n++] = cat->providers[i].key_env[k];
     rt->builtin = b;
     rt->builtin_free = builtins_free;

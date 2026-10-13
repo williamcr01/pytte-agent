@@ -7,6 +7,7 @@
  *   pytte log [ID] [--json]     print a session's transcript
  *   pytte approve ID TASK yes|no   answer a tool call waiting for approval
  *   pytte ls                    list sessions with their status
+ *   pytte update-catalog        fetch the model catalog (models.dev, OpenRouter)
  *
  * Kill the process at any point and `pytte -c` continues from its last
  * commit. */
@@ -19,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 #ifdef __GLIBC__
 #include <malloc.h>
@@ -40,6 +42,8 @@ static const char usage[] =
     "                                     then go on as -p would\n"
     "       pytte ls                      list sessions, newest first: status, directory\n"
     "                                     and name (its first prompt)\n"
+    "       pytte update-catalog          fetch the newest models from models.dev and\n"
+    "                                     OpenRouter into ~/.cache/pytte/models.bin\n"
     "\n"
     "  -c, --continue          the newest session started in this directory\n"
     "  -r, --resume [ID]       that session, or pick from this directory's\n"
@@ -76,7 +80,7 @@ enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 
 typedef struct opts {
     cli_opts c;
-    const char *cmd_log, *cmd_approve, *cmd_ls, *id, *prompt, *task, *answer;
+    const char *cmd_log, *cmd_approve, *cmd_ls, *cmd_update, *id, *prompt, *task, *answer;
     bool print, cont, resume, json, all_epochs, model_flag, compact_flag, effort_flag, perm_flag;
     bool no_stdin;
     int out;
@@ -182,6 +186,8 @@ static void parse_args(int argc, char **argv, opts *o)
             o->cmd_log = a;
         } else if (i == 1 && strcmp(a, "ls") == 0) {
             o->cmd_ls = a;
+        } else if (i == 1 && strcmp(a, "update-catalog") == 0) {
+            o->cmd_update = a;
         } else if (i == 1 && strcmp(a, "approve") == 0) {
             o->cmd_approve = a;
         } else if ((o->cmd_log || o->cmd_approve) && !o->id) {
@@ -192,8 +198,8 @@ static void parse_args(int argc, char **argv, opts *o)
             if (strcmp(a, "yes") != 0 && strcmp(a, "no") != 0)
                 die("answer yes or no", a);
             o->answer = a;
-        } else if (o->cmd_ls) {
-            die("ls takes no arguments", a);
+        } else if (o->cmd_ls || o->cmd_update) {
+            die(o->cmd_ls ? "ls takes no arguments" : "update-catalog takes no arguments", a);
         } else if (!o->prompt) {
             o->prompt = a;
         } else {
@@ -217,7 +223,7 @@ static void check_model(const char *ref, const char *src)
     if (!ref || !*ref)
         return;
     pt_arena_init(&a, pt_sys_allocator(), 0);
-    ok = pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(ref), &t, &a, &why);
+    ok = pt_ai_resolve(cli_catalog(), pt_strz(ref), &t, &a, &why);
     pt_arena_free(&a);
     if (!ok) {
         fprintf(stderr, "pytte: model %s (from %s): %s, e.g. %s\n", ref, src, why, DEFAULT_MODEL);
@@ -962,6 +968,109 @@ static void ls_status(const ls_row *r, char *out, size_t cap)
         snprintf(out, cap, "crashed");
 }
 
+/* ---- pytte update-catalog ---- */
+
+typedef struct fetch {
+    pt_buf body;
+    int status;
+    bool done;
+    char err[300];
+} fetch;
+
+static void fetch_head(void *ud, int status, pt_str retry_after)
+{
+    (void)retry_after;
+    ((fetch *)ud)->status = status;
+}
+
+static void fetch_body(void *ud, const char *p, size_t n)
+{
+    fetch *f = (fetch *)ud;
+    if (f->body.n + n > ((size_t)64 << 20)) /* models.dev is about 6 MiB */
+        f->body.oom = true;
+    else
+        pt_buf_put(&f->body, p, n);
+}
+
+static void fetch_done(void *ud, const char *error)
+{
+    fetch *f = (fetch *)ud;
+    f->done = true;
+    if (error)
+        snprintf(f->err, sizeof f->err, "%s", error);
+}
+
+/* GET url into f->body; false with f->err set. */
+static bool fetch_url(pt_http_driver *d, const char *url, fetch *f)
+{
+    pt_header accept = {"Accept", "application/json"};
+    pt_http_req req;
+    pt_http_sink sink;
+    memset(&req, 0, sizeof req);
+    req.method = "GET";
+    req.url = url;
+    req.headers = &accept;
+    req.nheaders = req.hcap = 1;
+    sink.ud = f;
+    sink.head = fetch_head;
+    sink.body = fetch_body;
+    sink.done = fetch_done;
+    if (!d->start(d, &req, &sink)) {
+        snprintf(f->err, sizeof f->err, "cannot start the request");
+        return false;
+    }
+    while (!f->done)
+        if (d->pump(d, 1000, NULL, 0) < 0) {
+            snprintf(f->err, sizeof f->err, "the HTTP driver failed");
+            return false;
+        }
+    if (!f->err[0] && f->body.oom)
+        snprintf(f->err, sizeof f->err, "response too large, or out of memory");
+    else if (!f->err[0] && (f->status < 200 || f->status > 299))
+        snprintf(f->err, sizeof f->err, "HTTP %d", f->status);
+    return !f->err[0];
+}
+
+static int cmd_update_catalog(void)
+{
+    static const char *const urls[2] = {"https://models.dev/api.json", "https://openrouter.ai/api/v1/models"};
+    pt_http_driver *d = pt_http_curl_new();
+    fetch f[2];
+    pt_buf out;
+    char path[4096], msg[600], err[600], updated[32];
+    time_t now = time(NULL);
+    struct tm tm;
+    int i, rc = 1;
+    if (!d)
+        die("cannot start libcurl", NULL);
+    memset(f, 0, sizeof f);
+    pt_buf_init(&out, pt_sys_allocator());
+    for (i = 0; i < 2; i++) {
+        pt_buf_init(&f[i].body, pt_sys_allocator());
+        if (!fetch_url(d, urls[i], &f[i])) {
+            fprintf(stderr, "pytte: %s: %s\n", urls[i], f[i].err);
+            goto done;
+        }
+    }
+    gmtime_r(&now, &tm);
+    strftime(updated, sizeof updated, "%Y-%m-%dT%H:%M:%SZ", &tm);
+    cli_catalog_path(path, sizeof path);
+    if (!cli_catalog_convert(pt_buf_str(&f[0].body), pt_buf_str(&f[1].body), updated, &out, msg, sizeof msg)) {
+        fprintf(stderr, "pytte: %s\n", msg);
+    } else if (!cli_write_atomic(path, pt_buf_str(&out), err, sizeof err)) {
+        fprintf(stderr, "pytte: %s\n", err);
+    } else {
+        printf("wrote %s: %s\n", path, msg);
+        rc = 0;
+    }
+done:
+    for (i = 0; i < 2; i++)
+        pt_buf_free(&f[i].body);
+    pt_buf_free(&out);
+    d->free(d);
+    return rc;
+}
+
 static int cmd_ls(void)
 {
     char root[4096], path[4200], status[300], name[CLI_NAME_MAX + 1], *peek;
@@ -1102,6 +1211,8 @@ int main(int argc, char **argv)
     cli_config_load(&cfg, warn, sizeof warn);
     if (warn[0])
         fprintf(stderr, "pytte: %s\n", warn);
+    if (o.cmd_update)
+        return cmd_update_catalog();
     tty = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
     if (o.c.worktree && (o.cont || o.resume))
         die("-w starts a new session: not with -c or -r", NULL);

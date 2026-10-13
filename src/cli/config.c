@@ -63,7 +63,9 @@ static const pt_json *lookup(const pt_json *j, const char *key)
     return j;
 }
 
-static void load_file(cli_config *c, const char *path, const char *src, char *warn, size_t cap)
+/* Applies the file's settings; the user file also gives the catalog's
+ * providers. False when the file could not be read. */
+static bool load_file(cli_config *c, const char *path, const char *src, char *warn, size_t cap)
 {
     size_t n;
     char *text = pt_sys_read_file(path, &n);
@@ -71,8 +73,9 @@ static void load_file(cli_config *c, const char *path, const char *src, char *wa
     pt_json *j;
     pt_json_err e;
     int k;
+    bool ok;
     if (!text)
-        return;
+        return false;
     pt_arena_init(&ar, pt_sys_allocator(), 0);
     j = pt_json_parse((pt_str){text, n}, &ar, &e);
     if (!j || !pt_json_is(j, PT_J_OBJ)) {
@@ -91,9 +94,15 @@ static void load_file(cli_config *c, const char *path, const char *src, char *wa
                 }
             }
         }
+        if (strcmp(src, "user") == 0)
+            cli_catalog_load(pt_json_get(j, "providers"), path, warn, cap);
+        else if (pt_json_get(j, "providers") && !warn[0])
+            snprintf(warn, cap, "%s: providers are read only from %s", path, c->user_path);
     }
+    ok = j && pt_json_is(j, PT_J_OBJ);
     pt_arena_free(&ar);
     free(text);
+    return ok;
 }
 
 void cli_config_load(cli_config *c, char *warn, size_t cap)
@@ -114,7 +123,8 @@ void cli_config_load(cli_config *c, char *warn, size_t cap)
     cli_config_set(c, CFG_PAGER, e && *e ? e : "less -R", "default");
     cli_config_dir(dir, sizeof dir);
     snprintf(c->user_path, sizeof c->user_path, "%s/config.json", dir);
-    load_file(c, c->user_path, "user", warn, cap);
+    if (!load_file(c, c->user_path, "user", warn, cap))
+        cli_catalog_load(NULL, c->user_path, warn, cap);
     load_file(c, ".pytte/config.json", "project", warn, cap);
     if ((e = getenv("PYTTE_MODEL")) && *e)
         cli_config_set(c, CFG_MODEL, e, "env");

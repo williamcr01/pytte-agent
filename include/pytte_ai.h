@@ -137,7 +137,9 @@ typedef struct pt_model {
 } pt_model;
 
 /* A catalog's model. It holds no pointers, so a static table of them needs
- * no load-time relocation and stays in shared read-only pages. */
+ * no load-time relocation and stays in shared read-only pages. The CLI
+ * caches these as raw bytes (src/cli/providers.c): changing the layout
+ * means bumping CAT_VERSION there. */
 enum { PT_MODEL_ID_CAP = 52, PT_MODEL_NAME_CAP = 48 };
 typedef struct pt_model_entry {
     uint8_t provider; /* index into the catalog's providers */

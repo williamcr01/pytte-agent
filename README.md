@@ -64,6 +64,7 @@ echo "hello" | build/pytte -p --output-format json
 build/pytte log [ID]                         # a transcript (--json: records,
                                              #   --all-epochs: before compactions too)
 build/pytte ls                               # every session: status, directory, name
+build/pytte update-catalog                   # the newest models from models.dev, OpenRouter
 build/pytte --permission-mode auto           # run every tool call without asking
 build/pytte approve ID TASK yes              # answer a call -p left waiting (exit 3)
 build/pytte -m faux/faux --script tests/faux/slow.json   # offline
@@ -91,6 +92,50 @@ a one-word prompt from being taken for the name.
 history) and saves it to `~/.config/pytte/auth.json` (mode 0600), so no
 exported variable is needed. A key in the environment still comes first;
 `/login` alone shows where each provider's key comes from.
+
+Any server that speaks one of the supported APIs can be added as a provider
+in `~/.config/pytte/config.json` (only the user file; a project's file
+cannot add providers):
+
+```json
+{
+  "providers": {
+    "groq": {
+      "base_url": "https://api.groq.com/openai/v1",
+      "models": ["llama-3.3-70b-versatile"]
+    },
+    "ollama": {
+      "base_url": "http://localhost:11434/v1",
+      "auth": "none",
+      "models": {"qwen3": {"context_window": 40960, "reasoning": true}}
+    }
+  }
+}
+```
+
+Then `pytte -m groq/llama-3.3-70b-versatile`. A provider takes `base_url`
+(required), `api` (`openai-completions`, the default; `openai-responses`;
+`anthropic-messages`), `auth` (`bearer`, `x-api-key` or `none`), `key_env`
+(a variable name or a list of up to 4; by default the id in capitals plus
+`_API_KEY`, so `GROQ_API_KEY`; `/login groq` works too), `headers` (up to
+4), `name`, defaults for unlisted models (`context_window`, 128000 unless
+set; `max_tokens`; `reasoning`), and `compat` for servers that differ from
+OpenAI: `max_tokens_field` (`max_tokens` or `max_completion_tokens`),
+`system_role` (`system` or `developer`), `reasoning_param` (`none`,
+`effort` or `openrouter`), and the booleans `stream_usage`,
+`reasoning_delta`, `parallel_tool_calls` and `mid_conversation_system`.
+`models` is a list of IDs, or an object of ID to `name`, `context_window`,
+`max_tokens`, `reasoning`, `images` and `cost` (`input`, `output`,
+`cache_read`, `cache_write`: dollars per million tokens). Any model ID
+works with the provider's defaults; listed models show up in `/model` and
+`/usage` costs.
+
+The model catalog is built into the binary (`make models` refreshes it).
+`pytte update-catalog` fetches the newest one from models.dev and
+OpenRouter into `~/.cache/pytte/models.bin`, which every start merges over
+the built-in table. That file also gets models.dev's models for config
+providers with the same id (`groq`, `deepseek`, `mistral`, ...), unless the
+config lists their models itself.
 
 The footer shows the selected model, effort and context use of the model's
 window (`12k/200k`). It counts what the next request sends: the provider's

@@ -1224,7 +1224,7 @@ static pt_str item_label(const app *a, int i)
 
 static void add_models(app *a, pt_str q)
 {
-    const pt_ai_catalog *cat = pt_ai_builtin_catalog();
+    const pt_ai_catalog *cat = cli_catalog();
     char ref[256];
     uint32_t i;
     for (i = 0; i < cat->nmodels; i++) {
@@ -1382,7 +1382,7 @@ static void menu_update(app *a)
         } else if (pt_str_eqz(cmd, "thinking")) {
             add_list(a, th_names, 3, arg);
         } else if (pt_str_eqz(cmd, "login") && pt_str_find(arg, ' ') < 0) {
-            const pt_ai_catalog *cat = pt_ai_builtin_catalog();
+            const pt_ai_catalog *cat = cli_catalog();
             uint32_t i;
             for (i = 0; i < cat->nproviders; i++)
                 if (cat->providers[i].auth != PT_AUTH_NONE && pt_str_starts(pt_strz(cat->providers[i].id), arg))
@@ -1933,7 +1933,7 @@ static bool save_setting(app *a, int k, const char *v)
     const char *why = NULL;
     pt_arena_reset(&a->ar);
     if ((k == CFG_MODEL || (k == CFG_COMPACT_MODEL && *v)) &&
-        !pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(v), &t, &a->ar, &why)) {
+        !pt_ai_resolve(cli_catalog(), pt_strz(v), &t, &a->ar, &why)) {
         snprintf(err, sizeof err, "%s: %s", v, why ? why : "unknown");
         out_z(a, TUI_RED, err);
         return false;
@@ -2007,7 +2007,7 @@ static void update_model(app *a)
     a->ctx_used = a->open ? pt_context_tokens(a->s.a) : 0;
     a->ctx_window = 0;
     pt_arena_reset(&a->ar);
-    if (a->model[0] && pt_ai_resolve(pt_ai_builtin_catalog(), pt_strz(a->model), &t, &a->ar, &why))
+    if (a->model[0] && pt_ai_resolve(cli_catalog(), pt_strz(a->model), &t, &a->ar, &why))
         a->ctx_window = t.model.context_window;
 }
 
@@ -2301,7 +2301,7 @@ static void cmd_usage(app *a)
         tokens_short(cache, sizeof cache, cr);
         n = snprintf(line, sizeof line, "%.*s: %s in (%s from cache) · %s out · %lld requests", (int)c->key.n,
                      c->key.p, in, cache, out, (long long)pt_json_geti(c, "requests", 0));
-        if (pt_ai_resolve(pt_ai_builtin_catalog(), c->key, &t, &a->ar, &why) && t.known && t.model.cost.input) {
+        if (pt_ai_resolve(cli_catalog(), c->key, &t, &a->ar, &why) && t.known && t.model.cost.input) {
             const pt_cost *k = &t.model.cost; /* micro-dollars per million tokens */
             double usd = ((double)ti * (double)k->input + (double)to * (double)k->output +
                           (double)cr * (double)k->cache_read + (double)cw * (double)k->cache_write) / 1e12;
@@ -2329,7 +2329,7 @@ static void cmd_help(app *a)
  * ready for the key. "/login <provider> <key>": save it. */
 static void cmd_login(app *a, pt_str arg)
 {
-    const pt_ai_catalog *cat = pt_ai_builtin_catalog();
+    const pt_ai_catalog *cat = cli_catalog();
     const pt_provider *p = NULL;
     pt_str name = arg, key = PT_STR_NULL;
     long sp = pt_str_find(arg, ' ');
@@ -2415,7 +2415,7 @@ static void run_command(app *a, pt_str line)
             pt_ai_target t;
             const char *why = NULL;
             pt_arena_reset(&a->ar);
-            if (!pt_ai_resolve(pt_ai_builtin_catalog(), arg, &t, &a->ar, &why)) {
+            if (!pt_ai_resolve(cli_catalog(), arg, &t, &a->ar, &why)) {
                 snprintf(msg, sizeof msg, "%s: %s", v, why ? why : "unknown");
                 out_z(a, TUI_RED, msg);
                 return;

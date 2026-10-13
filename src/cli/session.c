@@ -457,6 +457,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     ao.now_ms = sys_now;
     ao.random = pt_sys_random;
     ao.credentials = credentials;
+    ao.catalog = cli_catalog();
     ao.on_event = on_event;
     ao.ud = ud;
     ao.blob = pt_rt_read_blob;
@@ -472,6 +473,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     rc.store = st;
     rc.http = s->http;
     rc.stop = o->stop;
+    rc.catalog = cli_catalog();
     if (!(s->a = pt_new(&ao)) || !(s->rt = pt_rt_new(&rc, s->a))) {
         st->close(st);
         return fail(s, 1, err, cap, "out of memory");

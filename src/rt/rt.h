@@ -20,6 +20,9 @@ typedef struct pt_rt_cfg {
     /* Polled between effects; true stops pt_rt_run. */
     bool (*stop)(void *ud);
     void *stop_ud;
+    /* Whose API key variables tools never see; NULL: the built-in one.
+     * Must outlive the runtime. */
+    const pt_ai_catalog *catalog;
 } pt_rt_cfg;
 
 pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a);

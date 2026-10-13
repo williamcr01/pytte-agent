@@ -65,6 +65,32 @@ const char *cli_auth_key(const char *provider);
  * this process could not take it. */
 bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap);
 
+/* ---- providers.c: the model catalog ----
+ * The built-in catalog, merged with what `pytte update-catalog` fetched
+ * (cli_catalog_path, a binary cache) and with the "providers" of the user's config.json:
+ *
+ *   "providers": {"groq": {"base_url": "https://api.groq.com/openai/v1",
+ *                          "models": ["llama-3.3-70b-versatile"]}}
+ *
+ * A project's config.json cannot add providers: one could send a key from
+ * the environment to any server. */
+
+/* The catalog; the built-in one until cli_catalog_load. It lives for the
+ * process (a second load frees the first). */
+const pt_ai_catalog *cli_catalog(void);
+/* $XDG_CACHE_HOME/pytte/models.bin, else ~/.cache/pytte/models.bin. */
+void cli_catalog_path(char *out, size_t cap);
+/* Build the catalog from the user file's "providers" (NULL: none; path is
+ * for messages) and the fetched models. The first problem goes to warn,
+ * when it is empty; a provider or model with a problem is skipped. */
+void cli_catalog_load(const pt_json *providers, const char *path, char *warn, size_t cap);
+/* models.dev's api.json and OpenRouter's /models in, models.bin out: the
+ * built-in providers' models, and those of config.json's providers that
+ * models.dev lists by the same id. msg says how many each got, or why it
+ * failed. */
+bool cli_catalog_convert(pt_str dev_json, pt_str openrouter_json, const char *updated, pt_buf *out, char *msg,
+                         size_t cap);
+
 /* ---- session.c: opening sessions ---- */
 
 typedef struct cli_opts {

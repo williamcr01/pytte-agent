@@ -43,7 +43,7 @@ SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
 # The TUI's parts; app.c (the loop) only goes into pytte.
 TUI_SRC  := $(filter-out src/tui/app.c,$(wildcard src/tui/*.c))
-CLI_SRC  := src/cli/config.c
+CLI_SRC  := src/cli/config.c src/cli/providers.c
 APP_SRC  := src/tui/app.c src/cli/session.c src/cli/main.c
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)

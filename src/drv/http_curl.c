@@ -369,11 +369,15 @@ static void *start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sin
     if (d->ca_seed || d->custom_path)
         SET(CURLOPT_CAPATH, d->ca_path);
     x->directory_ca = d->ca_seed != NULL;
-    SET(CURLOPT_CUSTOMREQUEST, req->method);
-    SET(CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req->body.n);
-    /* The HTTP contract keeps request bytes alive until done/cancel. Curl
-     * borrows them too, avoiding a second full request-body allocation. */
-    SET(CURLOPT_POSTFIELDS, req->body.n ? req->body.p : "");
+    if (strcmp(req->method, "GET") == 0 && !req->body.n) {
+        SET(CURLOPT_HTTPGET, 1L);
+    } else {
+        SET(CURLOPT_CUSTOMREQUEST, req->method);
+        SET(CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req->body.n);
+        /* The HTTP contract keeps request bytes alive until done/cancel. Curl
+         * borrows them too, avoiding a second full request-body allocation. */
+        SET(CURLOPT_POSTFIELDS, req->body.n ? req->body.p : "");
+    }
     SET(CURLOPT_HTTPHEADER, x->hdrs);
     SET(CURLOPT_WRITEFUNCTION, on_write);
     SET(CURLOPT_WRITEDATA, x);
