@@ -65,6 +65,7 @@ build/pytte log [ID]                         # a transcript (--json: records,
                                              #   --all-epochs: before compactions too)
 build/pytte ls                               # every session: status, directory, name
 build/pytte update-catalog                   # the newest models from models.dev, OpenRouter
+build/pytte mcp [list]                       # MCP servers: state, tools (also trust, login)
 build/pytte --permission-mode auto           # run every tool call without asking
 build/pytte approve ID TASK yes              # answer a call -p left waiting (exit 3)
 build/pytte -m faux/faux --script tests/faux/slow.json   # offline
@@ -75,7 +76,7 @@ Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft (twice
 on an empty one quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
-`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/help`, `/quit`. Settings are saved to
+`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. Settings are saved to
 `~/.config/pytte/config.json`.
 
 A session is named after the first line of its first prompt; `/resume`,
@@ -209,21 +210,74 @@ ignore, from the repository's root down. Each result is bounded (matches,
 entries, 50 KiB) and says when it was cut. For `bash`, the model sees up
 to 16 KB of output: the first 4 KB and the last 12 KB. Longer output is kept whole in the session's
 `blobs/` (content-addressed, SHA-256), and the cut result names that file
-so the model can `read` or `grep` it. A prompt of 16 KB or more (a big paste) is
+so the model can `read` or `grep` it. `web_fetch` gets a URL (http
+becomes https, except for localhost; up to 5 redirects, never down from
+https to http) and gives the page as Markdown: scripts, styles and
+navigation dropped, links made absolute. Plain text and JSON come as they
+are, Latin-1 converted to UTF-8, an image as an image; other binary types
+are refused. It shows 50 KiB (`max_bytes` up to 256 KiB) from `offset`;
+a longer text is kept whole as a blob, and the result says how to read
+on. The result tells the model that the page is data, not instructions. A prompt of 16 KB or more (a big paste) is
 stored the same way, once, and the log refers to it. Arguments are checked against each tool's JSON
 schema before anything runs.
 
 Permissions (`--permission-mode`, `$PYTTE_PERMISSION_MODE` or
 `permissions.mode` in the config): `ask` (the default) runs `read`, `grep`,
-`find`, `ls` and `bash_poll` freely and asks before `bash`, `write` and
-`edit`. The TUI asks inline: 1 yes,
-2 yes and allow the same command word (or tool) for this session, 3 or Esc
-no. Allowing `git` never allows `git status; rm -rf x`. `auto` runs
+`find`, `ls` and `bash_poll` freely and asks before `bash`, `write`,
+`edit`, `web_fetch` (a page can carry what it is sent off the machine) and
+MCP tools. The TUI asks inline: 1 yes,
+2 yes and allow the same command word, host (for `web_fetch`) or tool for
+this session, 3 or Esc no. Allowing `git` never allows `git status; rm -rf x`. `auto` runs
 everything. `read-only` runs only the tools that change nothing (`read`,
 `grep`, `find` and `ls`) and refuses the rest, `bash_poll` (which can
 stop a command) and allowed tools included. In print mode
 a question ends the process with exit code 3 and prints the
 `pytte approve` command that answers it.
+
+MCP servers (the Model Context Protocol) add tools, prompts and
+resources. They go in `mcpServers` of `~/.config/pytte/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "github": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"],
+               "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"}},
+    "linear": {"url": "https://mcp.linear.app/mcp"}
+  }
+}
+```
+
+A server with `command` runs as a child process speaking over stdin and
+stdout (`args`, `env`, `cwd`); one with `url` is remote, over Streamable
+HTTP (`headers`). `${VAR}` and `${VAR:-default}` take the environment's
+values. Also: `timeout` (seconds for a tool call, 600), `startup_timeout`
+(15), `disabled`, and `trust_hints`, which lets the server's `readOnlyHint`
+make a tool read-only (by default every MCP tool asks). The provider API
+keys pytte knows are removed from a stdio server's environment unless its
+`env` sets them.
+
+A project's servers, in `.mcp.json` or `mcpServers` of `.pytte/config.json`,
+start programs, so they run only once trusted: the TUI says which there
+are, and `/mcp trust` (or `pytte mcp trust`) runs them. Trust is kept in
+`~/.config/pytte/trust.json` with a hash of the project's server config;
+any change asks again. A trusted project server replaces a user server of
+the same name.
+
+Servers start with the session, in the background. A new session's first
+request waits for them to list their tools (up to `startup_timeout`), so
+a prompt sent at once shows as sent and goes a moment later. Their tools
+are `mcp__<server>__<tool>`. A server that dies starts again at the next
+call of its tools. Prompts are slash commands, `/<server>:<prompt> [args]`
+(arguments in order, the last taking the rest, or `name=value`), and send
+the prompt's text as the message; `@<server>:<uri>` anywhere in a message
+adds that resource's contents (typing `@` lists them). Remote servers that
+ask for a login get one with OAuth (discovery, dynamic client registration
+or `client_id`/`client_secret`/`scope` in the config, PKCE, and a
+browser that answers to 127.0.0.1): `/mcp login <name>` or `pytte mcp
+login <name>`. Tokens are kept in `~/.config/pytte/mcp-auth.json` (0600)
+and refreshed when they expire. `/mcp` shows each server's state; `/mcp
+restart`, `/mcp logout` and `/mcp untrust` do what they say, and
+`--no-mcp` starts none.
 
 Long sessions: before a request that would not fit the context window
 (less 24k tokens, or a quarter of a small window), or after the provider

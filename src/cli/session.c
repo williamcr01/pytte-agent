@@ -268,6 +268,13 @@ static void r_body(void *ud, const char *p, size_t n)
         r->sink.body(r->sink.ud, p, n);
 }
 
+static void r_header(void *ud, pt_str name, pt_str value)
+{
+    route *r = (route *)ud;
+    if (r->sink.header)
+        r->sink.header(r->sink.ud, name, value);
+}
+
 static void r_done(void *ud, const char *error)
 {
     route *r = (route *)ud;
@@ -295,6 +302,7 @@ static void *r_start(pt_http_driver *vd, const pt_http_req *req, const pt_http_s
     mine.head = r_head;
     mine.body = r_body;
     mine.done = r_done;
+    mine.header = r_header;
     r->h = r->d->start(r->d, req, &mine);
     if (!r->h) {
         free(r);
@@ -481,6 +489,8 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     if (!pt_rt_add_builtins(s->rt)) /* the store is the runtime's now */
         return fail(s, 1, err, cap, "out of memory");
     pt_rt_set_perm(s->rt, o->perm);
+    if (o->nmcp && !pt_rt_mcp_setup(s->rt, &o->mcp_host, o->mcp, o->nmcp))
+        return fail(s, 1, err, cap, "out of memory");
     {
         pt_rt_prompt pr;
         char conf[4096];
@@ -526,6 +536,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
         c.system = pt_buf_str(&sys);
         c.skills = pt_buf_str(&skills);
         c.tools = pt_rt_tool_defs(s->rt, &c.ntools);
+        c.provisional = o->nmcp > 0; /* settled once the servers listed their tools */
         ok = ok && pt_create(s->a, &c);
         pt_buf_free(&sys);
         pt_buf_free(&skills);

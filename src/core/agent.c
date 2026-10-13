@@ -380,6 +380,10 @@ static void build_create(pt_agent *a)
     pt_core_write_tool_defs(w, c->tools, c->ntools);
     pt_jw_key(w, "skills");
     pt_jw_raw(w, c->skills.n ? c->skills : PT_S("[]"));
+    if (c->provisional) {
+        pt_jw_key(w, "provisional");
+        pt_jw_bool(w, true);
+    }
     pt_core_entry_end(a);
     a->want_create = false;
     pt_core_commit_end(a);
@@ -919,6 +923,7 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
     a->create.prompt = pt_arena_dup(&a->reqs, c->prompt);
     a->prompt = pt_arena_dup(&a->perm, c->prompt);
     a->create.cwd = pt_arena_dup(&a->reqs, c->cwd);
+    a->create.provisional = c->provisional;
     a->create.host = pt_arena_dup(&a->reqs, c->host);
     a->create.system = pt_arena_dup(&a->reqs, c->system);
     a->create.ntools = 0;

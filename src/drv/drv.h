@@ -46,13 +46,30 @@ void pt_worker_free(pt_worker *w);
 
 /* ---- processes ----
  * A command in its own session and process group, with no terminal:
- * stdin is /dev/null, stdout and stderr go to one pipe. */
+ * stdin is /dev/null, stdout and stderr go to one pipe (unless opts say
+ * otherwise). */
 typedef struct pt_proc pt_proc;
+typedef struct pt_proc_opts {
+    /* stdin is a pipe we write (pt_proc_write). SIGPIPE is then ignored in
+     * this process, if it was not handled already: a write to a process
+     * that died fails with EPIPE instead. */
+    bool stdin_pipe;
+    bool split_err; /* stderr goes to its own pipe (pt_proc_err_fd, pt_proc_read_err) */
+} pt_proc_opts;
 /* argv[0] is run with argv; env: the environment, minus the variables
- * named in unset, plus the NAME=value strings in add (both NULL-ended). */
+ * named in unset, plus the NAME=value strings in add (both NULL-ended).
+ * opts may be NULL. */
 pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *const unset[],
-                       const char *const add[], char *err, size_t cap);
+                       const char *const add[], const pt_proc_opts *opts, char *err, size_t cap);
 int pt_proc_out_fd(const pt_proc *p);  /* readable when output (or EOF) waits */
+int pt_proc_err_fd(const pt_proc *p);  /* split_err: readable when stderr waits; else -1 */
+/* stdin_pipe: write without blocking. Returns bytes written (maybe fewer
+ * than n, maybe 0 when the pipe is full), or -1 when the reader is gone. */
+long pt_proc_write(pt_proc *p, const void *buf, size_t n);
+/* Close stdin (the process sees EOF). */
+void pt_proc_close_in(pt_proc *p);
+int pt_proc_in_fd(const pt_proc *p); /* writable when room waits; -1 when closed */
+long pt_proc_read_err(pt_proc *p, void *buf, size_t cap); /* like pt_proc_read */
 int pt_proc_exit_fd(const pt_proc *p); /* readable once the process ended; -1 where unsupported */
 /* Read output: > 0 bytes, 0 at the end, -1 nothing right now. */
 long pt_proc_read(pt_proc *p, void *buf, size_t cap);
@@ -77,6 +94,10 @@ typedef struct pt_http_sink {
     void (*head)(void *ud, int status, pt_str retry_after);
     void (*body)(void *ud, const char *p, size_t n);
     void (*done)(void *ud, const char *error);
+    /* Optional: each response header, before head. Headers of an interim
+     * (1xx) response may come first; keep the last value of a name. The
+     * strings live only during the call. */
+    void (*header)(void *ud, pt_str name, pt_str value);
 } pt_http_sink;
 
 typedef struct pt_http_driver pt_http_driver;

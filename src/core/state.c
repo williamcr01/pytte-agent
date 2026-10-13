@@ -595,6 +595,7 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
         e->summary = pt_arena_dup(ea, pt_json_gets(d, "summary", sa));
         e->request = pt_arena_dup(ea, pt_json_gets(d, "request", sa));
         e->files = files_text(pt_json_get(d, "files"), ea, sa);
+        e->provisional = pt_json_truthy(pt_json_get(d, "provisional"));
         if (!apply_tools(a, pt_json_get(d, "tools")))
             return false;
         break;
@@ -646,6 +647,46 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
     return true;
 }
 
+/* The settled materials of a provisional epoch: they replace its entry's
+ * system prompt, tools and skills, as if the entry had always held them. */
+static bool apply_materials(pt_agent *a, const pt_json *r)
+{
+    pt_arena *ea = &a->epoch, *sa = &a->scratch;
+    const pt_json *d = pt_json_get(r, "data");
+    entry *e = a->nentries ? &a->entries[0] : NULL;
+    pt_buf raw;
+    pt_jw w;
+    if (!pt_json_is(d, PT_J_OBJ) || (uint32_t)pt_json_geti(r, "epoch", 0) != a->cur_epoch || !e ||
+        e->kind != ENT_EPOCH)
+        return true; /* an older epoch's: already replaced */
+    if (!apply_tools(a, pt_json_get(d, "tools")))
+        return false;
+    pt_buf_init(&raw, a->al);
+    pt_jw_init(&w, &raw);
+    pt_jw_obj(&w);
+    pt_jw_key(&w, "t");
+    pt_jw_strz(&w, "entry");
+    pt_jw_key(&w, "id");
+    pt_jw_uint(&w, e->id);
+    pt_jw_key(&w, "kind");
+    pt_jw_strz(&w, "epoch");
+    pt_jw_key(&w, "epoch");
+    pt_jw_uint(&w, a->cur_epoch);
+    pt_jw_key(&w, "data");
+    pt_jw_raw(&w, d->raw);
+    pt_jw_obj_end(&w);
+    e->raw = pt_arena_dup(ea, pt_buf_str(&raw));
+    e->msg.text = pt_arena_dup(ea, pt_json_gets(d, "system", sa));
+    e->provisional = false;
+    if (raw.oom || ea->oom) {
+        pt_buf_free(&raw);
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
+        return false;
+    }
+    pt_buf_free(&raw);
+    return true;
+}
+
 static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
 {
     pt_arena *pa = &a->perm, *sa = &a->scratch;
@@ -685,6 +726,8 @@ static bool apply_record(pt_agent *a, const pt_json *r)
         apply_claim(a, r, id);
     } else if (pt_str_eqz(type, "doc")) {
         ok = apply_doc(a, r, id);
+    } else if (pt_str_eqz(type, "materials")) {
+        ok = apply_materials(a, r);
     }
     /* Other types are not needed here. */
     if (ok && id >= a->next_id) {

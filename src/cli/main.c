@@ -8,6 +8,7 @@
  *   pytte approve ID TASK yes|no   answer a tool call waiting for approval
  *   pytte ls                    list sessions with their status
  *   pytte update-catalog        fetch the model catalog (models.dev, OpenRouter)
+ *   pytte mcp [list|trust|untrust|login NAME|logout NAME]   MCP servers
  *
  * Kill the process at any point and `pytte -c` continues from its last
  * commit. */
@@ -44,6 +45,10 @@ static const char usage[] =
     "                                     and name (its first prompt)\n"
     "       pytte update-catalog          fetch the newest models from models.dev and\n"
     "                                     OpenRouter into ~/.cache/pytte/models.bin\n"
+    "       pytte mcp [list]              MCP servers (mcpServers in config.json; a\n"
+    "                                     project's in .mcp.json): their state, tools\n"
+    "       pytte mcp trust | untrust     run this directory's project servers, or not\n"
+    "       pytte mcp login | logout NAME log in to a remote server (in the browser)\n"
     "\n"
     "  -c, --continue          the newest session started in this directory\n"
     "  -r, --resume [ID]       that session, or pick from this directory's\n"
@@ -70,6 +75,7 @@ static const char usage[] =
     "  --no-stdin              with -p: leave stdin unread (as ssh -n does), for\n"
     "                          loops and callers that keep it open\n"
     "  --no-sync               do not fsync commits (survives crashes, not power loss)\n"
+    "  --no-mcp                start no MCP servers\n"
     "  --force                 take over a session another host left open\n"
     "\n"
     "Exit codes: 0 done, 1 usage or setup, 3 waiting for approval (-p), 10 the run\n"
@@ -80,11 +86,14 @@ enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 
 typedef struct opts {
     cli_opts c;
-    const char *cmd_log, *cmd_approve, *cmd_ls, *cmd_update, *id, *prompt, *task, *answer;
+    const char *cmd_log, *cmd_approve, *cmd_ls, *cmd_update, *cmd_mcp, *id, *prompt, *task, *answer;
+    const char *mcp_args[2];
     bool print, cont, resume, json, all_epochs, model_flag, compact_flag, effort_flag, perm_flag;
-    bool no_stdin;
+    bool no_stdin, no_mcp;
     int out;
 } opts;
+
+static void load_mcp(opts *o, bool quiet);
 
 static void die(const char *msg, const char *arg)
 {
@@ -135,6 +144,8 @@ static void parse_args(int argc, char **argv, opts *o)
             o->all_epochs = true;
         } else if (strcmp(a, "--no-stdin") == 0) {
             o->no_stdin = true;
+        } else if (strcmp(a, "--no-mcp") == 0) {
+            o->no_mcp = true;
         } else if (strcmp(a, "--no-sync") == 0) {
             o->c.no_sync = true;
         } else if (strcmp(a, "--force") == 0) {
@@ -188,6 +199,12 @@ static void parse_args(int argc, char **argv, opts *o)
             o->cmd_ls = a;
         } else if (i == 1 && strcmp(a, "update-catalog") == 0) {
             o->cmd_update = a;
+        } else if (i == 1 && strcmp(a, "mcp") == 0) {
+            o->cmd_mcp = a;
+        } else if (o->cmd_mcp) {
+            if (o->mcp_args[1])
+                die("too many arguments", a);
+            o->mcp_args[o->mcp_args[0] ? 1 : 0] = a;
         } else if (i == 1 && strcmp(a, "approve") == 0) {
             o->cmd_approve = a;
         } else if ((o->cmd_log || o->cmd_approve) && !o->id) {
@@ -585,6 +602,7 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
     apply_config(o, cfg, id == NULL);
     effort_note(o->c.model, o->c.reasoning);
     o->c.stop = should_stop;
+    load_mcp(o, false);
     if ((rc = cli_session_open(&s, &o->c, id, on_event, &u, err, sizeof err)) != 0) {
         fprintf(stderr, "pytte: %s\n", err);
         return rc;
@@ -1032,6 +1050,7 @@ static bool fetch_url(pt_http_driver *d, const char *url, fetch *f)
     sink.head = fetch_head;
     sink.body = fetch_body;
     sink.done = fetch_done;
+    sink.header = NULL;
     if (!d->start(d, &req, &sink)) {
         snprintf(f->err, sizeof f->err, "cannot start the request");
         return false;
@@ -1179,6 +1198,226 @@ static int cmd_ls(void)
     return 0;
 }
 
+/* ---- MCP servers ---- */
+
+static cli_mcp mcp;
+
+/* Print mode: what the servers say goes to stderr, but "ready". */
+static void mcp_note(void *ud, const char *server, const char *msg)
+{
+    (void)ud;
+    if (strncmp(msg, "ready:", 6) != 0)
+        fprintf(stderr, "pytte: mcp %s: %s\n", server ? server : "", msg);
+}
+
+/* This directory's servers into o (unless --no-mcp), warning about those
+ * waiting for trust. */
+static void load_mcp(opts *o, bool quiet)
+{
+    char cwd[4096];
+    if (o->no_mcp)
+        return;
+    cli_mcp_load(&mcp, getcwd(cwd, sizeof cwd) ? cwd : ".");
+    if (mcp.warn[0])
+        fprintf(stderr, "pytte: %s\n", mcp.warn);
+    if (mcp.nuntrusted && !quiet)
+        fprintf(stderr, "pytte: this project's MCP servers are not trusted, so they do not run; "
+                        "`pytte mcp trust` runs them\n");
+    o->c.mcp = mcp.run;
+    o->c.nmcp = mcp.n;
+    cli_mcp_host(&o->c.mcp_host, mcp_note, NULL);
+}
+
+static int64_t bare_now(void *ud)
+{
+    (void)ud;
+    return pt_sys_now_ms();
+}
+
+typedef struct bare {
+    pt_agent *a;
+    pt_rt *rt;
+    pt_store *st;
+    pt_http_driver *http;
+    bool login_ended;
+} bare;
+
+static void bare_note(void *ud, const char *server, const char *msg)
+{
+    bare *b = (bare *)ud;
+    if (!strncmp(msg, "logged in", 9) || !strncmp(msg, "login failed", 12))
+        b->login_ended = true;
+    fprintf(stderr, "%s: %s\n", server ? server : "mcp", msg);
+}
+
+/* A runtime without a session, for servers only. */
+static bool bare_open(bare *b, const pt_rt_mcp_server *srv, uint32_t n)
+{
+    pt_opts ao;
+    pt_rt_cfg rc;
+    pt_rt_mcp_host h;
+    memset(b, 0, sizeof *b);
+    memset(&ao, 0, sizeof ao);
+    ao.alloc = pt_sys_allocator();
+    ao.now_ms = bare_now;
+    ao.random = pt_sys_random;
+    ao.catalog = cli_catalog();
+    memset(&rc, 0, sizeof rc);
+    rc.store = b->st = pt_store_memory_new();
+    rc.http = b->http = pt_http_curl_new();
+    rc.catalog = cli_catalog();
+    if (!b->st || !b->http || !(b->a = pt_new(&ao)) || !(b->rt = pt_rt_new(&rc, b->a)))
+        return false;
+    cli_mcp_host(&h, bare_note, b);
+    return pt_rt_mcp_setup(b->rt, &h, srv, n);
+}
+
+static void bare_close(bare *b)
+{
+    if (b->rt)
+        pt_rt_free(b->rt);
+    if (b->a)
+        pt_free(b->a);
+    if (b->http)
+        b->http->free(b->http);
+    if (b->st)
+        pt_store_memory_free(b->st);
+}
+
+/* Step until no server starts, or ms pass. */
+static void bare_settle(bare *b, int64_t ms)
+{
+    int64_t end = pt_sys_now_ms() + ms;
+    pt_rt_mcp_info in[CLI_MCP_MAX];
+    while (pt_sys_now_ms() < end) {
+        uint32_t i, n;
+        bool starting = false;
+        pt_rt_step(b->rt, 100, NULL, 0);
+        n = pt_rt_mcp_servers(b->rt, in, CLI_MCP_MAX);
+        for (i = 0; i < n && i < CLI_MCP_MAX; i++)
+            starting = starting || in[i].state == PT_MCP_STARTING;
+        if (!starting)
+            return;
+    }
+}
+
+static const char *state_name(pt_mcp_state st)
+{
+    switch (st) {
+    case PT_MCP_STARTING:
+        return "starting";
+    case PT_MCP_READY:
+        return "ready";
+    case PT_MCP_FAILED:
+        return "failed";
+    case PT_MCP_AUTH:
+        return "needs login";
+    default:
+        return "stopped";
+    }
+}
+
+static const pt_rt_mcp_server *find_mcp(const char *name)
+{
+    uint32_t i;
+    for (i = 0; i < mcp.n; i++)
+        if (!strcmp(mcp.run[i].name, name))
+            return &mcp.run[i];
+    return NULL;
+}
+
+static int cmd_mcp(opts *o)
+{
+    const char *sub = o->mcp_args[0] ? o->mcp_args[0] : "list", *name = o->mcp_args[1];
+    char err[700];
+    bare b;
+    int rc = 0;
+    o->no_mcp = false;
+    load_mcp(o, true);
+    if (!strcmp(sub, "trust") || !strcmp(sub, "untrust")) {
+        if (name)
+            die("takes no name: it is about this directory's servers", name);
+        if (!cli_mcp_trust(&mcp, sub[0] == 't', err, sizeof err))
+            die(err, NULL);
+        printf("%s this directory's MCP servers (%s)\n", sub[0] == 't' ? "trusted" : "no longer trusting",
+               mcp.project);
+        return 0;
+    }
+    if (!strcmp(sub, "list")) {
+        pt_rt_mcp_info in[CLI_MCP_MAX];
+        uint32_t i, k = 0;
+        if (name)
+            die("list takes no name", name);
+        if (!mcp.nall) {
+            printf("no MCP servers: add them to mcpServers in %s, or to .mcp.json in a project\n",
+                   pt_strz(getenv("HOME")).n ? "~/.config/pytte/config.json" : "config.json");
+            return 0;
+        }
+        if (mcp.n) {
+            if (!bare_open(&b, mcp.run, mcp.n))
+                die("out of memory", NULL);
+            bare_settle(&b, 30000);
+            pt_rt_mcp_servers(b.rt, in, CLI_MCP_MAX);
+        }
+        for (i = 0; i < mcp.nall; i++) {
+            const pt_rt_mcp_server *s = &mcp.all[i];
+            printf("%-20s %-5s %-18s %s\n", s->name, s->url ? "http" : "stdio", mcp.info[i].source,
+                   s->url ? s->url : s->command);
+            if (!mcp.info[i].runs) {
+                printf("%20s not trusted: `pytte mcp trust` runs this project's servers\n", "");
+                continue;
+            }
+            printf("%20s %s", "", state_name(in[k].state));
+            if (in[k].state == PT_MCP_READY)
+                printf(": %u tools, %u prompts, %u resources", in[k].ntools, in[k].nprompts, in[k].nresources);
+            else if (in[k].error && in[k].error[0])
+                printf(": %s", in[k].error);
+            printf("\n");
+            k++;
+        }
+        if (mcp.n)
+            bare_close(&b);
+        return 0;
+    }
+    if (strcmp(sub, "login") && strcmp(sub, "logout"))
+        die("usage: pytte mcp [list|trust|untrust|login NAME|logout NAME]", NULL);
+    if (!name)
+        die("which server?", NULL);
+    if (!find_mcp(name))
+        die("no such MCP server (or not trusted)", name);
+    if (!find_mcp(name)->url)
+        die("not a remote server: only those log in", name);
+    if (!bare_open(&b, find_mcp(name), 1))
+        die("out of memory", NULL);
+    if (!strcmp(sub, "logout")) {
+        pt_rt_mcp_logout(b.rt, pt_strz(name));
+        printf("logged out of %s\n", name);
+    } else {
+        pt_rt_mcp_info in;
+        int64_t end;
+        bare_settle(&b, 30000);
+        pt_rt_mcp_servers(b.rt, &in, 1);
+        if (in.state == PT_MCP_READY) {
+            printf("%s works already: %u tools\n", name, in.ntools);
+        } else {
+            pt_rt_mcp_login(b.rt, pt_strz(name));
+            end = pt_sys_now_ms() + 6 * 60 * 1000;
+            while (!b.login_ended && pt_sys_now_ms() < end)
+                pt_rt_step(b.rt, 100, NULL, 0);
+            bare_settle(&b, 30000);
+            pt_rt_mcp_servers(b.rt, &in, 1);
+            if (in.state == PT_MCP_READY)
+                printf("%s: logged in, %u tools\n", name, in.ntools);
+            else {
+                fprintf(stderr, "pytte: %s: %s\n", name, in.error && in.error[0] ? in.error : "the login failed");
+                rc = 1;
+            }
+        }
+    }
+    bare_close(&b);
+    return rc;
+}
+
 /* -r without an ID, in a terminal: pick from this directory's sessions. */
 static bool pick_session(char *out, size_t cap)
 {
@@ -1230,6 +1469,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "pytte: %s\n", warn);
     if (o.cmd_update)
         return cmd_update_catalog();
+    if (o.cmd_mcp)
+        return cmd_mcp(&o);
     tty = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
     if (o.c.worktree && (o.cont || o.resume))
         die("-w starts a new session: not with -c or -r", NULL);
@@ -1257,5 +1498,6 @@ int main(int argc, char **argv)
         die("TERM=dumb is not supported yet; use -p", NULL);
     o.c.continue_current = o.cont;
     apply_config(&o, &cfg, o.id == NULL && !o.cont);
-    return tui_run(&o.c, &cfg, o.id, o.prompt);
+    load_mcp(&o, true); /* the TUI says it, and asks */
+    return tui_run(&o.c, &cfg, o.no_mcp ? NULL : &mcp, o.id, o.prompt);
 }

@@ -37,6 +37,7 @@ pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a)
         rt->c.sleep = sys_sleep;
     rt->a = a;
     pt_buf_init(&rt->scratch, pt_sys_allocator());
+    pt_buf_init(&rt->mat_cur, pt_sys_allocator());
     pt_arena_init(&rt->ar, pt_sys_allocator(), 4096);
     pt_arena_init(&rt->prompt_ar, pt_sys_allocator(), 0);
     pt_arena_init(&rt->skills_ar, pt_sys_allocator(), 0);
@@ -167,8 +168,12 @@ void pt_rt_free(pt_rt *rt)
         return;
     }
     rt->free_waiting = false;
+    if (rt->mcp_free)
+        rt->mcp_free(rt->mcp);
+    rt->mcp_free = NULL;
     pt_rt_tools_free(rt);
     pt_rt_prompt_free(rt);
+    pt_buf_free(&rt->mat_cur);
     free(rt->reqs);
     free(rt->sleeps);
     free(rt->timers);
@@ -426,6 +431,7 @@ static void start_http(pt_rt *rt, const pt_fx *fx)
     sink.head = sink_head;
     sink.body = sink_body;
     sink.done = sink_done;
+    sink.header = NULL;
     r->h = rt->c.http->start(rt->c.http, fx->http, &sink);
     if (!r->h) {
         free(r);
@@ -433,6 +439,117 @@ static void start_http(pt_rt *rt, const pt_fx *fx)
         return;
     }
     rt->reqs[rt->nreqs++] = r;
+}
+
+/* ---- HTTP for tools ---- */
+
+typedef struct rt_hreq {
+    pt_rt *rt;
+    void *h;
+    pt_http_sink sink;
+} rt_hreq;
+
+static void h_head(void *ud, int status, pt_str retry_after)
+{
+    rt_hreq *r = (rt_hreq *)ud;
+    if (r->sink.head)
+        r->sink.head(r->sink.ud, status, retry_after);
+}
+
+static void h_body(void *ud, const char *p, size_t n)
+{
+    rt_hreq *r = (rt_hreq *)ud;
+    if (r->sink.body)
+        r->sink.body(r->sink.ud, p, n);
+}
+
+static void h_header(void *ud, pt_str name, pt_str value)
+{
+    rt_hreq *r = (rt_hreq *)ud;
+    if (r->sink.header)
+        r->sink.header(r->sink.ud, name, value);
+}
+
+static void h_done(void *ud, const char *error)
+{
+    rt_hreq *r = (rt_hreq *)ud;
+    r->rt->nhttp--;
+    if (r->sink.done)
+        r->sink.done(r->sink.ud, error);
+    free(r);
+}
+
+void *pt_rt_http_start(pt_rt *rt, const pt_http_req *hr, const pt_http_sink *sink)
+{
+    rt_hreq *r = (rt_hreq *)calloc(1, sizeof *r);
+    pt_http_sink mine;
+    if (!r)
+        return NULL;
+    r->rt = rt;
+    r->sink = *sink;
+    mine.ud = r;
+    mine.head = h_head;
+    mine.body = h_body;
+    mine.done = h_done;
+    mine.header = h_header;
+    if (!(r->h = rt->c.http->start(rt->c.http, hr, &mine))) {
+        free(r);
+        return NULL;
+    }
+    rt->nhttp++;
+    return r;
+}
+
+void pt_rt_http_cancel(pt_rt *rt, void *h)
+{
+    rt_hreq *r = (rt_hreq *)h;
+    if (!r)
+        return;
+    rt->c.http->cancel(rt->c.http, r->h);
+    rt->nhttp--;
+    free(r);
+}
+
+/* ---- epoch materials ---- */
+
+static void answer_materials(pt_rt *rt, uint32_t id, pt_str current)
+{
+    /* The tools as registered now; the system prompt and skills built
+     * again from their files, or kept when nothing builds them. */
+    pt_materials m;
+    pt_buf sys, skills;
+    bool built;
+    pt_buf_init(&sys, pt_sys_allocator());
+    pt_buf_init(&skills, pt_sys_allocator());
+    built = rt->have_prompt &&
+            pt_rt_build_prompt(rt, pt_session_cwd(rt->a), pt_session_prompt(rt->a), &sys, &skills);
+    memset(&m, 0, sizeof m);
+    m.system = built ? pt_buf_str(&sys) : current;
+    m.skills = built ? pt_buf_str(&skills) : PT_STR_NULL;
+    m.tools = pt_rt_tool_defs(rt, &m.ntools);
+    pt_fx_materials(rt->a, id, rt->have_prompt && !built ? NULL : &m);
+    pt_buf_free(&sys);
+    pt_buf_free(&skills);
+}
+
+void pt_rt_materials_hold(pt_rt *rt, bool on)
+{
+    if (on) {
+        rt->mat_holds++;
+        return;
+    }
+    if (rt->mat_holds && !--rt->mat_holds && rt->mat_fx) {
+        uint32_t id = rt->mat_fx;
+        rt->mat_fx = 0;
+        /* the tools as they are now; the prompt rebuilt, or kept */
+        answer_materials(rt, id, rt->mat_cur.oom ? PT_STR_NULL : pt_buf_str(&rt->mat_cur));
+        pt_buf_reset(&rt->mat_cur);
+    }
+}
+
+bool pt_rt_materials_waiting(const pt_rt *rt)
+{
+    return rt->mat_fx != 0;
 }
 
 static void handle(pt_rt *rt, const pt_fx *fx)
@@ -462,25 +579,15 @@ static void handle(pt_rt *rt, const pt_fx *fx)
     case PT_FX_BLOB:
         start_io(rt, fx);
         break;
-    case PT_FX_EPOCH_MATERIALS: {
-        /* The tools as registered now; the system prompt and skills built
-         * again from their files, or kept when nothing builds them. */
-        pt_materials m;
-        pt_buf sys, skills;
-        bool built;
-        pt_buf_init(&sys, pt_sys_allocator());
-        pt_buf_init(&skills, pt_sys_allocator());
-        built = rt->have_prompt &&
-                pt_rt_build_prompt(rt, pt_session_cwd(rt->a), pt_session_prompt(rt->a), &sys, &skills);
-        memset(&m, 0, sizeof m);
-        m.system = built ? pt_buf_str(&sys) : fx->bytes;
-        m.skills = built ? pt_buf_str(&skills) : PT_STR_NULL;
-        m.tools = pt_rt_tool_defs(rt, &m.ntools);
-        pt_fx_materials(rt->a, fx->id, rt->have_prompt && !built ? NULL : &m);
-        pt_buf_free(&sys);
-        pt_buf_free(&skills);
+    case PT_FX_EPOCH_MATERIALS:
+        if (rt->mat_holds) {
+            rt->mat_fx = fx->id; /* answered by the last release */
+            pt_buf_reset(&rt->mat_cur);
+            pt_buf_puts(&rt->mat_cur, fx->bytes);
+        }
+        else
+            answer_materials(rt, fx->id, fx->bytes);
         break;
-    }
     case PT_FX_GATE:
         pt_rt_gate(rt, fx);
         break;
@@ -619,7 +726,7 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
         wait = until - now;
     if (wait > INT32_MAX)
         wait = INT32_MAX;
-    if (rt->nreqs || total) {
+    if (rt->nreqs || rt->nhttp || total) {
         if (rt->c.http->pump(rt->c.http, (int)wait, all, total) < 0) {
             http_failed(rt);
             /* still wait on the host's fds (a terminal, a signal pipe),
@@ -646,13 +753,29 @@ static pt_rt_result status(pt_rt *rt)
         return PT_RT_FATAL;
     if (pt_idle(rt->a))
         return !rt->closing && rt->builtin_idle && rt->builtin_idle(rt->builtin) ? PT_RT_BUSY : PT_RT_IDLE;
-    if (!rt->nreqs && !rt->nsleeps && !rt->io_pending && !rt->ncalls && !rt->ntimers && !rt->nwatches)
-        return pt_asks(rt->a, NULL, 0) ? PT_RT_ASK : PT_RT_STUCK;
+    /* Watches, timers and requests outside a tool call (MCP servers, a
+     * login) live on; only what the agent waits for keeps it from asking. */
+    if (!rt->nreqs && !rt->nsleeps && !rt->io_pending && !rt->ncalls && !rt->mat_fx) {
+        if (pt_asks(rt->a, NULL, 0))
+            return PT_RT_ASK;
+        if (!rt->ntimers && !rt->nwatches && !rt->nhttp)
+            return PT_RT_STUCK;
+    }
     return PT_RT_BUSY;
+}
+
+/* MCP servers start on the host thread, once its loop runs. */
+static void start_mcp(pt_rt *rt)
+{
+    if (!rt->mcp_started && rt->mcp_start) {
+        rt->mcp_started = true;
+        rt->mcp_start(rt->mcp);
+    }
 }
 
 pt_rt_result pt_rt_step(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
 {
+    start_mcp(rt);
     /* Work handed out (a commit, a request) changed what the host shows:
      * look once without waiting, so the host paints it now, not after
      * the timeout. */
@@ -665,6 +788,7 @@ pt_rt_result pt_rt_step(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds
 
 pt_rt_result pt_rt_run(pt_rt *rt)
 {
+    start_mcp(rt);
     for (;;) {
         pt_rt_result r;
         drain(rt);

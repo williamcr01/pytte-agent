@@ -291,15 +291,21 @@ static size_t on_header(char *p, size_t size, size_t n, void *ud)
     xfer *x = (xfer *)ud;
     pt_str line = {p, size * n};
     static const pt_str name = {"retry-after:", 12};
+    long colon;
     if (pt_str_starts(line, PT_S("HTTP/"))) {
         x->retry_after[0] = 0; /* a new response (after a 100 Continue) */
-    } else if (line.n > name.n && pt_str_ieq((pt_str){line.p, name.n}, name)) {
+        return size * n;
+    }
+    if (line.n > name.n && pt_str_ieq((pt_str){line.p, name.n}, name)) {
         pt_str v = pt_str_trim((pt_str){line.p + name.n, line.n - name.n});
         if (v.n < sizeof x->retry_after) {
             memcpy(x->retry_after, v.p, v.n);
             x->retry_after[v.n] = 0;
         }
     }
+    if (x->sink.header && (colon = pt_str_find(line, ':')) > 0)
+        x->sink.header(x->sink.ud, pt_str_trim((pt_str){line.p, (size_t)colon}),
+                       pt_str_trim((pt_str){line.p + colon + 1, line.n - (size_t)colon - 1}));
     return size * n;
 }
 
@@ -393,6 +399,8 @@ static void *start(pt_http_driver *vd, const pt_http_req *req, const pt_http_sin
     SET(CURLOPT_LOW_SPEED_LIMIT, 1L);
     SET(CURLOPT_LOW_SPEED_TIME, 300L);
     SET(CURLOPT_USERAGENT, "pytte/0");
+    if (req->flags & PT_HTTP_DECOMPRESS)
+        SET(CURLOPT_ACCEPT_ENCODING, ""); /* every encoding this libcurl decodes */
 #undef SET
     if (curl_multi_add_handle(d->m, x->e) != CURLM_OK)
         goto fail;

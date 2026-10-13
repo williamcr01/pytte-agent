@@ -45,6 +45,7 @@ typedef struct builtins {
     pt_buf doc;
     pt_buf spans; /* an edit's spans, reused */
     search *search; /* grep, find and ls */
+    web *web;       /* web_fetch */
     pt_arena ar; /* arguments of one call */
     const char **unset; /* API key variables, NULL-ended: never passed to tools */
 } builtins;
@@ -235,7 +236,7 @@ fail:
 /* ---- read ---- */
 
 /* The image types every provider takes, by their first bytes. */
-static const char *image_type(const unsigned char *p, size_t n)
+const char *pt_rt_image_type(const unsigned char *p, size_t n)
 {
     if (n >= 8 && memcmp(p, "\x89PNG\r\n\x1a\n", 8) == 0)
         return "image/png";
@@ -264,7 +265,7 @@ static uint32_t le24(const unsigned char *p)
 }
 
 /* Width and height from the header; false when they cannot be found. */
-static bool image_size(const unsigned char *p, size_t n, const char *mime, uint32_t *w, uint32_t *h)
+bool pt_rt_image_size(const unsigned char *p, size_t n, const char *mime, uint32_t *w, uint32_t *h)
 {
     size_t i;
     if (strcmp(mime, "image/png") == 0) {
@@ -371,7 +372,7 @@ static void read_image(builtins *b, pt_rt *rt, const pt_fx *fx, int fd, const st
         }
     }
     close(fd);
-    huge = image_size((const unsigned char *)img->p, img->n, mime, &w, &h) &&
+    huge = pt_rt_image_size((const unsigned char *)img->p, img->n, mime, &w, &h) &&
            (w > IMAGE_SIDE_MAX || h > IMAGE_SIDE_MAX);
     kept = !huge && pt_rt_put_blob(rt, img->p, img->n, ref);
     if (huge)
@@ -467,7 +468,7 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
         }
         if (got == 0)
             break;
-        if (first && (mime = image_type((const unsigned char *)b->io, (size_t)got)) != NULL) {
+        if (first && (mime = pt_rt_image_type((const unsigned char *)b->io, (size_t)got)) != NULL) {
             if (lseek(fd, 0, SEEK_SET) != 0) {
                 close(fd);
                 fail(rt, fx->id, "cannot read", path);
@@ -1123,7 +1124,7 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     add[1] = attempt;
     add[2] = "PYTTE_TOOL=bash";
     add[3] = NULL;
-    j->p = pt_proc_spawn(argv, cwd.n ? pt_arena_cstr(&b->ar, cwd) : NULL, b->unset, add, err, sizeof err);
+    j->p = pt_proc_spawn(argv, cwd.n ? pt_arena_cstr(&b->ar, cwd) : NULL, b->unset, add, NULL, err, sizeof err);
     if (!j->p) {
         free(j->command);
         free(j);
@@ -1355,6 +1356,7 @@ static void builtins_free(void *ud)
     pt_buf_free(&b->spans);
     pt_arena_free(&b->ar);
     pt_rt_search_free(b->search);
+    pt_rt_web_free(b->web);
     free(b);
 }
 
@@ -1362,14 +1364,15 @@ bool pt_rt_add_builtins(pt_rt *rt)
 {
     builtins *b = (builtins *)calloc(1, sizeof *b);
     const pt_ai_catalog *cat = rt->c.catalog ? rt->c.catalog : pt_ai_builtin_catalog();
-    pt_rt_tool t[8];
+    pt_rt_tool t[9];
     uint32_t i, k, n = 0;
     if (!b || !(b->io = (char *)malloc(CHUNK)) ||
         !(b->unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *b->unset)) ||
-        !(b->search = pt_rt_search_new(rt))) {
+        !(b->search = pt_rt_search_new(rt)) || !(b->web = pt_rt_web_new(rt))) {
         if (b) {
             free(b->io);
             free(b->unset);
+            pt_rt_search_free(b->search);
         }
         free(b);
         return false;
@@ -1436,7 +1439,8 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[4].run = t_bash_poll;
     t[4].cancel = bash_cancel;
     pt_rt_search_tools(b->search, t + 5);
-    for (i = 0; i < 8; i++)
+    pt_rt_web_tool(b->web, t + 8);
+    for (i = 0; i < 9; i++)
         if (!pt_rt_tool_add(rt, &t[i]))
             return false;
     return true;

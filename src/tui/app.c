@@ -62,6 +62,7 @@ static const struct {
     {"usage", "", "tokens used in this session, per model"},
     {"thinking", " [mode]", "how thinking is shown: collapsed, full, hidden"},
     {"login", " [provider] [key]", "save an API key to auth.json"},
+    {"mcp", " [login|logout|restart name] [trust|untrust]", "MCP servers: their state, logins, trust"},
     {"settings", "", "user settings (saved)"},
     {"help", "", "commands and keys"},
     {"quit", "", "exit; it prints how to continue"},
@@ -115,10 +116,28 @@ typedef struct run_call {
     pt_buf id, head, out;
 } run_call;
 
+/* An input that names an MCP prompt (/server:prompt) or resources
+ * (@server:uri) waits for them, then goes as the text they make. */
+#define XPARTS 9 /* the prompt, and up to 8 resources */
+
 typedef struct queued_input {
     pt_buf text;
     bool command, submitted;
+    uint64_t xid;       /* its fetches; 0: not started */
+    uint32_t want, got; /* parts asked for, and answered */
+    bool failed, prompt; /* prompt: parts[0] is the prompt's text */
+    char err[300];
+    pt_buf parts[XPARTS];
+    pt_buf names; /* "server\turi\n" of each resource part */
 } queued_input;
+
+/* A fetch on its way: its answer goes to the queued input of id. */
+typedef struct xreq {
+    struct xreq *next;
+    struct app *a;
+    uint64_t id;
+    uint32_t k;
+} xreq;
 
 typedef struct session_list {
     pt_worker *worker;
@@ -141,6 +160,12 @@ typedef struct config_job {
 typedef struct app {
     cli_opts o;
     cli_config *cfg;
+    cli_mcp *mcp;      /* the configured servers; NULL: --no-mcp */
+    pt_buf mcp_notes;  /* what servers said, shown at the next pass */
+    xreq *xs;          /* fetches on their way */
+    uint64_t next_xid;
+    bool expanded;     /* a fetch ended: the queue may go on */
+    bool mention_menu; /* the menu lists @-mentions */
     cli_session s;
     bool open; /* s holds a session */
     bool named; /* it has a name, or no longer needs one (see cli_session_name) */
@@ -234,6 +259,8 @@ typedef struct app {
 } app;
 
 static void group_close(app *a);
+static void xreq_drop(app *a, xreq *x);
+static bool mcp_known(app *a, pt_str name);
 
 static void set_dirty(app *a)
 {
@@ -842,6 +869,37 @@ static pt_str error_message(app *a, pt_str raw)
 
 /* A user entry pytte wrote (a note that background commands ended). The
  * key cannot come from the text: quotes in a JSON string are escaped. */
+/* Where the resources an @-mention added start: blocks to the end of the
+ * text, each "\n\n<resource server=\"s\" uri=\"u\">\n...\n</resource>";
+ * text.n when there are none. */
+static size_t resources_at(pt_str text)
+{
+    static const char head[] = "\n\n<resource server=\"", tail[] = "\n</resource>";
+    size_t at;
+    for (at = 0; at + sizeof head - 1 <= text.n; at++) {
+        size_t k = at;
+        if (memcmp(text.p + at, head, sizeof head - 1) != 0)
+            continue;
+        for (;;) { /* blocks, one after another, to the end */
+            size_t e;
+            if (k == text.n)
+                return at;
+            if (k + sizeof head - 1 > text.n || memcmp(text.p + k, head, sizeof head - 1) != 0)
+                break;
+            for (e = k + sizeof head - 1; e + sizeof tail - 1 <= text.n; e++)
+                if (!memcmp(text.p + e, tail, sizeof tail - 1) &&
+                    (e + sizeof tail - 1 == text.n ||
+                     (e + sizeof tail - 1 + sizeof head - 1 <= text.n &&
+                      !memcmp(text.p + e + sizeof tail - 1, head, sizeof head - 1))))
+                    break;
+            if (e + sizeof tail - 1 > text.n)
+                break;
+            k = e + sizeof tail - 1;
+        }
+    }
+    return text.n;
+}
+
 static bool is_note(const pt_entry_view *v)
 {
     static const char key[] = "\"from\":\"pytte\"";
@@ -886,12 +944,30 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
         char line[120], mark[16];
         out_blank(out);
         snprintf(mark, sizeof mark, "%s ", a->sy->prompt);
+        size_t res;
         while (pt_rt_skill_block(&text, &name)) { /* a skill's instructions: just its name */
             snprintf(line, sizeof line, "skill %.*s", (int)(name.n > 64 ? 64 : name.n), name.p);
             out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
         }
-        if (text.n)
-            out_text(a, out, TUI_BOLD, mark, ACCENT | TUI_BOLD, text, MARGIN);
+        res = resources_at(text);
+        if (res)
+            out_text(a, out, TUI_BOLD, mark, ACCENT | TUI_BOLD, (pt_str){text.p, res}, MARGIN);
+        while (res < text.n) { /* an @-mention's contents: just which */
+            const char *p = text.p + res + 20, *end = text.p + text.n, *q, *u, *close;
+            for (q = p; q < end && *q != '"'; q++)
+                ;
+            u = q + 7 < end ? q + 7 : end; /* after ` uri="` */
+            for (close = u; close < end && *close != '"'; close++)
+                ;
+            snprintf(line, sizeof line, "resource %.*s:%.*s", (int)(q - p > 40 ? 40 : q - p), p,
+                     (int)(close - u > 70 ? 70 : close - u), u);
+            out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
+            {
+                pt_str rest = {text.p + res + 2, text.n - res - 2};
+                size_t nx = resources_at(rest);
+                res = nx == rest.n ? text.n : res + 2 + nx;
+            }
+        }
     } else if (strcmp(v->kind, "assistant") == 0) {
         bool any = false;
         out_blank(out);
@@ -1277,6 +1353,80 @@ static void add_skills(app *a, const char *lead, pt_str q, bool rescan)
     a->skills_menu = true;
 }
 
+/* MCP prompts whose command ("server:name") starts with q. */
+static void add_prompts(app *a, pt_str q)
+{
+    uint32_t i, k, n = 0;
+    const pt_rt_mcp_prompt *p = a->open ? pt_rt_mcp_prompts(a->s.rt, &n) : NULL;
+    char label[160];
+    for (i = 0; i < n; i++) {
+        int ln = snprintf(label, sizeof label, "%.*s:%.*s", (int)p[i].server.n, p[i].server.p, (int)p[i].name.n,
+                          p[i].name.p);
+        if (ln <= 0 || (size_t)ln >= sizeof label || !pt_str_starts(pt_strz(label), q))
+            continue;
+        pt_buf_reset(&a->tmp);
+        pt_buf_puts(&a->tmp, p[i].description.n ? p[i].description : PT_S("MCP prompt"));
+        for (k = 0; k < p[i].nargs; k++) {
+            pt_buf_putz(&a->tmp, k ? ", " : " · ");
+            pt_buf_puts(&a->tmp, p[i].args[k].name);
+            if (!p[i].args[k].required)
+                pt_buf_putc(&a->tmp, '?');
+        }
+        pt_buf_putc(&a->tmp, 0);
+        add_item(a, label, (size_t)ln, a->tmp.p);
+    }
+}
+
+/* The prompt a command names ("/server:name ..." or "server:name"). */
+static const pt_rt_mcp_prompt *find_prompt(app *a, pt_str cmd)
+{
+    uint32_t i, n = 0;
+    const pt_rt_mcp_prompt *p = a->open ? pt_rt_mcp_prompts(a->s.rt, &n) : NULL;
+    long colon;
+    if (cmd.n && cmd.p[0] == '/')
+        cmd = (pt_str){cmd.p + 1, cmd.n - 1};
+    for (i = 0; i < cmd.n && cmd.p[i] != ' ' && cmd.p[i] != '\n'; i++)
+        ;
+    cmd.n = i;
+    if ((colon = pt_str_find(cmd, ':')) <= 0)
+        return NULL;
+    for (i = 0; i < n; i++)
+        if (pt_str_eq(p[i].server, (pt_str){cmd.p, (size_t)colon}) &&
+            pt_str_eq(p[i].name, (pt_str){cmd.p + colon + 1, cmd.n - (size_t)colon - 1}))
+            return &p[i];
+    return NULL;
+}
+
+/* Resources whose mention ("@server:uri") starts with q, or whose name
+ * has q's text. */
+static void add_mentions(app *a, pt_str q)
+{
+    uint32_t i, n = 0;
+    const pt_rt_mcp_resource *r = a->open ? pt_rt_mcp_resources(a->s.rt, &n) : NULL;
+    pt_str rest = {q.p + 1, q.n - 1};
+    for (i = 0; i < n && a->nitems < MAX_ITEMS; i++) {
+        pt_buf_reset(&a->tmp2);
+        pt_buf_putc(&a->tmp2, '@');
+        pt_buf_puts(&a->tmp2, r[i].server);
+        pt_buf_putc(&a->tmp2, ':');
+        pt_buf_puts(&a->tmp2, r[i].uri);
+        if (a->tmp2.oom || a->tmp2.n > 300 || memchr(a->tmp2.p, ' ', a->tmp2.n))
+            continue;
+        if (!pt_str_starts(pt_buf_str(&a->tmp2), q) && !(rest.n && pt_str_icontains(r[i].name, rest)))
+            continue;
+        pt_buf_reset(&a->tmp);
+        pt_buf_puts(&a->tmp, r[i].name);
+        if (r[i].description.n) {
+            pt_buf_putz(&a->tmp, r[i].name.n ? " · " : "");
+            pt_buf_puts(&a->tmp, r[i].description);
+        }
+        pt_buf_putc(&a->tmp, 0);
+        add_item(a, a->tmp2.p, a->tmp2.n, a->tmp.p);
+    }
+}
+
+static const char *const mcp_subs[] = {"login", "logout", "restart", "trust", "untrust"};
+
 /* "/login <provider> <key>": where the key starts, or 0. The key is shown
  * masked and never reaches the input history or a saved draft. */
 static size_t secret_at(pt_str d)
@@ -1353,10 +1503,18 @@ static void menu_update(app *a)
     int old = a->nitems;
     a->nitems = 0;
     pt_buf_reset(&a->items_buf);
-    a->sessions_menu = a->skills_menu = false;
+    a->sessions_menu = a->skills_menu = a->mention_menu = false;
     if (a->menu == MENU_SETTINGS)
         return;
     a->menu = MENU_NONE;
+    if (!a->menu_closed && word.n && word.p[0] == '@') { /* @server:uri anywhere */
+        add_mentions(a, word);
+        a->menu = a->nitems ? MENU_ARG : MENU_NONE;
+        a->mention_menu = a->nitems > 0;
+        if (a->nitems != old || a->sel >= a->nitems)
+            a->sel = a->menu_top = 0;
+        return;
+    }
     if (!a->menu_closed && word.n && word.p[0] == '$') { /* $skill anywhere */
         add_skills(a, "$", word, !was_skills);
         a->menu = a->nitems ? MENU_ARG : MENU_NONE;
@@ -1376,6 +1534,7 @@ static void menu_update(app *a)
             if (pt_str_starts(pt_strz(cmds[i].name), d))
                 add_item(a, cmds[i].name, strlen(cmds[i].name), cmds[i].desc);
         add_skills(a, "skill:", d, !was_skills);
+        add_prompts(a, d);
     } else {
         cmd = (pt_str){d.p, (size_t)sp};
         arg = (pt_str){d.p + sp + 1, d.n - (size_t)sp - 1};
@@ -1413,6 +1572,19 @@ static void menu_update(app *a)
             for (i = 0; i < cat->nproviders; i++)
                 if (cat->providers[i].auth != PT_AUTH_NONE && pt_str_starts(pt_strz(cat->providers[i].id), arg))
                     add_item(a, cat->providers[i].id, strlen(cat->providers[i].id), cat->providers[i].name);
+        } else if (pt_str_eqz(cmd, "mcp")) {
+            long sp2 = pt_str_find(arg, ' ');
+            if (sp2 < 0) {
+                add_list(a, mcp_subs, sizeof mcp_subs / sizeof mcp_subs[0], arg);
+            } else if (a->open && pt_str_find((pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1}, ' ') < 0 &&
+                       !pt_str_starts(arg, PT_S("trust")) && !pt_str_starts(arg, PT_S("untrust"))) {
+                pt_rt_mcp_info in[CLI_MCP_MAX];
+                pt_str name = {arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1};
+                uint32_t i, n = pt_rt_mcp_servers(a->s.rt, in, CLI_MCP_MAX);
+                for (i = 0; i < n && i < CLI_MCP_MAX; i++)
+                    if (pt_str_starts(pt_strz(in[i].name), name))
+                        add_item(a, in[i].name, strlen(in[i].name), in[i].target);
+            }
         } else if (pt_str_eqz(cmd, "resume")) {
             session_list *list = get_sessions(a, !was_sessions);
             uint32_t i;
@@ -1512,6 +1684,8 @@ static void activity_row(app *a, int64_t now)
     char what[120], el[32];
     if (a->asked)
         snprintf(what, sizeof what, "waiting for you");
+    else if (a->open && pt_rt_materials_waiting(a->s.rt))
+        snprintf(what, sizeof what, "starting MCP servers");
     else if (a->phase == PH_RETRY) {
         int64_t left = (a->retry_until - now + 999) / 1000;
         snprintf(what, sizeof what, "retrying in %llds", (long long)(left > 0 ? left : 0));
@@ -1591,10 +1765,15 @@ static bool asking(app *a)
         size_t n = 0;
         a->ask_task = a->ask.task;
         a->ask_sel = 0;
-        /* bash: allow commands with the same first word; others: the tool */
+        /* bash: allow commands with the same first word; web_fetch: the
+         * same host; others: the tool */
         if (pt_str_eqz(a->ask.name, "bash"))
             while (n < g.n && n + 1 < sizeof a->ask_prefix && !strchr(" \t\n;&|<>()`$", g.p[n]))
                 n++;
+        if (pt_str_eqz(a->ask.name, "web_fetch")) {
+            g = pt_rt_url_host(g);
+            n = g.n < sizeof a->ask_prefix ? g.n : 0;
+        }
         memcpy(a->ask_prefix, g.p, n);
         a->ask_prefix[n] = 0;
     }
@@ -1689,7 +1868,9 @@ static void build_frame(app *a, int64_t now)
     }
     nask = a->asked ? 5 : 0;
     act = a->running ? 1 : 0;
-    nq = a->running ? (int)(a->nq > 3 ? 4 : a->nq) : 0;
+    nq = a->running || (a->nq && a->queue[0].xid && a->queue[0].got < a->queue[0].want)
+             ? (int)(a->nq > 3 ? 4 : a->nq)
+             : 0;
     nmenu = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->menu != MENU_NONE ? a->nitems : 0;
     if (nmenu > 8)
         nmenu = 8;
@@ -1762,7 +1943,8 @@ static void build_frame(app *a, int64_t now)
             int col = 0;
             pt_str q = pt_buf_str(&a->queue[i].text);
             long nl = pt_str_find(q, '\n');
-            pt_buf_putz(&a->tmp, "  queued · ");
+            pt_buf_putz(&a->tmp, a->queue[i].xid && a->queue[i].got < a->queue[i].want ? "  fetching · "
+                                                                                       : "  queued · ");
             if (nl >= 0)
                 q.n = (size_t)nl;
             tui_clean(&a->tmp, q, &col);
@@ -2170,6 +2352,8 @@ static void close_session(app *a)
     }
     if (!a->open)
         return;
+    while (a->xs) /* the runtime goes: their answers never come */
+        xreq_drop(a, a->xs);
     empty = !a->keep_on_quit && session_empty(a);
     save_draft(a);
     if (pt_fatal(a->s.a) == PT_FATAL_STORAGE)
@@ -2352,6 +2536,8 @@ static void cmd_help(app *a)
         out_z(a, TUI_DIM, line);
     }
     out_z(a, TUI_DIM, "$name anywhere in a message, or /skill:name first, gives the model a skill's instructions");
+    if (a->mcp && a->mcp->nall)
+        out_z(a, TUI_DIM, "/server:prompt [args] sends an MCP server's prompt; @server:uri adds a resource to a message");
     out_z(a, TUI_DIM,
           "enter send · shift+enter, alt+enter or ctrl-j newline · esc esc interrupt · ctrl-c clear, "
           "interrupt or quit · ctrl-d quit · ctrl-t thinking · ctrl-o details · ctrl-z suspend · ctrl-l redraw");
@@ -2417,6 +2603,176 @@ static void cmd_login(app *a, pt_str arg)
         snprintf(msg, sizeof msg, "%s is set in the environment and is used instead", p->key_env[0]);
         out_z(a, TUI_DIM, msg);
     }
+}
+
+/* ---- /mcp ---- */
+
+/* From a server, inside a step: shown at the loop's next pass. */
+static void mcp_note(void *ud, const char *server, const char *msg)
+{
+    app *a = (app *)ud;
+    pt_buf_putz(&a->mcp_notes, server ? server : "");
+    pt_buf_putc(&a->mcp_notes, '\t');
+    pt_buf_putz(&a->mcp_notes, msg);
+    pt_buf_putc(&a->mcp_notes, '\n');
+    set_dirty(a);
+}
+
+static void show_notes(app *a)
+{
+    pt_str all = pt_buf_str(&a->mcp_notes);
+    size_t at = 0;
+    if (!all.n)
+        return;
+    while (at < all.n) {
+        size_t e = at, tab;
+        char line[1200];
+        pt_str msg;
+        while (e < all.n && all.p[e] != '\n')
+            e++;
+        for (tab = at; tab < e && all.p[tab] != '\t'; tab++)
+            ;
+        msg = (pt_str){all.p + tab + 1, e > tab ? e - tab - 1 : 0};
+        snprintf(line, sizeof line, "mcp %.*s: %.*s", (int)(tab - at), all.p + at, (int)msg.n, msg.p);
+        out_z(a,
+              starts(msg, "failed") || starts(msg, "stopped") || starts(msg, "login failed") ||
+                      pt_str_contains(msg, PT_S("log in with"))
+                  ? TUI_RED
+                  : TUI_DIM,
+              line);
+        at = e + 1;
+    }
+    pt_buf_reset(&a->mcp_notes);
+    a->urgent = true;
+}
+
+static const char *mcp_state_name(pt_mcp_state st)
+{
+    switch (st) {
+    case PT_MCP_STARTING:
+        return "starting";
+    case PT_MCP_READY:
+        return "ready";
+    case PT_MCP_FAILED:
+        return "failed";
+    case PT_MCP_AUTH:
+        return "needs login";
+    default:
+        return "stopped";
+    }
+}
+
+static void cmd_mcp(app *a, pt_str arg)
+{
+    pt_rt_mcp_info in[CLI_MCP_MAX];
+    pt_str sub = arg, name = PT_STR_NULL;
+    long sp = pt_str_find(arg, ' ');
+    char msg[1200], err[700];
+    uint32_t i, n;
+    if (sp >= 0) {
+        sub.n = (size_t)sp;
+        name = pt_str_trim((pt_str){arg.p + sp + 1, arg.n - (size_t)sp - 1});
+    }
+    if (!a->mcp) {
+        out_z(a, TUI_DIM, "MCP servers are off (--no-mcp)");
+        return;
+    }
+    n = a->open ? pt_rt_mcp_servers(a->s.rt, in, CLI_MCP_MAX) : 0;
+    if (n > CLI_MCP_MAX)
+        n = CLI_MCP_MAX;
+    if (!sub.n) {
+        if (!a->mcp->nall) {
+            out_z(a, TUI_DIM, "no MCP servers: add them to mcpServers in ~/.config/pytte/config.json, or to "
+                              ".mcp.json in a project");
+            return;
+        }
+        for (i = 0; i < n; i++) {
+            int k = snprintf(msg, sizeof msg, "%s · %s · %s", in[i].name, mcp_state_name(in[i].state), in[i].target);
+            if (in[i].state == PT_MCP_READY)
+                snprintf(msg + k, sizeof msg - (size_t)k, " · %u tools, %u prompts, %u resources", in[i].ntools,
+                         in[i].nprompts, in[i].nresources);
+            else if (in[i].error[0])
+                snprintf(msg + k, sizeof msg - (size_t)k, " · %s", in[i].error);
+            out_z(a, in[i].state == PT_MCP_FAILED || in[i].state == PT_MCP_AUTH ? TUI_RED : TUI_DIM, msg);
+        }
+        for (i = 0; i < a->mcp->nall; i++)
+            if (!a->mcp->info[i].runs) {
+                snprintf(msg, sizeof msg, "%s · not trusted (%s): /mcp trust runs this project's servers",
+                         a->mcp->all[i].name, a->mcp->info[i].source);
+                out_z(a, TUI_DIM, msg);
+            }
+        return;
+    }
+    if (pt_str_eqz(sub, "trust") || pt_str_eqz(sub, "untrust")) {
+        bool on = sub.p[0] == 't';
+        pt_rt_mcp_server add[CLI_MCP_MAX];
+        uint32_t k = 0;
+        if (!cli_mcp_trust(a->mcp, on, err, sizeof err)) {
+            out_z(a, TUI_RED, err);
+            return;
+        }
+        if (!on) {
+            out_z(a, TUI_DIM, "no longer trusting this project's MCP servers: new sessions start without them");
+            cli_mcp_free(a->mcp);
+            cli_mcp_load(a->mcp, a->mcp->project);
+            a->o.nmcp = a->mcp->n;
+            return;
+        }
+        {
+            char dir[4096];
+            snprintf(dir, sizeof dir, "%s", a->mcp->project);
+            cli_mcp_free(a->mcp);
+            cli_mcp_load(a->mcp, dir);
+        }
+        a->o.mcp = a->mcp->run;
+        a->o.nmcp = a->mcp->n;
+        /* those not running yet start now */
+        for (i = 0; i < a->mcp->n; i++) {
+            uint32_t j;
+            for (j = 0; j < n && strcmp(in[j].name, a->mcp->run[i].name) != 0; j++)
+                ;
+            if (j == n)
+                add[k++] = a->mcp->run[i];
+        }
+        if (k && a->open && !pt_rt_mcp_setup(a->s.rt, &a->o.mcp_host, add, k)) {
+            out_z(a, TUI_RED, "out of memory starting them");
+            return;
+        }
+        snprintf(msg, sizeof msg, "trusted this project's MCP servers%s", k ? ": starting them; their tools come with the next session (/new) or after /compact" : "");
+        out_z(a, TUI_DIM, msg);
+        return;
+    }
+    if (!pt_str_eqz(sub, "login") && !pt_str_eqz(sub, "logout") && !pt_str_eqz(sub, "restart")) {
+        out_z(a, TUI_RED, "/mcp [login|logout|restart NAME] [trust|untrust]");
+        return;
+    }
+    if (!name.n) {
+        out_z(a, TUI_RED, "which server?");
+        return;
+    }
+    for (i = 0; i < n && !pt_str_eqz(name, in[i].name); i++)
+        ;
+    if (i == n) {
+        snprintf(msg, sizeof msg, "no MCP server %.*s%s", (int)(name.n > 64 ? 64 : name.n), name.p,
+                 mcp_known(a, name) ? " runs: /mcp trust runs this project's servers" : "");
+        out_z(a, TUI_RED, msg);
+        return;
+    }
+    if (pt_str_eqz(sub, "restart")) {
+        pt_rt_mcp_restart(a->s.rt, name);
+        snprintf(msg, sizeof msg, "restarting %s", in[i].name);
+    } else if (strcmp(in[i].transport, "http") != 0) {
+        snprintf(msg, sizeof msg, "%s is not a remote server: only those log in", in[i].name);
+        out_z(a, TUI_RED, msg);
+        return;
+    } else if (pt_str_eqz(sub, "login")) {
+        pt_rt_mcp_login(a->s.rt, name); /* it says what goes on */
+        return;
+    } else {
+        pt_rt_mcp_logout(a->s.rt, name);
+        snprintf(msg, sizeof msg, "logged out of %s", in[i].name);
+    }
+    out_z(a, TUI_DIM, msg);
 }
 
 static bool valid_setting(int s, const char *v)
@@ -2572,6 +2928,8 @@ static void run_command(app *a, pt_str line)
         out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "login")) {
         cmd_login(a, arg);
+    } else if (pt_str_eqz(cmd, "mcp")) {
+        cmd_mcp(a, arg);
     } else if (pt_str_eqz(cmd, "help")) {
         cmd_help(a);
     } else if (pt_str_eqz(cmd, "quit") || pt_str_eqz(cmd, "exit")) {
@@ -2625,8 +2983,12 @@ static bool queue_text(app *a, pt_str text, bool command)
         if (!next)
             return false;
         for (i = a->qcap; i < cap; i++) {
+            int k;
+            memset(&next[i], 0, sizeof next[i]);
             pt_buf_init(&next[i].text, pt_sys_allocator());
-            next[i].command = next[i].submitted = false;
+            pt_buf_init(&next[i].names, pt_sys_allocator());
+            for (k = 0; k < XPARTS; k++)
+                pt_buf_init(&next[i].parts[k], pt_sys_allocator());
         }
         a->queue = next;
         a->qcap = cap;
@@ -2638,6 +3000,16 @@ static bool queue_text(app *a, pt_str text, bool command)
         return false;
     q->command = command;
     q->submitted = false;
+    q->xid = 0;
+    q->want = q->got = 0;
+    q->failed = q->prompt = false;
+    q->err[0] = 0;
+    pt_buf_reset(&q->names);
+    {
+        int k;
+        for (k = 0; k < XPARTS; k++)
+            pt_buf_reset(&q->parts[k]);
+    }
     a->nq++;
     return true;
 }
@@ -2648,6 +3020,294 @@ static void queued_remove(app *a, uint32_t at)
     memmove(a->queue + at, a->queue + at + 1, (a->nq - at - 1) * sizeof *a->queue);
     a->queue[--a->nq] = kept;
     pt_buf_reset(&a->queue[a->nq].text);
+}
+
+/* ---- MCP: prompts and @-mentions in what is sent ---- */
+
+static void x_done(void *ud, const char *error, pt_str text)
+{
+    xreq *x = (xreq *)ud, **pp;
+    app *a = x->a;
+    uint32_t i;
+    for (pp = &a->xs; *pp; pp = &(*pp)->next)
+        if (*pp == x) {
+            *pp = x->next;
+            break;
+        }
+    for (i = 0; i < a->nq; i++) {
+        queued_input *q = &a->queue[i];
+        if (q->xid != x->id)
+            continue;
+        if (error && !q->failed) {
+            q->failed = true;
+            snprintf(q->err, sizeof q->err, "%s: %s", x->k == 0 && q->prompt ? "the MCP prompt" : "the mention",
+                     error);
+        } else if (!error) {
+            pt_buf_puts(&q->parts[x->k], text);
+        }
+        if (++q->got >= q->want)
+            a->expanded = true;
+        break;
+    }
+    free(x);
+}
+
+static xreq *xreq_new(app *a, queued_input *q, uint32_t k)
+{
+    xreq *x = (xreq *)calloc(1, sizeof *x);
+    if (!x)
+        return NULL;
+    x->a = a;
+    x->id = q->xid;
+    x->k = k;
+    x->next = a->xs;
+    a->xs = x;
+    return x;
+}
+
+static void xreq_drop(app *a, xreq *x)
+{
+    xreq **pp;
+    for (pp = &a->xs; *pp; pp = &(*pp)->next)
+        if (*pp == x) {
+            *pp = x->next;
+            break;
+        }
+    free(x);
+}
+
+/* The configured server of that name: running, or waiting for trust. */
+static bool mcp_known(app *a, pt_str name)
+{
+    uint32_t i;
+    for (i = 0; a->mcp && i < a->mcp->nall; i++)
+        if (pt_str_eqz(name, a->mcp->all[i].name))
+            return true;
+    return false;
+}
+
+/* "/server:prompt ..." for a configured server: an MCP prompt, not a command. */
+static bool names_prompt(app *a, pt_str text)
+{
+    size_t i;
+    long colon;
+    if (!text.n || text.p[0] != '/')
+        return false;
+    for (i = 1; i < text.n && text.p[i] != ' ' && text.p[i] != '\n'; i++)
+        ;
+    colon = pt_str_find((pt_str){text.p + 1, i - 1}, ':');
+    return colon > 0 && mcp_known(a, (pt_str){text.p + 1, (size_t)colon});
+}
+
+/* The prompt's arguments from what follows its command: name=value, or
+ * by position; the last takes the rest of the text. */
+static bool prompt_args(const pt_rt_mcp_prompt *p, pt_str rest, pt_buf *json, char *err, size_t cap)
+{
+    pt_str val[16];
+    uint32_t i, k, nargs = p->nargs < 16 ? p->nargs : 16;
+    size_t at = 0;
+    memset(val, 0, sizeof val);
+    rest = pt_str_trim(rest);
+    /* name=value words first */
+    while (at < rest.n) {
+        size_t e = at, eq;
+        bool named = false;
+        while (e < rest.n && rest.p[e] != ' ' && rest.p[e] != '\n')
+            e++;
+        for (eq = at; eq < e && rest.p[eq] != '='; eq++)
+            ;
+        for (k = 0; eq < e && k < nargs; k++)
+            if (pt_str_eq(p->args[k].name, (pt_str){rest.p + at, eq - at})) {
+                pt_str v = {rest.p + eq + 1, e - eq - 1};
+                if (v.n >= 2 && v.p[0] == '"' && v.p[v.n - 1] == '"')
+                    v = (pt_str){v.p + 1, v.n - 2};
+                val[k] = v;
+                val[k].p = val[k].p ? val[k].p : "";
+                named = true;
+            }
+        if (!named)
+            break;
+        at = e;
+        while (at < rest.n && (rest.p[at] == ' ' || rest.p[at] == '\n'))
+            at++;
+    }
+    /* then by position */
+    for (k = 0; k < nargs && at < rest.n; k++) {
+        size_t e = at;
+        uint32_t later = 0;
+        if (val[k].p)
+            continue;
+        for (i = k + 1; i < nargs; i++)
+            later += !val[i].p;
+        if (!later) { /* the last: the rest */
+            e = rest.n;
+        } else if (rest.p[at] == '"') {
+            for (e = at + 1; e < rest.n && rest.p[e] != '"'; e++)
+                ;
+            val[k] = (pt_str){rest.p + at + 1, e - at - 1};
+            at = e < rest.n ? e + 1 : e;
+            while (at < rest.n && (rest.p[at] == ' ' || rest.p[at] == '\n'))
+                at++;
+            continue;
+        } else {
+            while (e < rest.n && rest.p[e] != ' ' && rest.p[e] != '\n')
+                e++;
+        }
+        val[k] = (pt_str){rest.p + at, e - at};
+        if (!later && val[k].n >= 2 && val[k].p[0] == '"' && val[k].p[val[k].n - 1] == '"')
+            val[k] = (pt_str){val[k].p + 1, val[k].n - 2};
+        at = e;
+        while (at < rest.n && (rest.p[at] == ' ' || rest.p[at] == '\n'))
+            at++;
+    }
+    if (at < rest.n) {
+        snprintf(err, cap, "/%.*s:%.*s takes %u argument%s", (int)p->server.n, p->server.p, (int)p->name.n,
+                 p->name.p, nargs, nargs == 1 ? "" : "s");
+        return false;
+    }
+    pt_buf_putc(json, '{');
+    for (k = 0; k < nargs; k++) {
+        if (!val[k].p) {
+            if (p->args[k].required) {
+                snprintf(err, cap, "/%.*s:%.*s needs %.*s", (int)p->server.n, p->server.p, (int)p->name.n, p->name.p,
+                         (int)p->args[k].name.n, p->args[k].name.p);
+                return false;
+            }
+            continue;
+        }
+        if (json->n > 1)
+            pt_buf_putc(json, ',');
+        pt_json_quote(json, p->args[k].name);
+        pt_buf_putc(json, ':');
+        pt_json_quote(json, val[k]);
+    }
+    pt_buf_putc(json, '}');
+    return !json->oom;
+}
+
+/* Ask for what q names: its prompt and its mentions. 0: nothing (or
+ * asked: see want), -1: q->err says why it cannot go. */
+static int expand_start(app *a, queued_input *q)
+{
+    pt_str t = pt_buf_str(&q->text);
+    pt_rt_mcp_info in[CLI_MCP_MAX];
+    uint32_t ns = a->open && a->mcp ? pt_rt_mcp_servers(a->s.rt, in, CLI_MCP_MAX) : 0, i;
+    size_t at;
+    q->xid = ++a->next_xid;
+    q->want = q->got = 0;
+    if (ns > CLI_MCP_MAX)
+        ns = CLI_MCP_MAX;
+    if (names_prompt(a, t)) {
+        const pt_rt_mcp_prompt *p = find_prompt(a, t);
+        size_t e;
+        pt_buf args;
+        xreq *x;
+        bool ok;
+        for (e = 1; e < t.n && t.p[e] != ' ' && t.p[e] != '\n'; e++)
+            ;
+        if (!p) {
+            long colon = pt_str_find((pt_str){t.p + 1, e - 1}, ':');
+            const char *why = "has no such prompt";
+            for (i = 0; i < ns; i++)
+                if (pt_str_eqz((pt_str){t.p + 1, (size_t)colon}, in[i].name) && in[i].state != PT_MCP_READY)
+                    why = "is not ready (/mcp says why)";
+            snprintf(q->err, sizeof q->err, "the MCP server %.*s %s: %.*s", (int)colon, t.p + 1, why,
+                     (int)(e > 100 ? 100 : e), t.p);
+            return -1;
+        }
+        pt_buf_init(&args, pt_sys_allocator());
+        if (!prompt_args(p, (pt_str){t.p + e, t.n - e}, &args, q->err, sizeof q->err)) {
+            pt_buf_free(&args);
+            return -1;
+        }
+        x = xreq_new(a, q, 0);
+        ok = x && pt_rt_mcp_get_prompt(a->s.rt, p->server, p->name, pt_buf_str(&args), x_done, x);
+        pt_buf_free(&args);
+        if (!ok) {
+            if (x)
+                xreq_drop(a, x);
+            snprintf(q->err, sizeof q->err, "cannot ask the MCP server for the prompt");
+            return -1;
+        }
+        q->prompt = true;
+        q->want = 1;
+    }
+    /* @server:uri, at a word's start, for a ready server */
+    for (at = 0; at < t.n; at++) {
+        size_t e;
+        long colon;
+        pt_str tok, server, uri;
+        if (t.p[at] != '@' || (at && t.p[at - 1] != ' ' && t.p[at - 1] != '\n' && t.p[at - 1] != '\t'))
+            continue;
+        for (e = at + 1; e < t.n && t.p[e] != ' ' && t.p[e] != '\n' && t.p[e] != '\t'; e++)
+            ;
+        tok = (pt_str){t.p + at + 1, e - at - 1};
+        while (tok.n && strchr(".,;!?)", tok.p[tok.n - 1]))
+            tok.n--;
+        if ((colon = pt_str_find(tok, ':')) <= 0)
+            continue;
+        server = (pt_str){tok.p, (size_t)colon};
+        uri = (pt_str){tok.p + colon + 1, tok.n - (size_t)colon - 1};
+        for (i = 0; i < ns && !pt_str_eqz(server, in[i].name); i++)
+            ;
+        if (i == ns || !uri.n)
+            continue;
+        if (in[i].state != PT_MCP_READY) {
+            snprintf(q->err, sizeof q->err, "the MCP server %s is not ready (/mcp says why): @%.*s", in[i].name,
+                     (int)(tok.n > 200 ? 200 : tok.n), tok.p);
+            return -1;
+        }
+        {
+            xreq *x;
+            pt_buf_reset(&a->tmp2);
+            pt_buf_puts(&a->tmp2, server);
+            pt_buf_putc(&a->tmp2, '\t');
+            pt_buf_puts(&a->tmp2, uri);
+            pt_buf_putc(&a->tmp2, '\n');
+            if (pt_str_contains(pt_buf_str(&q->names), pt_buf_str(&a->tmp2)))
+                continue; /* named twice: once */
+            if (q->want == XPARTS) {
+                snprintf(q->err, sizeof q->err, "at most %d mentions in a message", XPARTS - 1);
+                return -1;
+            }
+            pt_buf_puts(&q->names, pt_buf_str(&a->tmp2));
+            x = xreq_new(a, q, q->want);
+            if (!x || !pt_rt_mcp_read(a->s.rt, server, uri, x_done, x)) {
+                if (x)
+                    xreq_drop(a, x);
+                snprintf(q->err, sizeof q->err, "cannot ask the MCP server for @%.*s",
+                         (int)(tok.n > 200 ? 200 : tok.n), tok.p);
+                return -1;
+            }
+            q->want++;
+        }
+    }
+    return 0;
+}
+
+/* What q sends: base (the prompt's text, or what was typed), then each
+ * mention's contents. */
+static void expand_text(queued_input *q, pt_str base, pt_buf *out)
+{
+    uint32_t k = q->prompt ? 1 : 0;
+    pt_str names = pt_buf_str(&q->names);
+    size_t at = 0;
+    pt_buf_puts(out, base);
+    for (; k < q->want && at < names.n; k++) {
+        size_t e = at, tab;
+        while (e < names.n && names.p[e] != '\n')
+            e++;
+        for (tab = at; tab < e && names.p[tab] != '\t'; tab++)
+            ;
+        pt_buf_putz(out, "\n\n<resource server=\"");
+        pt_buf_put(out, names.p + at, tab - at);
+        pt_buf_putz(out, "\" uri=\"");
+        pt_buf_put(out, names.p + tab + 1, e - tab - 1);
+        pt_buf_putz(out, "\">\n");
+        pt_buf_puts(out, pt_buf_str(&q->parts[k]));
+        pt_buf_putz(out, "\n</resource>");
+        at = e + 1;
+    }
 }
 
 static void queued_submit(app *a)
@@ -2669,24 +3329,44 @@ static void queued_submit(app *a)
             menu_update(a);
         } else {
             pt_input in;
-            pt_buf text;
+            pt_buf text, full;
             char err[600];
             bool ok;
+            if (!q->xid && expand_start(a, q) < 0) {
+                out_z(a, TUI_RED, q->err);
+                queued_remove(a, i);
+                continue;
+            }
+            if (q->got < q->want)
+                break; /* what comes after it waits for its fetches */
+            if (q->failed) {
+                out_z(a, TUI_RED, q->err);
+                queued_remove(a, i);
+                continue;
+            }
             memset(&in, 0, sizeof in);
             in.text = pt_buf_str(&q->text);
+            pt_buf_init(&full, pt_sys_allocator());
             pt_buf_init(&text, pt_sys_allocator());
-            switch (pt_rt_expand_skills(a->s.rt, in.text, &text, err, sizeof err)) {
+            /* skills in what was typed; not in what servers sent */
+            switch (q->prompt ? 0 : pt_rt_expand_skills(a->s.rt, in.text, &text, err, sizeof err)) {
             case -1: /* not sent: it is still in the history */
                 out_z(a, TUI_RED, err);
                 queued_remove(a, i);
                 pt_buf_free(&text);
+                pt_buf_free(&full);
                 continue;
             case 1:
                 in.text = pt_buf_str(&text);
                 break;
             }
-            ok = pt_submit(a->s.a, &in);
+            if (q->want) {
+                expand_text(q, q->prompt ? pt_buf_str(&q->parts[0]) : in.text, &full);
+                in.text = pt_buf_str(&full);
+            }
+            ok = !full.oom && pt_submit(a->s.a, &in);
             pt_buf_free(&text);
+            pt_buf_free(&full);
             if (!ok) {
                 out_z(a, TUI_RED, pt_error(a->s.a));
                 return;
@@ -2804,7 +3484,8 @@ static void submit(app *a)
     } else {
         tui_hist_line(&a->pending_history, text);
     }
-    command = text.p[0] == '/' && pt_str_find(text, '\n') < 0 && !pt_str_starts(text, PT_S("/skill:"));
+    command = text.p[0] == '/' && pt_str_find(text, '\n') < 0 && !pt_str_starts(text, PT_S("/skill:")) &&
+              !names_prompt(a, text);
     if (command && (!a->opening || secret_at(text))) { /* a key is never queued */
         pt_buf_reset(&a->command);
         pt_buf_puts(&a->command, text);
@@ -2853,13 +3534,17 @@ static bool complete(app *a)
                 pt_buf_putc(&nd, ' ');
         if (pt_str_starts(label, PT_S("skill:"))) /* then what it is for */
             pt_buf_putc(&nd, ' ');
+        else if (find_prompt(a, label) && find_prompt(a, label)->nargs) /* then its arguments */
+            pt_buf_putc(&nd, ' ');
     } else if (a->sessions_menu) { /* the whole argument: names have spaces */
         pt_buf_puts(&nd, PT_S("/resume "));
         pt_buf_puts(&nd, label);
     } else { /* replace the last word */
         pt_buf_put(&nd, d.p, (size_t)(last_word(d).p - d.p));
         pt_buf_puts(&nd, label);
-        if ((label.n && label.p[0] == '$') || pt_str_starts(d, PT_S("/login "))) /* then the key */
+        if ((label.n && (label.p[0] == '$' || label.p[0] == '@')) || pt_str_starts(d, PT_S("/login ")) ||
+            (pt_str_starts(d, PT_S("/mcp ")) && pt_str_find((pt_str){d.p + 5, d.n - 5}, ' ') < 0 &&
+             !pt_str_eqz(label, "trust") && !pt_str_eqz(label, "untrust"))) /* then the key, the name */
             pt_buf_putc(&nd, ' ');
     }
     changed = !pt_str_eq(pt_buf_str(&nd), d);
@@ -2881,7 +3566,12 @@ static void enter(app *a)
     }
     if (a->menu == MENU_CMD && a->nitems) {
         pt_str label = item_label(a, a->sel);
-        if (menu_takes_arg(label) && !pt_str_eqz(label, "settings")) {
+        const pt_rt_mcp_prompt *p = find_prompt(a, label);
+        uint32_t k;
+        bool needs = false;
+        for (k = 0; p && k < p->nargs; k++)
+            needs = needs || p->args[k].required;
+        if ((menu_takes_arg(label) && !pt_str_eqz(label, "settings")) || needs) {
             /* /model and friends: show their arguments first */
             if (complete(a))
                 return;
@@ -2889,10 +3579,13 @@ static void enter(app *a)
             complete(a);
         }
     } else if (a->menu == MENU_ARG && a->nitems) {
-        bool skill = a->skills_menu;
+        bool skill = a->skills_menu || a->mention_menu;
+        pt_str label = item_label(a, a->sel);
+        bool sub = pt_str_starts(d, PT_S("/mcp ")) && (pt_str_eqz(label, "login") || pt_str_eqz(label, "logout") ||
+                                                      pt_str_eqz(label, "restart"));
         complete(a);
-        if (skill)
-            return; /* a $skill picked: the message goes on */
+        if (skill || sub)
+            return; /* a $skill or @mention picked: the message goes on; /mcp login: then the name */
     }
     submit(a);
 }
@@ -3178,7 +3871,7 @@ static void startup_free(app *a)
     pt_arena_free(&a->ar);
 }
 
-int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prompt)
+int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, const char *prompt)
 {
     app a;
     const char *term = getenv("TERM"), *amb = getenv("PYTTE_AMBIGUOUS");
@@ -3187,6 +3880,10 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     memset(&a, 0, sizeof a);
     a.o = *o;
     a.cfg = cfg;
+    a.mcp = mcp;
+    pt_buf_init(&a.mcp_notes, pt_sys_allocator());
+    if (mcp)
+        cli_mcp_host(&a.o.mcp_host, mcp_note, &a);
     a.interval = 33;
     a.esc_at = a.ctrlc_at = -DOUBLE_MS;
     /* the watchdog first: before the store is opened */
@@ -3270,6 +3967,23 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         pt_buf_puts(&a.lines, pt_buf_str(&first));
         pt_buf_free(&first);
     }
+    if (a.mcp && a.mcp->warn[0])
+        out_z(&a, TUI_RED, a.mcp->warn);
+    if (a.mcp && a.mcp->nuntrusted) { /* the trust flow: say what would run */
+        char names[400] = "", line[700];
+        uint32_t i;
+        size_t k = 0;
+        for (i = 0; i < a.mcp->nall; i++)
+            if (!a.mcp->info[i].runs && k < sizeof names - 40)
+                k += (size_t)snprintf(names + k, sizeof names - k, "%s%s (%s: %s)", k ? ", " : "",
+                                      a.mcp->all[i].name, a.mcp->info[i].source,
+                                      a.mcp->all[i].url ? a.mcp->all[i].url : a.mcp->all[i].command);
+        snprintf(line, sizeof line,
+                 "this project has MCP servers that are not trusted, so they do not run: %s. "
+                 "/mcp trust runs them (programs on this machine: trust only what you know)",
+                 names);
+        out_z(&a, TUI_DIM, line);
+    }
     if (prompt && *prompt) {
         a.drop_restored_draft = true;
         tui_input_set(&a.in, pt_strz(prompt));
@@ -3295,6 +4009,12 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         else
             pt_sys_wait(fds, 5, timeout_ms(&a, now));
         finish_setting(&a);
+        show_notes(&a);
+        if (a.expanded) {
+            a.expanded = false;
+            queued_submit(&a);
+            set_dirty(&a);
+        }
         if (a.sessions && a.sessions->pending && pt_worker_finish(a.sessions->worker)) {
             a.sessions->pending = false;
             a.sessions->ready = true;
@@ -3452,9 +4172,15 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     pt_buf_free(&a.command);
     {
         uint32_t i;
-        for (i = 0; i < a.qcap; i++)
+        for (i = 0; i < a.qcap; i++) {
+            int k;
             pt_buf_free(&a.queue[i].text);
+            pt_buf_free(&a.queue[i].names);
+            for (k = 0; k < XPARTS; k++)
+                pt_buf_free(&a.queue[i].parts[k]);
+        }
         free(a.queue);
+        pt_buf_free(&a.mcp_notes);
     }
     pt_arena_free(&a.ar);
     return a.code;

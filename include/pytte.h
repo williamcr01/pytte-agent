@@ -38,7 +38,8 @@ typedef enum {
     PT_FX_ASK,        /* ask the user about a tool call; answered by pt_approve, no completion */
     PT_FX_TOOL,       /* run a tool: pt_fx_data for its output as it comes, then pt_fx_tool */
     PT_FX_BLOB,       /* store bytes as a blob (section 6.5); complete with pt_fx_blob */
-    PT_FX_EPOCH_MATERIALS /* a new epoch's system prompt and tools; complete with pt_fx_materials */
+    PT_FX_EPOCH_MATERIALS /* an epoch's system prompt and tools (a new one, or a provisional one
+                             being settled); complete with pt_fx_materials */
 } pt_fx_kind;
 
 /* What running a tool again after an unknown partial run does (section 13.4). */
@@ -167,6 +168,11 @@ typedef struct pt_session_cfg {
      * rebuild later epochs' system prompts from (pt_session_prompt): a
      * JSON object, or empty. */
     pt_str prompt;
+    /* The first epoch's materials are settled later: before the first
+     * request, the core asks for them (EPOCH_MATERIALS) and commits them,
+     * so tools the host is still discovering (MCP servers) make it in.
+     * Submitted inputs are committed meanwhile; their run waits. */
+    bool provisional;
 } pt_session_cfg;
 
 bool pt_create(pt_agent *a, const pt_session_cfg *c);

@@ -130,7 +130,7 @@ static void test_proc_cloexec(void)
     const char *argv[] = {self_bin, "--proc-fd-probe", NULL};
     pt_proc *p;
     int status = -1;
-    p = pt_proc_spawn(argv, NULL, NULL, NULL, err, sizeof err);
+    p = pt_proc_spawn(argv, NULL, NULL, NULL, NULL, err, sizeof err);
     CHECK(p != NULL);
     if (!p) {
         fprintf(stderr, "    process spawn: %s\n", err);
@@ -186,7 +186,7 @@ static void test_faux_delay(void)
     CHECK(d != NULL);
     if (!d)
         return;
-    sink = (pt_http_sink){&seen, faux_head, faux_body, faux_done};
+    sink = (pt_http_sink){&seen, faux_head, faux_body, faux_done, NULL};
     handle = d->start(d, &req, &sink);
     CHECK(handle != NULL);
     if (!handle) {
@@ -228,7 +228,7 @@ static void test_faux_cut(void)
     CHECK(d != NULL);
     if (!d)
         return;
-    sink = (pt_http_sink){&seen, faux_head, faux_body, faux_done};
+    sink = (pt_http_sink){&seen, faux_head, faux_body, faux_done, NULL};
     CHECK(d->start(d, &req, &sink) != NULL);
     CHECK(d->pump(d, 0, NULL, 0) == 0);
     CHECK(seen.heads == 1 && seen.bodies == 1 && seen.dones == 1 && seen.error);
@@ -864,10 +864,10 @@ static void test_commands(void)
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
     CHECK(wait_for(&p, "  › /model     set the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/16", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "enter run · esc close · 1/17", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "  › /quit", 1000));
-    CHECK(wait_for(&p, "16/16", 1000));
+    CHECK(wait_for(&p, "17/17", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");
@@ -1196,6 +1196,72 @@ static void test_blocked_settings(void)
     free(text);
 }
 
+/* MCP in the TUI: a project's server waits for trust, /mcp trust starts
+ * it, its prompt is a slash command, its resource an @-mention. The
+ * server is test_mcp, next to this program. */
+static void test_mcp(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "../tests/faux/hello.json", NULL};
+    char server[4200], json[8600], *slash, *log;
+    size_t n;
+    snprintf(server, sizeof server, "%s", self_bin);
+    if (!(slash = strrchr(server, '/')))
+        return;
+    strcpy(slash + 1, "test_mcp");
+    if (access(server, X_OK) != 0) {
+        fprintf(stderr, "    %s not built; skipped\n", server);
+        return;
+    }
+    CHECK(mkdir("mcpproj", 0700) == 0 || errno == EEXIST);
+    snprintf(json, sizeof json, "{\"mcpServers\": {\"t\": {\"command\": \"%s\", \"args\": [\"--mcp-server\", \"ok\"]}}}\n",
+             server);
+    CHECK(pt_sys_write_file("mcpproj/.mcp.json", json, strlen(json)));
+    CHECK(chdir("mcpproj") == 0);
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "not trusted, so they do not run: t (.mcp.json", 3000));
+    keys(&p, "/mcp\r");
+    CHECK(wait_for(&p, "t · not trusted (.mcp.json)", 2000));
+    keys(&p, "/mcp trust\r");
+    CHECK(wait_for(&p, "trusted this project's MCP servers: starting them", 2000));
+    CHECK(wait_for(&p, "mcp t: ready: 7 tools", 5000));
+    /* its prompt, from the menu */
+    keys(&p, "/t:");
+    CHECK(wait_for(&p, "/t:review  Review a file · file, focus?", 2000));
+    keys(&p, "\r"); /* it needs a file: completed, not sent */
+    CHECK(wait_for(&p, "› /t:review \n", 1000));
+    keys(&p, "a.c\r");
+    CHECK(wait_for(&p, "› Please review a.c", 3000));
+    CHECK(wait_for(&p, "Hello from the faux", 3000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "/t:review\r"); /* completed again */
+    CHECK(wait_for(&p, "› /t:review \n", 1000));
+    keys(&p, "\x1b"); /* no menu: sent as it is */
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "/t:review needs file", 2000));
+    /* a resource, mentioned */
+    keys(&p, "look at @t:n");
+    CHECK(wait_for(&p, "@t:note://one  one", 2000));
+    keys(&p, "\r"); /* picked; the message goes on */
+    CHECK(wait_for(&p, "› look at @t:note://one \n", 1000));
+    keys(&p, "please\r");
+    CHECK(wait_for(&p, "› look at @t:note://one please\n› resource t:note://one", 3000));
+    CHECK(!has(&p, "contents of note://one")); /* the model's to read */
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "/mcp\r");
+    CHECK(wait_for(&p, "t · ready · ", 2000));
+    CHECK(wait_for(&p, "1 resources", 2000)); /* the line wraps where the path ends */
+    keys(&p, "\x04");
+    CHECK(finish(&p, 5000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    log = last_log(&n);
+    CHECK(log && strstr(log, "<resource server=\\\"t\\\" uri=\\\"note://one\\\">\\ncontents of note://one"));
+    free(log);
+    CHECK(chdir("..") == 0);
+}
+
 int main(int argc, char **argv)
 {
     char tmpl[] = "/tmp/pytte-pty-XXXXXX";
@@ -1252,6 +1318,7 @@ int main(int argc, char **argv)
     RUN(test_sigterm);
     RUN(test_early_input);
     RUN(test_blocked_settings);
+    RUN(test_mcp);
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (!t_failed && system(cmd) != 0)
         fprintf(stderr, "cannot remove %s\n", dir);

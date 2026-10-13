@@ -154,6 +154,8 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     uint64_t used;
     pt_buf ref;
     bool ok;
+    if (a->nentries && a->entries[0].kind == ENT_EPOCH && a->entries[0].provisional)
+        return pt_compact_settle(a, t);
     if (!pt_run_resolve(a, c->model, &target, sa) || !pt_run_credentials(a, target.provider, &cred))
         return false;
     nt.cutoff = last ? last->id : 0;

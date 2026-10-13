@@ -91,6 +91,42 @@ void cli_catalog_load(const pt_json *providers, const char *path, char *warn, si
 bool cli_catalog_convert(pt_str dev_json, pt_str openrouter_json, const char *updated, pt_buf *out, char *msg,
                          size_t cap);
 
+/* ---- mcp_cfg.c: MCP servers ----
+ * "mcpServers" in the user's config.json run. A project's (.mcp.json, or
+ * "mcpServers" in .pytte/config.json, in its directory) run once trusted:
+ * trust.json, next to config.json, keeps the hash of each trusted
+ * project's server config, so a change asks again. OAuth tokens live in
+ * mcp-auth.json (0600), by server URL. */
+
+#define CLI_MCP_MAX 64
+
+typedef struct cli_mcp {
+    pt_arena ar;
+    pt_rt_mcp_server run[CLI_MCP_MAX]; /* the servers that run */
+    uint32_t n;
+    pt_rt_mcp_server all[CLI_MCP_MAX]; /* ...and those waiting for trust */
+    struct {
+        const char *source; /* "user", ".mcp.json", ".pytte/config.json" */
+        bool runs;
+    } info[CLI_MCP_MAX];
+    uint32_t nall, nuntrusted;
+    char project[4096];
+    char hash[65]; /* of the project's server config; "" when it has none */
+    bool trusted;
+    char warn[600]; /* the first problem, or "" */
+} cli_mcp;
+
+/* The servers for a session started in cwd. */
+void cli_mcp_load(cli_mcp *m, const char *cwd);
+/* Trust (on) or stop trusting this project's servers as they are now. */
+bool cli_mcp_trust(const cli_mcp *m, bool on, char *err, size_t cap);
+void cli_mcp_free(cli_mcp *m);
+void cli_trust_path(char *out, size_t cap);
+void cli_mcp_auth_path(char *out, size_t cap);
+/* The host's side for pt_rt_mcp_setup: tokens in mcp-auth.json, logins
+ * in the browser (xdg-open, open), lines for the user through notify. */
+void cli_mcp_host(pt_rt_mcp_host *h, void (*notify)(void *ud, const char *server, const char *msg), void *ud);
+
 /* ---- session.c: opening sessions ---- */
 
 typedef struct cli_opts {
@@ -108,6 +144,11 @@ typedef struct cli_opts {
     bool fork;
     const char *worktree;
     bool (*stop)(void *ud); /* polled by pt_rt_run (print mode) */
+    /* MCP servers for the session (copied when it opens); with any, a new
+     * session's first request waits for them to list their tools */
+    const pt_rt_mcp_server *mcp;
+    uint32_t nmcp;
+    pt_rt_mcp_host mcp_host;
 } cli_opts;
 
 typedef struct cli_open_job cli_open_job;
@@ -188,7 +229,8 @@ extern const char cli_default_system[];
 /* ---- src/tui/app.c ---- */
 
 /* The TUI on session id (NULL: a new one), sending prompt first when
- * given. Returns the exit code. */
-int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prompt);
+ * given; mcp: the servers loaded into o (NULL: --no-mcp), for /mcp.
+ * Returns the exit code. */
+int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, const char *prompt);
 
 #endif

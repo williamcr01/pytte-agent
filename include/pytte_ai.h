@@ -244,11 +244,15 @@ typedef struct pt_ai_opts {
     uint32_t nheaders;
 } pt_ai_opts;
 
+/* pt_http_req.flags */
+#define PT_HTTP_DECOMPRESS 1u /* ask for and decode compressed responses */
+
 typedef struct pt_http_req {
     const char *method, *url;
     pt_header *headers;
     uint32_t nheaders, hcap;
     pt_str body;
+    uint32_t flags; /* PT_HTTP_* */
 } pt_http_req;
 
 /* Build the HTTP request for a context. Pure: the same inputs always give

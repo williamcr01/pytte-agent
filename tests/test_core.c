@@ -38,6 +38,9 @@ typedef struct host {
     bool no_blobs;            /* a store without blobs */
     const pt_materials *mat;  /* the answer to EPOCH_MATERIALS (NULL: keep) */
     uint32_t mat_asked, mat_epoch;
+    bool mat_hold;     /* keep EPOCH_MATERIALS unanswered: h_run returns false */
+    uint32_t mat_held; /* ...its effect */
+    bool provisional;  /* h_create: the first epoch is settled later */
 } host;
 
 static bool h_blob(void *ud, pt_str ref, pt_arena *ar, pt_str *out)
@@ -169,6 +172,8 @@ static bool h_run(host *h)
         if (!pt_poll(h->a, &fx)) {
             if (pt_fatal(h->a) || pt_idle(h->a))
                 return true;
+            if (h->mat_held)
+                return false;
             CHECK(!"stuck: nothing to do but not idle");
             return true;
         }
@@ -208,7 +213,10 @@ static bool h_run(host *h)
             h->mat_asked++;
             h->mat_epoch = fx.epoch;
             CHECK(pt_str_eqz(fx.bytes, "You are a test."));
-            pt_fx_materials(h->a, fx.id, h->mat);
+            if (h->mat_hold)
+                h->mat_held = fx.id;
+            else
+                pt_fx_materials(h->a, fx.id, h->mat);
             break;
         case PT_FX_BLOB:
             if (h->no_blobs) {
@@ -249,6 +257,7 @@ static void h_create(host *h)
     c.cwd = PT_S("/tmp/proj");
     c.host = PT_S("testhost");
     c.system = PT_S("You are a test.");
+    c.provisional = h->provisional;
     memset(&me, 0, sizeof me);
     me.host = PT_S("testhost");
     me.pid = 42;
@@ -657,6 +666,71 @@ static void test_epoch_materials(void)
     }
 }
 
+/* A provisional first epoch: the prompt is committed at once, and its
+ * request waits until the host settles the tools (MCP servers starting). */
+static void test_provisional_epoch(void)
+{
+    static const char script[] =
+        "{\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First.\"}]},"
+        "{\"content\":[{\"type\":\"text\",\"text\":\"Second.\"}]}]}";
+    pt_tool_def def;
+    pt_materials m;
+    pt_entry_view v;
+    host h;
+    memset(&def, 0, sizeof def);
+    def.name = PT_S("mcp__srv__echo");
+    def.description = PT_S("From an MCP server.");
+    def.schema = PT_S("{\"type\":\"object\"}");
+    def.source = PT_S("mcp:srv");
+    m.system = PT_S("Rebuilt.");
+    m.tools = &def;
+    m.ntools = 1;
+    m.skills = PT_STR_NULL;
+    h_init(&h, script);
+    h.provisional = true;
+    h.mat_hold = true;
+    h_create(&h);
+    h_submit(&h, "one", NULL);
+    CHECK(!h_run(&h)); /* waits on the materials */
+    CHECK(h.mat_asked == 1 && h.mat_epoch == 1 && h.requests == 0);
+    CHECK(pt_entry_count(h.a) == 2); /* the prompt is in: shown as sent */
+    CHECK(pt_entry_at(h.a, 1, &v) && strcmp(v.kind, "user") == 0);
+    CHECK(has(pt_buf_str(&h.log), PT_S("\"provisional\":true")));
+    /* a crash meanwhile: the new owner asks again */
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    h.mat_held = 0;
+    h_open(&h, "testhost", false, true);
+    CHECK(!h_run(&h));
+    CHECK(h.mat_asked == 2 && h.mat_held && h.requests == 0);
+    pt_fx_materials(h.a, h.mat_held, &m);
+    h.mat_held = 0;
+    h.mat_hold = false;
+    CHECK(h_run(&h));
+    CHECK(h.done == 1 && h.requests == 1);
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("Rebuilt.")));
+    CHECK(has(pt_buf_str(&h.last_request), PT_S("\"tools\":1")));
+    CHECK(pt_entry_at(h.a, 0, &v) && pt_str_eqz(v.msg->text, "Rebuilt."));
+    CHECK(has(v.raw, PT_S("mcp__srv__echo")) && !has(v.raw, PT_S("provisional")));
+    /* settled once: the next prompt goes straight out, and a reload agrees */
+    h_submit(&h, "two", NULL);
+    CHECK(h_run(&h));
+    CHECK(h.mat_asked == 2 && h.done == 2);
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    CHECK(pt_entry_at(h.a, 0, &v) && pt_str_eqz(v.msg->text, "Rebuilt."));
+    CHECK(has(v.raw, PT_S("mcp__srv__echo")));
+    CHECK(pt_entry_count(h.a) == 5);
+    h_free(&h);
+    /* keep (NULL): the provisional materials become final as they are */
+    h_init(&h, script);
+    h.provisional = true;
+    h_create(&h);
+    h_submit(&h, "one", NULL);
+    CHECK(h_run(&h));
+    CHECK(h.mat_asked == 1 && h.done == 1);
+    CHECK(pt_entry_at(h.a, 0, &v) && pt_str_eqz(v.msg->text, "You are a test.") && !has(v.raw, PT_S("provisional")));
+    h_free(&h);
+}
+
 static void test_retry(void)
 {
     static const char script[] =
@@ -960,6 +1034,7 @@ int main(void)
     RUN(test_retry);
     RUN(test_big_prompt);
     RUN(test_epoch_materials);
+    RUN(test_provisional_epoch);
     RUN(test_max_tokens_estimate);
     RUN(test_compact_keep);
     RUN(test_tool_call_without_tools);

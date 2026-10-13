@@ -322,6 +322,107 @@ static void test_schema(void)
     CHECK(schema_ok("true", "{\"anything\":1}", ""));
 }
 
+/* HTML through pt_html, fed whole and byte by byte: both must agree. */
+static void html_check(const char *base, const char *in, const char *want, int line)
+{
+    pt_buf whole, bytes;
+    pt_html h;
+    size_t i, n = strlen(in);
+    pt_buf_init(&whole, T_AL);
+    pt_buf_init(&bytes, T_AL);
+    pt_html_init(&h, T_AL, &whole, pt_strz(base));
+    pt_html_feed(&h, in, n);
+    pt_html_finish(&h);
+    pt_html_free(&h);
+    pt_html_init(&h, T_AL, &bytes, pt_strz(base));
+    for (i = 0; i < n; i++)
+        pt_html_feed(&h, in + i, 1);
+    pt_html_finish(&h);
+    pt_html_free(&h);
+    t_checks += 2;
+    if (!pt_str_eqz(pt_buf_str(&whole), want)) {
+        t_failed++;
+        fprintf(stderr, "%s:%d: html got\n%.*s---\nwant\n%s---\n", __FILE__, line, (int)whole.n, whole.p, want);
+    }
+    if (!pt_str_eq(pt_buf_str(&whole), pt_buf_str(&bytes))) {
+        t_failed++;
+        fprintf(stderr, "%s:%d: html byte by byte differs:\n%.*s---\n", __FILE__, line, (int)bytes.n, bytes.p);
+    }
+    pt_buf_free(&whole);
+    pt_buf_free(&bytes);
+}
+
+#define HTML(base, in, want) html_check(base, in, want, __LINE__)
+
+static void url_check(const char *base, const char *ref, const char *want, int line)
+{
+    pt_buf b;
+    pt_buf_init(&b, T_AL);
+    t_checks++;
+    if (!pt_url_resolve(pt_strz(base), pt_strz(ref), &b) || !pt_str_eqz(pt_buf_str(&b), want)) {
+        t_failed++;
+        fprintf(stderr, "%s:%d: resolve %s against %s: got %.*s, want %s\n", __FILE__, line, ref, base, (int)b.n,
+                b.p ? b.p : "", want);
+    }
+    pt_buf_free(&b);
+}
+
+static void test_html(void)
+{
+    pt_buf out;
+    pt_html h;
+    HTML("", "<html><head><title>T &amp; t</title><style>p{color:red}</style>"
+             "<script>if (a<b) document.write('</p>')</script></head>"
+             "<body><h1>Hello</h1><p>One   two\nthree.</p><p>Four</p></body></html>",
+         "# Hello\n\nOne two three.\n\nFour\n");
+    HTML("https://ex.com/docs/a/page.html?x=1",
+         "<p>See <a href=\"../b/other.html\">the other</a>, <a href='/root'>root</a>, "
+         "<a href=\"#top\">top</a>, <a href=\"https://abs.org/x?a=1&amp;b=2\">abs</a> and "
+         "<a href=\"javascript:void(0)\">js</a>.</p>",
+         "See [the other](https://ex.com/docs/b/other.html), [root](https://ex.com/root), top, "
+         "[abs](https://abs.org/x?a=1&b=2) and js.\n");
+    HTML("", "<ul><li>one</li><li>two<ol><li>a</li><li>b</li></ol></li></ul><p>after</p>",
+         "- one\n- two\n  1. a\n  2. b\n\nafter\n");
+    HTML("", "<p>x</p><pre><code>int  main()\n{\n  return 0;\n}</code></pre><p>use <code>ls -l</code></p>",
+         "x\n\n```\nint  main()\n{\n  return 0;\n}\n```\n\nuse `ls -l`\n");
+    HTML("", "a &lt;b&gt; &#65;&#x42; &copy; &bogus; &amp &#xZZ; caf&eacute;",
+         "a <b> AB \xc2\xa9 &bogus; & &#xZZ; caf\xc3\xa9\n");
+    HTML("", "<!-- hidden <p>no</p> --><!DOCTYPE html><p>yes</p><nav><a href=x>menu</a></nav>"
+             "<table><tr><th>k</th><th>v</th></tr><tr><td>1</td><td>2</td></tr></table>",
+         "yes\n\nk | v\n1 | 2\n");
+    HTML("", "1 < 2 and <3> <br>line<br/>two<hr>end <img src=x alt=\"A cat\">",
+         "1 < 2 and <3>\nline\ntwo\n\n---\n\nend [image: A cat]\n");
+    HTML("", "<head><title>Only head</title><body>text</body>", "text\n");
+    HTML("", "<blockquote><p>quoted words</p></blockquote>", "> quoted words\n");
+    HTML("", "<script>a</scrip</script>after<script>x</script >", "after\n");
+    HTML("", "<a href=\"/x\"></a><a href=\"https://e.com/a b\">sp</a>", "sp\n");
+    HTML("", "<p unclosed='a>b'>t</p>", "t\n");
+    /* the title, and a tag that never ends */
+    pt_buf_init(&out, T_AL);
+    pt_html_init(&h, T_AL, &out, PT_S(""));
+    pt_html_feed(&h, "<title> The\ntitle </title><p>body", 33);
+    pt_html_feed(&h, "<a href=\"never", 14);
+    pt_html_finish(&h);
+    CHECK_STR(pt_html_title(&h), "The\ntitle");
+    CHECK_STR(pt_buf_str(&out), "body\n");
+    pt_html_free(&h);
+    pt_buf_free(&out);
+
+    url_check("https://a.com/b/c/d;p?q", "g", "https://a.com/b/c/g", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "./g", "https://a.com/b/c/g", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "g/", "https://a.com/b/c/g/", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "/g", "https://a.com/g", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "//g", "https://g", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "?y", "https://a.com/b/c/d;p?y", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "#s", "https://a.com/b/c/d;p?q#s", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "../g", "https://a.com/b/g", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "../../../g", "https://a.com/g", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "g?y/./x", "https://a.com/b/c/g?y/./x", __LINE__);
+    url_check("https://a.com", "x", "https://a.com/x", __LINE__);
+    url_check("https://a.com/b/c/d;p?q", "http://o.org/z", "http://o.org/z", __LINE__);
+    url_check("https://a.com/b/c", "..", "https://a.com/", __LINE__);
+}
+
 int main(void)
 {
     RUN(test_arena);
@@ -333,5 +434,6 @@ int main(void)
     RUN(test_sse);
     RUN(test_sha256);
     RUN(test_schema);
+    RUN(test_html);
     return t_done("test_base");
 }

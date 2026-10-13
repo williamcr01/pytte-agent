@@ -302,7 +302,7 @@ typedef enum { MAT_READY, MAT_ASKED, MAT_WAITING } mat_state;
 
 /* The next epoch's materials for t (section 12.3), asked for once: when
  * the compaction starts its request, so they are as of this moment. */
-static mat_state want_materials(pt_agent *a, task *t)
+static mat_state want_materials(pt_agent *a, task *t, uint32_t epoch)
 {
     pt_fx fx;
     if (a->mat_task == t->id && a->mat_ready)
@@ -315,7 +315,7 @@ static mat_state want_materials(pt_agent *a, task *t)
     fx.kind = PT_FX_EPOCH_MATERIALS;
     fx.id = a->mat_fx = pt_core_new_fx(a);
     fx.task = t->id;
-    fx.epoch = a->cur_epoch + 1;
+    fx.epoch = epoch;
     fx.bytes = a->nentries ? a->entries[0].msg.text : PT_STR_NULL;
     pt_core_queue(a, &fx, PT_STR_NULL);
     return MAT_ASKED;
@@ -354,6 +354,38 @@ static pt_str epoch_array(pt_agent *a, const char *key)
     const pt_json *r = a->nentries ? pt_json_parse(a->entries[0].raw, &a->scratch, NULL) : NULL;
     const pt_json *v = pt_json_get(pt_json_get(r, "data"), key);
     return pt_json_is(v, PT_J_ARR) ? v->raw : PT_S("[]");
+}
+
+bool pt_compact_settle(pt_agent *a, task *t)
+{
+    pt_jw *w = &a->cw;
+    mat_state ms = want_materials(a, t, a->cur_epoch);
+    bool fresh;
+    if (ms != MAT_READY)
+        return ms == MAT_ASKED;
+    fresh = !a->mat_keep;
+    pt_core_commit_begin(a, t->id);
+    pt_jw_obj(w);
+    pt_jw_key(w, "t");
+    pt_jw_strz(w, "materials");
+    pt_jw_key(w, "id");
+    pt_jw_uint(w, pt_core_new_id(a));
+    pt_jw_key(w, "epoch");
+    pt_jw_uint(w, a->cur_epoch);
+    pt_jw_key(w, "data");
+    pt_jw_obj(w);
+    pt_jw_key(w, "n");
+    pt_jw_uint(w, a->cur_epoch);
+    pt_jw_key(w, "system");
+    pt_jw_str(w, fresh ? pt_buf_str(&a->mat_system) : a->entries[0].msg.text);
+    pt_jw_key(w, "tools");
+    pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_tools) : epoch_array(a, "tools"));
+    pt_jw_key(w, "skills");
+    pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_skills) : epoch_array(a, "skills"));
+    pt_jw_obj_end(w);
+    pt_jw_obj_end(w);
+    materials_done(a);
+    return pt_core_commit_end(a);
 }
 
 /* ---- the files read and modified ---- */
@@ -613,7 +645,7 @@ bool pt_compact_step(pt_agent *a, task *t)
     case PH_REQUEST:
         if (!t->live) {
             pt_event ev;
-            mat_state ms = want_materials(a, t);
+            mat_state ms = want_materials(a, t, a->cur_epoch + 1);
             if (ms != MAT_READY)
                 return ms == MAT_ASKED;
             memset(&ev, 0, sizeof ev);

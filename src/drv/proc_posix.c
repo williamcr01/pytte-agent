@@ -25,7 +25,7 @@ extern char **environ;
 
 struct pt_proc {
     pid_t pid;
-    int out, exitfd;
+    int out, err, in, exitfd;
     bool reaped;
     int status;
 };
@@ -70,32 +70,61 @@ static char **make_env(const char *const unset[], const char *const add[])
     return env;
 }
 
-pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *const unset[],
-                       const char *const add[], char *err, size_t cap)
+/* A pipe whose ends close on exec. */
+static bool cloexec_pipe(int fds[2], char *err, size_t cap)
 {
-    pt_proc *p = (pt_proc *)calloc(1, sizeof *p);
-    char **env = make_env(unset, add);
-    int fds[2] = {-1, -1}, devnull;
-    if (!p || !env) {
-        snprintf(err, cap, "out of memory");
-        goto fail;
-    }
-    p->exitfd = -1;
 #if defined(__linux__)
     if (pipe2(fds, O_CLOEXEC) != 0) {
         snprintf(err, cap, "pipe: %s", strerror(errno));
-        goto fail;
+        fds[0] = fds[1] = -1;
+        return false;
     }
 #else
     if (pipe(fds) != 0) {
         snprintf(err, cap, "pipe: %s", strerror(errno));
-        goto fail;
+        fds[0] = fds[1] = -1;
+        return false;
     }
     if (fcntl(fds[0], F_SETFD, FD_CLOEXEC) < 0 || fcntl(fds[1], F_SETFD, FD_CLOEXEC) < 0) {
         snprintf(err, cap, "fcntl: %s", strerror(errno));
-        goto fail;
+        close(fds[0]);
+        close(fds[1]);
+        fds[0] = fds[1] = -1;
+        return false;
     }
 #endif
+    return true;
+}
+
+static void close_pair(int fds[2])
+{
+    if (fds[0] >= 0)
+        close(fds[0]);
+    if (fds[1] >= 0)
+        close(fds[1]);
+    fds[0] = fds[1] = -1;
+}
+
+pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *const unset[],
+                       const char *const add[], const pt_proc_opts *opts, char *err, size_t cap)
+{
+    pt_proc *p = (pt_proc *)calloc(1, sizeof *p);
+    char **env = make_env(unset, add);
+    int fds[2] = {-1, -1}, efds[2] = {-1, -1}, ifds[2] = {-1, -1}, in;
+    bool want_in = opts && opts->stdin_pipe, split = opts && opts->split_err;
+    if (!p || !env) {
+        snprintf(err, cap, "out of memory");
+        goto fail;
+    }
+    p->exitfd = p->err = p->in = -1;
+    if (!cloexec_pipe(fds, err, cap) || (split && !cloexec_pipe(efds, err, cap)) ||
+        (want_in && !cloexec_pipe(ifds, err, cap)))
+        goto fail;
+    if (want_in) {
+        struct sigaction sa;
+        if (sigaction(SIGPIPE, NULL, &sa) == 0 && sa.sa_handler == SIG_DFL)
+            signal(SIGPIPE, SIG_IGN);
+    }
     p->pid = fork();
     if (p->pid < 0) {
         snprintf(err, cap, "fork: %s", strerror(errno));
@@ -110,19 +139,14 @@ pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *co
             signal(sigs[i], SIG_DFL);
         sigemptyset(&none);
         sigprocmask(SIG_SETMASK, &none, NULL);
-        devnull = open("/dev/null", O_RDONLY);
-        if (devnull < 0 || (devnull > 2 && fcntl(devnull, F_SETFD, FD_CLOEXEC) < 0) ||
-            dup2(devnull, 0) < 0 || dup2(fds[1], 1) < 0 || dup2(fds[1], 2) < 0)
+        in = want_in ? ifds[0] : open("/dev/null", O_RDONLY);
+        if (in < 0 || (!want_in && in > 2 && fcntl(in, F_SETFD, FD_CLOEXEC) < 0) ||
+            dup2(in, 0) < 0 || dup2(fds[1], 1) < 0 || dup2(split ? efds[1] : fds[1], 2) < 0)
             _exit(127);
         /* dup2 clears FD_CLOEXEC except when source and destination match. */
         if (fcntl(0, F_SETFD, 0) < 0 || fcntl(1, F_SETFD, 0) < 0 || fcntl(2, F_SETFD, 0) < 0)
             _exit(127);
-        if (fds[0] > 2)
-            close(fds[0]);
-        if (fds[1] > 2)
-            close(fds[1]);
-        if (devnull > 2)
-            close(devnull);
+        /* The rest close on exec. */
         if (cwd && chdir(cwd) != 0) {
             static const char msg[] = "pytte: cannot enter the session's directory\n";
             ssize_t w = write(2, msg, sizeof msg - 1);
@@ -135,6 +159,16 @@ pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *co
     close(fds[1]);
     p->out = fds[0];
     fcntl(p->out, F_SETFL, fcntl(p->out, F_GETFL) | O_NONBLOCK); /* our pipe, never a terminal */
+    if (split) {
+        close(efds[1]);
+        p->err = efds[0];
+        fcntl(p->err, F_SETFL, fcntl(p->err, F_GETFL) | O_NONBLOCK);
+    }
+    if (want_in) {
+        close(ifds[0]);
+        p->in = ifds[1];
+        fcntl(p->in, F_SETFL, fcntl(p->in, F_GETFL) | O_NONBLOCK);
+    }
 #if defined(__linux__) && defined(SYS_pidfd_open)
     p->exitfd = (int)syscall(SYS_pidfd_open, p->pid, 0);
     if (p->exitfd >= 0)
@@ -143,10 +177,9 @@ pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *co
     free(env);
     return p;
 fail:
-    if (fds[0] >= 0) {
-        close(fds[0]);
-        close(fds[1]);
-    }
+    close_pair(fds);
+    close_pair(efds);
+    close_pair(ifds);
     free(env);
     free(p);
     return NULL;
@@ -162,17 +195,59 @@ int pt_proc_exit_fd(const pt_proc *p)
     return p->reaped ? -1 : p->exitfd;
 }
 
-long pt_proc_read(pt_proc *p, void *buf, size_t cap)
+int pt_proc_err_fd(const pt_proc *p)
+{
+    return p->err;
+}
+
+int pt_proc_in_fd(const pt_proc *p)
+{
+    return p->in;
+}
+
+static long read_fd(int fd, void *buf, size_t cap)
 {
     ssize_t r;
-    if (p->out < 0)
+    if (fd < 0)
         return 0;
     do
-        r = read(p->out, buf, cap);
+        r = read(fd, buf, cap);
     while (r < 0 && errno == EINTR);
     if (r < 0)
         return errno == EAGAIN || errno == EWOULDBLOCK ? -1 : 0;
     return (long)r;
+}
+
+long pt_proc_read(pt_proc *p, void *buf, size_t cap)
+{
+    return read_fd(p->out, buf, cap);
+}
+
+long pt_proc_read_err(pt_proc *p, void *buf, size_t cap)
+{
+    return read_fd(p->err, buf, cap);
+}
+
+long pt_proc_write(pt_proc *p, const void *buf, size_t n)
+{
+    ssize_t r;
+    if (p->in < 0)
+        return -1;
+    if (!n)
+        return 0;
+    do
+        r = write(p->in, buf, n);
+    while (r < 0 && errno == EINTR);
+    if (r < 0)
+        return errno == EAGAIN || errno == EWOULDBLOCK ? 0 : -1;
+    return (long)r;
+}
+
+void pt_proc_close_in(pt_proc *p)
+{
+    if (p->in >= 0)
+        close(p->in);
+    p->in = -1;
 }
 
 bool pt_proc_reap(pt_proc *p, bool wait, int *status)
@@ -215,5 +290,8 @@ void pt_proc_free(pt_proc *p)
     }
     if (p->out >= 0)
         close(p->out);
+    if (p->err >= 0)
+        close(p->err);
+    pt_proc_close_in(p);
     free(p);
 }

@@ -28,6 +28,7 @@ typedef struct entry {
     pt_str files;            /* epoch after compaction: the files read and modified, as text */
     bool to_model;
     uint32_t kept; /* a copy of this entry of the epoch before (section 12.3) */
+    bool provisional; /* epoch: its materials are settled before the first request */
     pt_str raw;
 } entry;
 
@@ -325,6 +326,10 @@ bool pt_compact_step(pt_agent *a, task *t);
 bool pt_compact_context(pt_agent *a, const task *t, pt_ai_context *out, pt_arena *ar);
 /* The request of a compact task finished (t->live->finished). */
 bool pt_compact_finish(pt_agent *a, task *t);
+/* A provisional epoch (pt_session_cfg.provisional) asks the host for its
+ * materials, then commits them as a "materials" record: true when it
+ * queued something. Run t waits in prepare meanwhile. */
+bool pt_compact_settle(pt_agent *a, task *t);
 /* Abort a compaction: done(aborted) into the open commit; returns the
  * effect to cancel after the commit is queued, or 0. */
 uint32_t pt_compact_abort(pt_agent *a, task *t);

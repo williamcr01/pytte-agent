@@ -181,7 +181,7 @@ static void test_http(void)
     o.request_body = (char *)malloc(4);
     CHECK(o.request_body != NULL);
     memcpy(o.request_body, "a\0bc", 4);
-    sink = (pt_http_sink){&o, head, body, done};
+    sink = (pt_http_sink){&o, head, body, done, NULL};
     memset(&req, 0, sizeof req);
     snprintf(url, sizeof url, "http://127.0.0.1:%d/stream", port);
     req.url = url;

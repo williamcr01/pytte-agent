@@ -202,4 +202,46 @@ int pt_sse_feed(pt_sse *s, const char *p, size_t n, pt_sse_cb cb, void *ud);
 int pt_sse_finish(pt_sse *s, pt_sse_cb cb, void *ud);
 void pt_sse_free(pt_sse *s);
 
+/* ---- base64 ---------------------------------------------------------------
+ * Decode standard or URL-safe base64 (padding and whitespace optional),
+ * appending to out; false on bytes that are not base64. Encode in the
+ * URL-safe alphabet without padding (RFC 4648, section 5). */
+bool pt_base64_decode(pt_str in, pt_buf *out);
+void pt_base64url(pt_buf *out, pt_str bytes);
+
+/* ---- HTML ---------------------------------------------------------------
+ * HTML to Markdown-like text, fed in chunks of any size: scripts, styles
+ * and page chrome (head, nav, footer, forms) are dropped; headings, lists,
+ * links (resolved against base), code blocks and tables keep their shape.
+ * Text is appended to out, which the caller owns. Malformed input never
+ * fails; the output is whatever text it held. */
+typedef struct pt_html {
+    pt_buf *out;
+    pt_allocator al;
+    pt_buf tag, ent, href, base, title;
+    int state;
+    char tag_quote;
+    uint8_t dashes, decl_n;
+    bool in_ent, space, in_link, in_title;
+    uint32_t nl;    /* newlines at the end of out */
+    uint32_t skip;  /* inside dropped elements */
+    uint32_t pre, depth, quote, cell;
+    bool ordered[16];
+    uint32_t counter[16];
+    size_t link_at, link_text; /* where "[" went, and the text after it */
+    char raw_name[16];
+    size_t raw_len, raw_match;
+} pt_html;
+
+void pt_html_init(pt_html *h, pt_allocator al, pt_buf *out, pt_str base);
+void pt_html_feed(pt_html *h, const char *p, size_t n);
+/* End of input: closes what is open and ends out with one newline. */
+void pt_html_finish(pt_html *h);
+/* The <title>, trimmed; valid until pt_html_free. */
+pt_str pt_html_title(const pt_html *h);
+void pt_html_free(pt_html *h);
+/* Resolve ref against an http(s) base (RFC 3986, section 5.2), appended
+ * to out. False when base is not hierarchical or out of memory. */
+bool pt_url_resolve(pt_str base, pt_str ref, pt_buf *out);
+
 #endif

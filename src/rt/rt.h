@@ -61,10 +61,20 @@ typedef struct pt_rt_tool {
     bool no_ask;
 } pt_rt_tool;
 
-/* Copied (strings must outlive rt). False when out of memory. */
+/* Copied (strings must outlive rt, or its removal). False when out of
+ * memory. */
 bool pt_rt_tool_add(pt_rt *rt, const pt_rt_tool *t);
+/* Runs calls of tools that are not registered (yet), when it claims
+ * them: MCP tools whose server is still starting. Its def.name is a
+ * prefix of the names it claims. A gate asks about such calls. */
+void pt_rt_tool_fallback(pt_rt *rt, const pt_rt_tool *t);
+/* Unregister a tool (no call of it may be running). Epochs that froze it
+ * keep their copy; calls of it then find it unavailable. */
+void pt_rt_tool_remove(pt_rt *rt, pt_str name);
+/* Whether a tool of that name is registered. */
+bool pt_rt_tool_has(pt_rt *rt, pt_str name);
 /* bash, bash_poll, read, write, edit (tools_builtin.c); grep, find, ls
- * (tools_search.c). */
+ * (tools_search.c); web_fetch (tools_web.c). */
 bool pt_rt_add_builtins(pt_rt *rt);
 
 /* A bash command that went to the background. command lives until the
@@ -114,6 +124,19 @@ pt_agent *pt_rt_agent(pt_rt *rt);
 /* pt_opts.blob for a store (blob_ud: the pt_store). */
 bool pt_rt_read_blob(void *store, pt_str ref, pt_arena *ar, pt_str *out);
 
+/* HTTP for tools and MCP, pumped by the runtime's loop: like the driver's
+ * start and cancel. The sink's callbacks run inside a step; they must not
+ * start or cancel requests (defer that with a timer at 0). */
+void *pt_rt_http_start(pt_rt *rt, const pt_http_req *req, const pt_http_sink *sink);
+void pt_rt_http_cancel(pt_rt *rt, void *h);
+
+/* While held (counted), the answer to the core's EPOCH_MATERIALS waits: a
+ * new session's first request waits for MCP servers to list their tools.
+ * The last release answers it with the tools registered then. */
+void pt_rt_materials_hold(pt_rt *rt, bool on);
+/* Whether the core waits on a held answer (a prompt is held back). */
+bool pt_rt_materials_waiting(const pt_rt *rt);
+
 /* Event-loop hooks for calls that end later. A timer fires once at `at`
  * (wall-clock ms). A watch fires whenever fd is readable, until removed.
  * Callbacks may add and remove timers and watches. */
@@ -123,6 +146,114 @@ void pt_rt_timer_cancel(pt_rt *rt, uint32_t id);
 bool pt_rt_watch(pt_rt *rt, int fd, pt_rt_fn fn, void *ud);
 void pt_rt_unwatch(pt_rt *rt, int fd);
 int64_t pt_rt_now(pt_rt *rt);
+
+/* ---- MCP: Model Context Protocol servers (mcp.c) ----
+ * Servers start once the runtime's loop runs (pt_rt_step or pt_rt_run, on
+ * the host thread): stdio servers as child processes, remote ones over
+ * Streamable HTTP, with OAuth when they ask for it. Their tools register
+ * as "mcp__<server>__<tool>" while starting; until each server has listed
+ * its tools, failed, or its startup time has passed, the materials of a
+ * provisional epoch wait (pt_rt_materials_hold), so a new session's first
+ * request offers them. Their prompts and resources are listed for the
+ * frontend: prompts become slash commands, resources @-mentions. */
+typedef struct pt_rt_mcp_server {
+    const char *name; /* 1 to 32 of [A-Za-z0-9_-] */
+    /* stdio: the command, found on PATH, and its arguments */
+    const char *command;
+    const char *const *args;
+    uint32_t nargs;
+    const char *const *env; /* "NAME=value" added to its environment */
+    uint32_t nenv;
+    const char *cwd; /* NULL: the session's directory */
+    /* http: the endpoint, and headers sent with every request */
+    const char *url;
+    const pt_header *headers;
+    uint32_t nheaders;
+    /* OAuth: a registered client (else one registers dynamically) and the
+     * scope to ask for; NULL: none */
+    const char *client_id, *client_secret, *scope;
+    uint32_t timeout_s; /* a tool call; 0: 600 */
+    uint32_t startup_s; /* listing its tools at start; 0: 15 */
+    bool trust_hints;   /* the server's readOnlyHint makes a tool read-only */
+} pt_rt_mcp_server;
+
+/* The host's side: what to tell the user, and where OAuth tokens live.
+ * Callbacks run on the host thread, inside a step. */
+typedef struct pt_rt_mcp_host {
+    void *ud;
+    /* A line for the user ("ready: 12 tools", "needs login: ...").
+     * server is NULL for messages about MCP as a whole. */
+    void (*notify)(void *ud, const char *server, const char *msg);
+    /* Open a login page in a browser; NULL: the URL is only notified. */
+    void (*open_url)(void *ud, const char *url);
+    /* The OAuth state saved for a server at url (a JSON object), into out;
+     * false when there is none. Save it (empty: forget it). */
+    bool (*auth_load)(void *ud, const char *server, const char *url, pt_buf *out);
+    void (*auth_save)(void *ud, const char *server, const char *url, pt_str json);
+} pt_rt_mcp_host;
+
+/* Copied, strings and all; servers start at the first step. Called again
+ * it adds servers (host is then ignored), started at once when the loop
+ * runs already; their tools are offered from the next epoch. False when
+ * out of memory. */
+bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_server *servers, uint32_t n);
+
+typedef enum {
+    PT_MCP_STARTING, /* connecting, or listing its tools */
+    PT_MCP_READY,
+    PT_MCP_FAILED, /* error says why; the next call of its tools starts it again */
+    PT_MCP_AUTH,   /* it needs a login (pt_rt_mcp_login) */
+    PT_MCP_STOPPED
+} pt_mcp_state;
+
+typedef struct pt_rt_mcp_info {
+    const char *name, *transport; /* "stdio" or "http" */
+    const char *target;           /* the command line, or the URL */
+    pt_mcp_state state;
+    const char *error; /* the last one, or "" */
+    uint32_t ntools, nprompts, nresources;
+} pt_rt_mcp_info;
+
+/* The servers, in setup order; returns how many (up to max written).
+ * Strings live until the next step. */
+uint32_t pt_rt_mcp_servers(pt_rt *rt, pt_rt_mcp_info *out, uint32_t max);
+
+typedef struct pt_rt_mcp_arg {
+    pt_str name, description;
+    bool required;
+} pt_rt_mcp_arg;
+
+typedef struct pt_rt_mcp_prompt {
+    pt_str server, name, description;
+    const pt_rt_mcp_arg *args;
+    uint32_t nargs;
+} pt_rt_mcp_prompt;
+
+typedef struct pt_rt_mcp_resource {
+    pt_str server, uri, name, description, mime;
+} pt_rt_mcp_resource;
+
+/* The ready servers' prompts and resources, server by server; valid until
+ * the next step. */
+const pt_rt_mcp_prompt *pt_rt_mcp_prompts(pt_rt *rt, uint32_t *n);
+const pt_rt_mcp_resource *pt_rt_mcp_resources(pt_rt *rt, uint32_t *n);
+
+/* An asynchronous answer: error NULL and text, or error. Not called when
+ * the runtime is freed first. */
+typedef void (*pt_rt_mcp_done)(void *ud, const char *error, pt_str text);
+/* A prompt's messages as one text, for the user's turn. args: a JSON
+ * object of strings, or empty. False (fn not called) when the server or
+ * prompt is unknown. */
+bool pt_rt_mcp_get_prompt(pt_rt *rt, pt_str server, pt_str name, pt_str args, pt_rt_mcp_done fn, void *ud);
+/* A resource's contents as text. */
+bool pt_rt_mcp_read(pt_rt *rt, pt_str server, pt_str uri, pt_rt_mcp_done fn, void *ud);
+/* Log in to a remote server (OAuth in the browser); progress is notified.
+ * False when the server is unknown or not remote. */
+bool pt_rt_mcp_login(pt_rt *rt, pt_str server);
+/* Forget a remote server's tokens (it then needs a login). */
+bool pt_rt_mcp_logout(pt_rt *rt, pt_str server);
+/* Stop and start a server again. */
+bool pt_rt_mcp_restart(pt_rt *rt, pt_str server);
 
 /* ---- prompt files and skills (sections 14.1 and 14.2) ----
  * Looked up in four roots, later ones winning: ~/.agents and the user's
@@ -188,6 +319,9 @@ bool pt_rt_allow(pt_rt *rt, pt_str tool, pt_str prefix);
 /* The first string argument of a call ("ls -la", "src/a.c"), or empty;
  * allocated in a. */
 pt_str pt_rt_gist(pt_str args, pt_arena *a);
+/* The host of a URL ("docs.python.org", "[::1]"), or empty. web_fetch's
+ * allow rules name hosts: "allow web_fetch docs.python.org". */
+pt_str pt_rt_url_host(pt_str url);
 
 typedef enum {
     PT_RT_IDLE,    /* nothing left to do */

@@ -27,10 +27,40 @@ bool pt_rt_tool_add(pt_rt *rt, const pt_rt_tool *t)
     return true;
 }
 
+void pt_rt_tool_remove(pt_rt *rt, pt_str name)
+{
+    uint32_t i, k;
+    for (i = 0; i < rt->ntools; i++)
+        if (pt_str_eq(rt->tools[i].def.name, name)) {
+            /* keep the order: the tools array is what the model sees */
+            memmove(&rt->tools[i], &rt->tools[i + 1], (rt->ntools - i - 1) * sizeof *rt->tools);
+            memmove(&rt->defs[i], &rt->defs[i + 1], (rt->ntools - i - 1) * sizeof *rt->defs);
+            rt->ntools--;
+            for (k = 0; k < rt->ncalls; k++)
+                if (rt->calls[k].tool > i && rt->calls[k].tool != RT_FALLBACK)
+                    rt->calls[k].tool--;
+            return;
+        }
+}
+
+bool pt_rt_tool_has(pt_rt *rt, pt_str name)
+{
+    uint32_t i;
+    for (i = 0; i < rt->ntools; i++)
+        if (pt_str_eq(rt->tools[i].def.name, name))
+            return true;
+    return false;
+}
+
 const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n)
 {
     *n = rt->ntools;
     return rt->defs;
+}
+
+void pt_rt_tool_fallback(pt_rt *rt, const pt_rt_tool *t)
+{
+    rt->fallback = *t;
 }
 
 static int find_tool(pt_rt *rt, pt_str name)
@@ -40,6 +70,18 @@ static int find_tool(pt_rt *rt, pt_str name)
         if (pt_str_eq(rt->tools[i].def.name, name))
             return (int)i;
     return -1;
+}
+
+/* An unregistered tool the fallback claims. */
+static bool fallback_claims(pt_rt *rt, pt_str name)
+{
+    return rt->fallback.def.name.n && rt->fallback.run && pt_str_starts(name, rt->fallback.def.name) &&
+           name.n > rt->fallback.def.name.n;
+}
+
+static pt_rt_tool *tool_of(pt_rt *rt, uint32_t k)
+{
+    return k == RT_FALLBACK ? &rt->fallback : &rt->tools[k];
 }
 
 /* ---- permissions ---- */
@@ -118,7 +160,14 @@ static bool allowed(pt_rt *rt, pt_str name, pt_str gist)
         pt_str p = pt_strz(rt->rules[i].prefix);
         if (!pt_str_eqz(name, rt->rules[i].tool))
             continue;
-        if (!p.n || (plain && pt_str_starts(gist, p) && (gist.n == p.n || gist.p[p.n] == ' ')))
+        if (!p.n)
+            return true;
+        if (pt_str_eqz(name, "web_fetch")) { /* by host: the URL is the gist */
+            if (pt_str_ieq(pt_rt_url_host(gist), p))
+                return true;
+            continue;
+        }
+        if (plain && pt_str_starts(gist, p) && (gist.n == p.n || gist.p[p.n] == ' '))
             return true;
     }
     return false;
@@ -133,7 +182,16 @@ void pt_rt_gate(pt_rt *rt, const pt_fx *fx)
     gist = pt_rt_gist(fx->args, &rt->ar);
     memset(&g, 0, sizeof g);
     g.kind = PT_GATE_ALLOW;
-    if (k < 0) {
+    if (k < 0 && fallback_claims(rt, fx->name)) {
+        /* not listed yet: it may change things */
+        if (rt->perm == PT_PERM_READ_ONLY) {
+            g.kind = PT_GATE_DENY;
+            g.text = PT_S("pytte runs in read-only mode: only tools that change nothing run");
+        } else if (rt->perm != PT_PERM_AUTO && !allowed(rt, fx->name, gist)) {
+            g.kind = PT_GATE_ASK;
+            g.text = gist;
+        }
+    } else if (k < 0) {
         /* allow: an unknown tool fails when it runs */
     } else if (rt->perm == PT_PERM_READ_ONLY) {
         /* Only tools that change nothing; allow rules do not apply. */
@@ -166,8 +224,11 @@ static rt_call *find_call(pt_rt *rt, uint32_t fx)
 void pt_rt_run_tool(pt_rt *rt, const pt_fx *fx)
 {
     int k = find_tool(rt, fx->name);
+    uint32_t idx = (uint32_t)k;
     rt_call *c;
-    if (k < 0) {
+    if (k < 0 && fallback_claims(rt, fx->name))
+        idx = RT_FALLBACK;
+    else if (k < 0) {
         pt_tool_result r;
         memset(&r, 0, sizeof r);
         r.content = PT_S("tool_unavailable: this tool is not available here.");
@@ -192,7 +253,7 @@ void pt_rt_run_tool(pt_rt *rt, const pt_fx *fx)
     }
     rt->ncalls++;
     c->fx = fx->id;
-    c->tool = (uint32_t)k;
+    c->tool = idx;
     c->started = pt_rt_now(rt);
     c->total = 0;
     c->blob = NULL;
@@ -201,14 +262,15 @@ void pt_rt_run_tool(pt_rt *rt, const pt_fx *fx)
     c->head.oom = c->tail.oom = false;
     pt_buf_reset(&c->head);
     pt_buf_reset(&c->tail);
-    rt->tools[k].run(rt->tools[k].ud, rt, fx);
+    tool_of(rt, idx)->run(tool_of(rt, idx)->ud, rt, fx);
 }
 
 void pt_rt_cancel_tool(pt_rt *rt, uint32_t fx)
 {
     rt_call *c = find_call(rt, fx);
-    if (c && rt->tools[c->tool].cancel)
-        rt->tools[c->tool].cancel(rt->tools[c->tool].ud, rt, fx);
+    pt_rt_tool *t = c ? tool_of(rt, c->tool) : NULL;
+    if (t && t->cancel)
+        t->cancel(t->ud, rt, fx);
 }
 
 static void blob_abort(pt_rt *rt, rt_call *c)

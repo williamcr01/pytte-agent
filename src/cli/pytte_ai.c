@@ -608,6 +608,7 @@ int main(int argc, char **argv)
             sink.head = sink_head;
             sink.body = sink_body;
             sink.done = sink_done;
+            sink.header = NULL;
             h = http->start(http, &req, &sink);
         }
         if (!h) {

@@ -37,6 +37,9 @@ typedef struct rt_watch {
     void *ud;
 } rt_watch;
 
+/* rt_call.tool of a call the fallback runs */
+#define RT_FALLBACK UINT32_MAX
+
 /* A running tool call. Slots past ncalls keep their buffers for reuse. */
 typedef struct rt_call {
     uint32_t fx, tool;
@@ -72,6 +75,7 @@ struct pt_rt {
     pt_rt_tool *tools;
     pt_tool_def *defs;
     uint32_t ntools, tcap;
+    pt_rt_tool fallback; /* def.name: the prefix it claims; empty: none */
     rt_call *calls;
     uint32_t ncalls, ccap, cinit;
     rt_timer *timers;
@@ -97,6 +101,15 @@ struct pt_rt {
     pt_arena skills_ar; /* their strings, until the next scan */
     pt_buf scratch; /* tool results, reused */
     pt_arena ar;    /* one gate or result at a time */
+    uint32_t nhttp; /* requests of tools and MCP (pt_rt_http_start) in flight */
+    /* EPOCH_MATERIALS waits while held (pt_rt_materials_hold) */
+    uint32_t mat_holds;
+    uint32_t mat_fx; /* the held effect; 0: none */
+    pt_buf mat_cur;  /* ...and its epoch's system prompt */
+    void *mcp; /* mcp.c's state */
+    void (*mcp_free)(void *ud);
+    void (*mcp_start)(void *ud); /* on the host thread, at the first step */
+    bool mcp_started;
 };
 
 /* tools.c */
@@ -110,6 +123,17 @@ typedef struct search search;
 search *pt_rt_search_new(pt_rt *rt);
 void pt_rt_search_free(search *s);
 void pt_rt_search_tools(search *s, pt_rt_tool t[3]);
+/* tools_web.c: web_fetch, with its state */
+typedef struct web web;
+web *pt_rt_web_new(pt_rt *rt);
+void pt_rt_web_free(web *w);
+void pt_rt_web_tool(web *w, pt_rt_tool *t);
+/* tools_builtin.c: images by their first bytes (NULL: not one providers
+ * take), and their size in pixels from the header */
+#define PT_RT_IMAGE_MAX 3932160u /* bytes: 5 MB in base64, Anthropic's limit */
+#define PT_RT_IMAGE_SIDE_MAX 8000u
+const char *pt_rt_image_type(const unsigned char *p, size_t n);
+bool pt_rt_image_size(const unsigned char *p, size_t n, const char *mime, uint32_t *w, uint32_t *h);
 /* prompt.c */
 void pt_rt_prompt_free(pt_rt *rt);
 /* Grow a malloc'd array to hold need items (doubling). */

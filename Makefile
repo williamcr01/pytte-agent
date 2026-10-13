@@ -38,12 +38,12 @@ CORE_SRC := $(wildcard src/core/*.c)
 LIB_SRC  := $(BASE_SRC) $(AI_SRC) $(CORE_SRC)
 # Host parts.
 DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/drv/store_memory.c src/drv/worker_posix.c src/drv/proc_posix.c
-RT_SRC   := src/rt/rt.c src/rt/tools.c src/rt/tools_builtin.c src/rt/tools_search.c src/rt/prompt.c
+RT_SRC   := src/rt/rt.c src/rt/tools.c src/rt/tools_builtin.c src/rt/tools_search.c src/rt/tools_web.c src/rt/prompt.c src/rt/mcp.c src/rt/mcp_proto.c src/rt/mcp_oauth.c
 SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
 # The TUI's parts; app.c (the loop) only goes into pytte.
 TUI_SRC  := $(filter-out src/tui/app.c,$(wildcard src/tui/*.c))
-CLI_SRC  := src/cli/config.c src/cli/providers.c
+CLI_SRC  := src/cli/config.c src/cli/providers.c src/cli/mcp_cfg.c
 APP_SRC  := src/tui/app.c src/cli/session.c src/cli/main.c
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
