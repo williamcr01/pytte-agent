@@ -48,7 +48,8 @@ static void test_custom(void)
          "  \"models\": {\"z-model\": {}, \"llama\": {\"name\": \"Llama\", \"images\": true,"
          "                \"cost\": {\"input\": 0.59, \"output\": 0.79}}}},"
          " \"local-llm\": {\"base_url\": \"http://localhost:11434/v1\", \"auth\": \"none\","
-         "  \"models\": [\"qwen3\"]}}");
+         "  \"reasoning\": true, \"efforts\": [\"none\", \"high\"],"
+         "  \"models\": {\"qwen3\": {}, \"deep\": {\"efforts\": [\"max\"]}}}}");
     CHECK_STR(pt_strz(warn), "");
     CHECK(cli_catalog()->nproviders == pt_ai_builtin_catalog()->nproviders + 2);
     CHECK(resolve("groq/llama", &t) && t.known);
@@ -65,6 +66,10 @@ static void test_custom(void)
     CHECK(resolve("groq/unlisted", &t) && !t.known && t.model.context_window == 131072);
     CHECK(resolve("local-llm/qwen3", &t) && t.known && t.provider->auth == PT_AUTH_NONE);
     CHECK(strcmp(t.provider->key_env[0], "LOCAL_LLM_API_KEY") == 0);
+    /* efforts: the model's, else the provider's */
+    CHECK(t.efforts == (PT_EFF_OFF | PT_EFF_HIGH) && pt_ai_effort(&t, PT_REASON_LOW) == PT_REASON_HIGH);
+    CHECK(resolve("local-llm/deep", &t) && t.efforts == PT_EFF_MAX);
+    CHECK(resolve("local-llm/other", &t) && t.efforts == (PT_EFF_OFF | PT_EFF_HIGH));
     /* the built-in ones still resolve */
     CHECK(resolve("anthropic/claude-opus-5-5", &t) && t.known);
     CHECK(resolve("faux/faux", &t) && t.known);
@@ -84,6 +89,8 @@ static void test_bad(void)
     CHECK(strstr(warn, "api is") != NULL);
     load("{\"a/b\": {\"base_url\": \"https://x.test\"}}");
     CHECK(strstr(warn, "letters, digits") != NULL);
+    load("{\"x\": {\"base_url\": \"https://x.test\", \"efforts\": [\"huge\"]}}");
+    CHECK(strstr(warn, "efforts is a list") != NULL);
     load("{\"x\": {\"base_url\": \"https://x.test\", \"bas_url\": 1}}");
     CHECK(strstr(warn, "unknown setting \"bas_url\"") != NULL);
     CHECK(resolve("x/m", &t));
@@ -95,7 +102,11 @@ static const char dev[] =
     "\"claude-opus-4-5\": {\"name\": \"Opus 4.5\", \"tool_call\": true, \"reasoning\": true,"
     "  \"limit\": {\"context\": 200000, \"output\": 64000}, \"cost\": {\"input\": 5, \"output\": 25},"
     "  \"modalities\": {\"input\": [\"text\", \"image\"]}},"
-    "\"claude-opus-4-6\": {\"tool_call\": true, \"reasoning\": true},"
+    "\"claude-opus-4-6\": {\"tool_call\": true, \"reasoning\": true, \"reasoning_options\": ["
+    "  {\"type\": \"effort\", \"values\": [\"low\", \"medium\", \"high\", \"max\", \"default\"]},"
+    "  {\"type\": \"budget_tokens\", \"min\": 1024}]},"
+    "\"claude-toggle\": {\"tool_call\": true, \"reasoning\": true, \"reasoning_options\": ["
+    "  {\"type\": \"toggle\"}, {\"type\": \"effort\", \"values\": [\"low\", \"high\"]}]},"
     "\"claude-opus-5-5\": {\"name\": \"Renamed\", \"tool_call\": true},"
     "\"claude-new-9\": {\"name\": \"Claude New 9\", \"tool_call\": true, \"reasoning\": true,"
     "  \"limit\": {\"context\": 2000000}},"
@@ -107,6 +118,9 @@ static const char openrouter[] =
     "{\"data\": [{\"id\": \"x/y\", \"name\": \"Y\", \"context_length\": 1000,"
     "  \"supported_parameters\": [\"tools\", \"reasoning\"],"
     "  \"pricing\": {\"prompt\": \"0.000003\", \"completion\": \"0.000015\"}},"
+    " {\"id\": \"x/must\", \"supported_parameters\": [\"tools\", \"reasoning\"],"
+    "  \"reasoning\": {\"mandatory\": true, \"supported_efforts\": [\"max\", \"high\"]}},"
+    " {\"id\": \"x/maps\", \"supported_parameters\": [\"tools\", \"reasoning\"], \"reasoning\": {\"mandatory\": false}},"
     " {\"id\": \"x/notools\", \"supported_parameters\": []},"
     " {\"id\": \"x/router\", \"supported_parameters\": [\"tools\"], \"pricing\": {\"prompt\": \"-1\"}}]}";
 
@@ -124,7 +138,7 @@ static void test_convert(void)
     char msg[300];
     pt_buf_init(&out, pt_sys_allocator());
     update(&out, msg, sizeof msg);
-    CHECK_STR(pt_strz(msg), "anthropic 4, openai 0, openrouter 1, groq 1");
+    CHECK_STR(pt_strz(msg), "anthropic 5, openai 0, openrouter 3, groq 1");
     load("{\"groq\": {\"base_url\": \"https://api.groq.com/openai/v1\"}}");
     CHECK_STR(pt_strz(warn), "");
     CHECK(resolve("anthropic/claude-opus-4-5", &t) && t.known);
@@ -137,6 +151,15 @@ static void test_convert(void)
     CHECK(resolve("openrouter/x/y", &t) && t.known && t.model.reasoning && t.model.context_window == 1000);
     CHECK(t.model.cost.input == 3000000 && t.model.cost.output == 15000000);
     CHECK(resolve("openrouter/x/router", &t) && !t.known);
+    /* efforts: what the source lists; toggle and not mandatory allow off */
+    CHECK(resolve("anthropic/claude-opus-4-6", &t) &&
+          t.model.efforts == (PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH | PT_EFF_MAX));
+    CHECK(resolve("anthropic/claude-toggle", &t) && t.model.efforts == (PT_EFF_OFF | PT_EFF_LOW | PT_EFF_HIGH));
+    CHECK(resolve("anthropic/claude-opus-4-5", &t) && t.model.efforts == 0);
+    CHECK(resolve("openrouter/x/must", &t) && t.model.efforts == (PT_EFF_HIGH | PT_EFF_MAX));
+    CHECK(resolve("openrouter/x/maps", &t) &&
+          t.model.efforts == (PT_EFF_OFF | PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH));
+    CHECK(resolve("openrouter/x/y", &t) && t.model.efforts == 0);
     CHECK(!cli_catalog_convert(PT_S("[]"), PT_S("{}"), "", &out, msg, sizeof msg));
     unlink(cache);
     pt_buf_free(&out);

@@ -207,7 +207,7 @@ static void classify_error(int status, pt_str body, pt_ai_error *out, pt_arena *
         out->cls = lookup_class(pt_json_gets(d, "class", a));
 }
 
-const pt_api_vt pt_api_faux = {"faux", build, sizeof(state), feed, finish, classify_error, {0}, 0};
+const pt_api_vt pt_api_faux = {"faux", build, sizeof(state), feed, finish, classify_error, {0}, 0x7f /* every level */, 0};
 
 /* ---- server ---- */
 

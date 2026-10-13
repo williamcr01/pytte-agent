@@ -119,13 +119,15 @@ Then `pytte -m groq/llama-3.3-70b-versatile`. A provider takes `base_url`
 (a variable name or a list of up to 4; by default the id in capitals plus
 `_API_KEY`, so `GROQ_API_KEY`; `/login groq` works too), `headers` (up to
 4), `name`, defaults for unlisted models (`context_window`, 128000 unless
-set; `max_tokens`; `reasoning`), and `compat` for servers that differ from
+set; `max_tokens`; `reasoning`, which must be true for effort to be sent;
+`efforts`, the levels its models take, e.g. `["none", "low", "high"]`;
+by default `low`, `medium` and `high`), and `compat` for servers that differ from
 OpenAI: `max_tokens_field` (`max_tokens` or `max_completion_tokens`),
 `system_role` (`system` or `developer`), `reasoning_param` (`none`,
 `effort` or `openrouter`), and the booleans `stream_usage`,
 `reasoning_delta`, `parallel_tool_calls` and `mid_conversation_system`.
 `models` is a list of IDs, or an object of ID to `name`, `context_window`,
-`max_tokens`, `reasoning`, `images` and `cost` (`input`, `output`,
+`max_tokens`, `reasoning`, `efforts`, `images` and `cost` (`input`, `output`,
 `cache_read`, `cache_write`: dollars per million tokens). Any model ID
 works with the provider's defaults; listed models show up in `/model` and
 `/usage` costs.
@@ -144,8 +146,12 @@ session already shows its system prompt, `AGENTS.md` files, skills index and
 tools. Compaction goes by the same number. Effort starts at `medium`;
 `/effort <level>` changes it for this session, and `/settings reasoning <level>`
 changes it now and saves it for future sessions. The levels are `off`,
-`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. `off` requests disabled
-reasoning where the model supports it. `/quit` prints a dimmed `pytte -r <id>`
+`minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The catalog knows
+which levels each model takes (from models.dev and OpenRouter); a level the
+model does not take becomes the next higher one it does, else the next lower,
+and the footer says so (`max→high`). The chosen level stays chosen: switching
+back to a model that takes it uses it again. `off` disables reasoning only
+where the model can turn it off. `/quit` prints a dimmed `pytte -r <id>`
 command and keeps the session available to resume, even if it has no messages.
 
 Sessions live in `$XDG_STATE_HOME/pytte/sessions/<id>/` (by default

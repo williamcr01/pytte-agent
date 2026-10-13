@@ -11,8 +11,8 @@ const char *pt_openai_effort(pt_reasoning r)
     case PT_REASON_MINIMAL: return "minimal";
     case PT_REASON_LOW: return "low";
     case PT_REASON_MEDIUM: return "medium";
-    case PT_REASON_XHIGH:
-    case PT_REASON_MAX: return "xhigh";
+    case PT_REASON_XHIGH: return "xhigh";
+    case PT_REASON_MAX: return "max";
     case PT_REASON_DEFAULT:
     case PT_REASON_HIGH:
     default: return "high";
@@ -132,6 +132,7 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     pt_buf b;
     pt_jw w;
     uint32_t i, max_tokens;
+    pt_reasoning effort;
     const char *sysrole = t->compat.system_role == PT_SYSROLE_DEVELOPER ? "developer" : "system";
     pt_buf_init(&b, a->al);
     pt_jw_init(&w, &b);
@@ -153,23 +154,23 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
                           : "max_tokens");
         pt_jw_uint(&w, max_tokens);
     }
-    /* Reasoning is only asked for when the caller chose a level: servers
-     * have their own defaults and some models reject the parameter. */
-    if (o->reasoning != PT_REASON_DEFAULT) {
+    /* Reasoning is only asked of reasoning models, and only when the caller
+     * chose a level: servers have their own defaults and some models reject
+     * the parameter. */
+    effort = pt_ai_effort(t, o->reasoning);
+    if (t->model.reasoning && effort != PT_REASON_DEFAULT) {
         if (t->compat.reasoning_param == PT_RPARAM_EFFORT) {
             pt_jw_key(&w, "reasoning_effort");
-            pt_jw_strz(&w, pt_openai_effort(o->reasoning));
+            pt_jw_strz(&w, pt_openai_effort(effort));
         } else if (t->compat.reasoning_param == PT_RPARAM_OPENROUTER) {
             pt_jw_key(&w, "reasoning");
             pt_jw_obj(&w);
-            if (o->reasoning == PT_REASON_OFF) {
+            if (effort == PT_REASON_OFF) {
                 pt_jw_key(&w, "enabled");
                 pt_jw_bool(&w, false);
             } else {
                 pt_jw_key(&w, "effort");
-                pt_jw_strz(&w, o->reasoning == PT_REASON_XHIGH || o->reasoning == PT_REASON_MAX
-                                   ? "high"
-                                   : pt_openai_effort(o->reasoning));
+                pt_jw_strz(&w, pt_openai_effort(effort));
             }
             pt_jw_obj_end(&w);
         }
@@ -509,5 +510,6 @@ const pt_api_vt pt_api_openai = {
      .reasoning_delta = PT_YES,
      .mid_conversation_system = PT_YES,
      .parallel_tool_calls = PT_NO},
+    PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH,
     40,
 };

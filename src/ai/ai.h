@@ -28,6 +28,7 @@ struct pt_api_vt {
     void (*classify_error)(int status, pt_str body, pt_ai_error *out, pt_arena *a);
 
     pt_compat defaults;
+    uint8_t efforts;      /* PT_EFF_* of models nothing else describes */
     uint32_t tool_id_max; /* longest tool call ID the API accepts; 0 = any */
 };
 

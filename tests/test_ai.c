@@ -290,14 +290,93 @@ static void test_openai_request(void)
     CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
     CHECK_STR(jget(body_of(&r), "reasoning_effort"), "low");
 
+    /* a model without reasoning is asked for none */
+    t = target("openai/gpt-4.1");
+    CHECK(pt_ai_retarget(&t, PT_S("openai-completions")));
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK(pt_json_get(body_of(&r), "reasoning_effort") == NULL);
+
     t = target("openrouter/acme/unlisted-1");
     o.reasoning = PT_REASON_HIGH;
     CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
     b = body_of(&r);
     CHECK(strcmp(r.url, "https://openrouter.ai/api/v1/chat/completions") == 0);
     CHECK(header(&r, "X-Title") != NULL);
-    CHECK_STR(jget(b, "reasoning.effort"), "high");
+    CHECK(pt_json_get(b, "reasoning") == NULL); /* not known to reason */
     CHECK(pt_json_get(b, "max_tokens") == NULL); /* unknown model: omitted */
+}
+
+/* Effort per model: the level asked for when the model takes it, else the
+ * next higher one it takes, else the next lower. */
+static void test_efforts(void)
+{
+    pt_ai_target t;
+    pt_ai_context c = conversation();
+    pt_ai_opts o;
+    pt_credentials cred = {PT_S("sk-test")};
+    pt_http_req r;
+    pt_json *b;
+    memset(&o, 0, sizeof o);
+
+    /* the clamp */
+    t = target("openai/gpt-5"); /* minimal, low, medium, high */
+    CHECK(pt_ai_effort(&t, PT_REASON_OFF) == PT_REASON_MINIMAL);
+    CHECK(pt_ai_effort(&t, PT_REASON_MINIMAL) == PT_REASON_MINIMAL);
+    CHECK(pt_ai_effort(&t, PT_REASON_MAX) == PT_REASON_HIGH);
+    CHECK(pt_ai_effort(&t, PT_REASON_DEFAULT) == PT_REASON_DEFAULT);
+    t = target("anthropic/claude-sonnet-4-6"); /* low, medium, high, max */
+    CHECK(pt_ai_effort(&t, PT_REASON_XHIGH) == PT_REASON_MAX);
+    CHECK(pt_ai_effort(&t, PT_REASON_MINIMAL) == PT_REASON_LOW);
+    t = target("openai/gpt-5-pro"); /* high only */
+    CHECK(pt_ai_effort(&t, PT_REASON_LOW) == PT_REASON_HIGH);
+    CHECK(pt_ai_effort(&t, PT_REASON_MAX) == PT_REASON_HIGH);
+    t = target("openai/gpt-4.1"); /* no reasoning: nothing to move */
+    CHECK(pt_ai_effort(&t, PT_REASON_MAX) == PT_REASON_MAX);
+    /* unknown: the API's set, low to high */
+    t = target("openrouter/google/gemini-2.5-pro");
+    CHECK(t.model.efforts == 0 && t.efforts == (PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH));
+    CHECK(pt_ai_effort(&t, PT_REASON_MINIMAL) == PT_REASON_LOW);
+    CHECK(pt_ai_effort(&t, PT_REASON_MAX) == PT_REASON_HIGH);
+
+    /* Anthropic: off only where thinking can be turned off */
+    t = target("anthropic/claude-opus-5-5");
+    o.reasoning = PT_REASON_OFF;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "thinking.type"), "adaptive");
+    CHECK_STR(jget(b, "output_config.effort"), "low");
+    t = target("anthropic/claude-haiku-5-5");
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "thinking.type"), "disabled");
+    CHECK(pt_json_get(b, "output_config") == NULL);
+    t = target("anthropic/claude-sonnet-4-6");
+    o.reasoning = PT_REASON_XHIGH;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "output_config.effort"), "max");
+
+    /* Responses: none, and max where the model takes it */
+    t = target("openai/gpt-5.6");
+    o.reasoning = PT_REASON_OFF;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "reasoning.effort"), "none");
+    o.reasoning = PT_REASON_MAX;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "reasoning.effort"), "max");
+    t = target("openai/gpt-5");
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "reasoning.effort"), "high");
+
+    /* OpenRouter: per model, no longer capped at high */
+    t = target("openrouter/anthropic/claude-opus-5");
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "reasoning.effort"), "max");
+    o.reasoning = PT_REASON_OFF;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "reasoning.enabled"), "false");
+    t = target("openrouter/anthropic/claude-opus-5.5"); /* reasoning is mandatory */
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "reasoning.effort"), "low");
 }
 
 static void test_responses_request(void)
@@ -689,6 +768,7 @@ int main(void)
     RUN(test_anthropic_folding_and_bad_args);
     RUN(test_openai_request);
     RUN(test_responses_request);
+    RUN(test_efforts);
     RUN(test_images);
     RUN(test_tool_ids);
     RUN(test_cross_provider_view);

@@ -5,10 +5,11 @@
 
 /* ---- request ---- */
 
+/* The level is pt_ai_effort's, so the model takes it. Minimal, which no
+ * Claude model lists, only comes from a provider's own efforts setting. */
 static const char *effort(pt_reasoning r)
 {
     switch (r) {
-    case PT_REASON_OFF:     /* thinking cannot be turned off on current models */
     case PT_REASON_MINIMAL:
     case PT_REASON_LOW: return "low";
     case PT_REASON_MEDIUM: return "medium";
@@ -128,7 +129,11 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
         pt_jw_key(&w, "cache_control");
         pt_jw_raw(&w, PT_S("{\"type\":\"ephemeral\"}"));
     }
-    if (t->model.reasoning) {
+    if (t->model.reasoning && pt_ai_effort(t, o->reasoning) == PT_REASON_OFF) {
+        /* only models that can turn thinking off get here */
+        pt_jw_key(&w, "thinking");
+        pt_jw_raw(&w, PT_S("{\"type\":\"disabled\"}"));
+    } else if (t->model.reasoning) {
         /* Always explicit: on older models omitting it means no thinking.
          * A summary trails the model, and the answer waits for it to end:
          * unread, it only delays the first text. Without display, current
@@ -140,7 +145,7 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
         pt_jw_key(&w, "output_config");
         pt_jw_obj(&w);
         pt_jw_key(&w, "effort");
-        pt_jw_strz(&w, effort(o->reasoning));
+        pt_jw_strz(&w, effort(pt_ai_effort(t, o->reasoning)));
         pt_jw_obj_end(&w);
     }
     if (t->compat.fallbacks == PT_YES) {
@@ -493,5 +498,6 @@ static void classify_error(int status, pt_str body, pt_ai_error *out, pt_arena *
 const pt_api_vt pt_api_anthropic = {
     "anthropic-messages", build, sizeof(state), feed, finish, classify_error,
     {.thinking_display = PT_NO, .mid_conversation_system = PT_NO, .fallbacks = PT_NO},
+    PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH,
     64,
 };

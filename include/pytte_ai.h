@@ -112,6 +112,20 @@ typedef struct pt_compat {
     uint8_t thinking_display;        /* anthropic: "summarized" thinking */
 } pt_compat;
 
+/* Reasoning levels a model takes, one bit per pt_reasoning level from off
+ * to max (PT_EFF_LOW == 1 << (PT_REASON_LOW - PT_REASON_OFF)). 0 means
+ * unknown: the provider's set, else the API's. A level a model does not
+ * take is moved to the nearest one it does (pt_ai_effort). */
+enum {
+    PT_EFF_OFF = 1,
+    PT_EFF_MINIMAL = 2,
+    PT_EFF_LOW = 4,
+    PT_EFF_MEDIUM = 8,
+    PT_EFF_HIGH = 16,
+    PT_EFF_XHIGH = 32,
+    PT_EFF_MAX = 64
+};
+
 typedef struct pt_cost { /* micro-dollars per million tokens */
     uint64_t input, output, cache_read, cache_write;
 } pt_cost;
@@ -125,6 +139,7 @@ typedef struct pt_provider {
     pt_compat compat;
     uint32_t context_window, max_tokens; /* defaults for models not in the catalog */
     bool reasoning;             /* default for models not in the catalog */
+    uint8_t efforts;            /* PT_EFF_*: for models whose own set is unknown; 0: the API's */
 } pt_provider;
 
 typedef struct pt_model {
@@ -134,6 +149,7 @@ typedef struct pt_model {
     bool reasoning, images;
     pt_cost cost;
     pt_compat compat;
+    uint8_t efforts; /* PT_EFF_*; 0 = unknown */
 } pt_model;
 
 /* A catalog's model. It holds no pointers, so a static table of them needs
@@ -148,6 +164,7 @@ typedef struct pt_model_entry {
     uint32_t context_window, max_tokens; /* 0 = unknown */
     pt_cost cost;
     pt_compat compat;
+    uint8_t efforts; /* PT_EFF_*; 0 = unknown (fits in the padding) */
 } pt_model_entry;
 
 typedef struct pt_ai_catalog {
@@ -169,6 +186,7 @@ typedef struct pt_ai_target {
     pt_model model; /* from the catalog, or synthesized from provider defaults */
     const pt_api_vt *api;
     pt_compat compat; /* resolved: API defaults < provider < model */
+    uint8_t efforts;  /* resolved PT_EFF_*: the model's, else the provider's, else the API's */
     bool known;       /* model is in the catalog */
 } pt_ai_target;
 
@@ -209,6 +227,10 @@ typedef enum {
 
 bool pt_reasoning_parse(pt_str s, pt_reasoning *out);
 const char *pt_reasoning_name(pt_reasoning r);
+/* The level a request to t uses for want: want when the model takes it,
+ * else the next higher level it takes, else the next lower. Default stays
+ * default; a model without reasoning gets want back (it sends none). */
+pt_reasoning pt_ai_effort(const pt_ai_target *t, pt_reasoning want);
 
 typedef struct pt_ai_opts {
     uint32_t max_tokens;     /* 0: model maximum, clamped to what fits the context */

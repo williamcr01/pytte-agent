@@ -231,6 +231,22 @@ static void check_model(const char *ref, const char *src)
     }
 }
 
+/* Say on stderr when the model does not take the chosen effort level and
+ * requests use another. */
+static void effort_note(const char *ref, pt_reasoning want)
+{
+    pt_arena a;
+    pt_ai_target t;
+    const char *why;
+    if (!ref || !*ref)
+        return;
+    pt_arena_init(&a, pt_sys_allocator(), 0);
+    if (pt_ai_resolve(cli_catalog(), pt_strz(ref), &t, &a, &why) && pt_ai_effort(&t, want) != want)
+        fprintf(stderr, "pytte: %s takes no effort %s; using %s\n", ref, pt_reasoning_name(want),
+                pt_reasoning_name(pt_ai_effort(&t, want)));
+    pt_arena_free(&a);
+}
+
 /* Model: a flag, else the environment; config files set new sessions'
  * defaults (an existing one keeps its last model). Effort: a flag, else
  * the layered settings, starting at an explicit medium. */
@@ -567,6 +583,7 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
     if (!id && !prompt.n && !o->cmd_approve)
         die("no prompt (give one as an argument or on stdin)", NULL);
     apply_config(o, cfg, id == NULL);
+    effort_note(o->c.model, o->c.reasoning);
     o->c.stop = should_stop;
     if ((rc = cli_session_open(&s, &o->c, id, on_event, &u, err, sizeof err)) != 0) {
         fprintf(stderr, "pytte: %s\n", err);

@@ -90,6 +90,35 @@ static bool get_cost(const pt_json *v, uint64_t *out)
     return true;
 }
 
+/* A level name ("none" or "off" for off) as its PT_EFF_* bit; 0 for any
+ * other string. */
+static uint8_t effort_bit(pt_str name)
+{
+    pt_reasoning r;
+    if (pt_str_eqz(name, "none"))
+        return PT_EFF_OFF;
+    if (!pt_reasoning_parse(name, &r) || r == PT_REASON_DEFAULT)
+        return 0;
+    return (uint8_t)(1u << (r - PT_REASON_OFF));
+}
+
+/* An array of level names as PT_EFF_* bits. Unknown names are skipped
+ * (sources list "default"); strict says they are an error. */
+static bool effort_bits(const pt_json *arr, bool strict, uint8_t *out, pt_arena *ar)
+{
+    const pt_json *x;
+    *out = 0;
+    if (!pt_json_is(arr, PT_J_ARR))
+        return false;
+    for (x = arr->child; x; x = x->next) {
+        uint8_t bit = pt_json_is(x, PT_J_STR) ? effort_bit(pt_json_str(x, ar)) : 0;
+        if (!bit && strict)
+            return false;
+        *out |= bit;
+    }
+    return !strict || *out;
+}
+
 /* Members of obj not in the NULL-ended list, reported as typos. */
 static void unknown_keys(loader *L, const char *where, const pt_json *obj, const char *const *known)
 {
@@ -122,7 +151,8 @@ static void put_fit(char *dst, size_t cap, pt_str s)
 static bool model_row(loader *L, const char *where, uint8_t prov, const pt_provider *p, pt_str id,
                       const pt_json *v, pt_model_entry *e)
 {
-    static const char *const known[] = {"name", "context_window", "max_tokens", "reasoning", "images", "cost", NULL};
+    static const char *const known[] = {"name",   "context_window", "max_tokens", "reasoning",
+                                        "images", "cost",           "efforts",    NULL};
     static const char *const costs[] = {"input", "output", "cache_read", "cache_write", NULL};
     const pt_json *x;
     char idz[PT_MODEL_ID_CAP + 8];
@@ -152,6 +182,11 @@ static bool model_row(loader *L, const char *where, uint8_t prov, const pt_provi
         ((x = pt_json_get(v, "reasoning")) && !get_bool(x, &e->reasoning)) ||
         ((x = pt_json_get(v, "images")) && !get_bool(x, &e->images))) {
         warnf(L, "%s: model \"%s\" has a value of the wrong type; skipped", where, idz);
+        return false;
+    }
+    if ((x = pt_json_get(v, "efforts")) && !effort_bits(x, true, &e->efforts, &L->tmp)) {
+        warnf(L, "%s: model \"%s\": efforts is a list of off, minimal, low, medium, high, xhigh, max; skipped",
+              where, idz);
         return false;
     }
     if ((x = pt_json_get(v, "cost"))) {
@@ -303,8 +338,9 @@ bad:
 /* A provider from config.json. False (with a warning) skips it. */
 static bool parse_provider(loader *L, pt_str id, const pt_json *v, pt_provider *p, const pt_json **models)
 {
-    static const char *const known[] = {"name", "base_url", "api", "auth", "key_env", "headers", "context_window",
-                                        "max_tokens", "reasoning", "compat", "models", NULL};
+    static const char *const known[] = {"name",       "base_url",  "api",     "auth",   "key_env", "headers",
+                                        "context_window", "max_tokens", "reasoning", "efforts", "compat", "models",
+                                        NULL};
     static const char *const auths[] = {"bearer", "x-api-key", "none", NULL};
     const pt_ai_catalog *b = pt_ai_builtin_catalog();
     char where[120];
@@ -404,6 +440,10 @@ static bool parse_provider(loader *L, pt_str id, const pt_json *v, pt_provider *
         warnf(L, "%s: context_window and max_tokens are numbers, reasoning true or false; skipped", where, NULL);
         return false;
     }
+    if ((x = pt_json_get(v, "efforts")) && !effort_bits(x, true, &p->efforts, &L->tmp)) {
+        warnf(L, "%s: efforts is a list of off, minimal, low, medium, high, xhigh, max; skipped", where, NULL);
+        return false;
+    }
     if ((x = pt_json_get(v, "compat")) && !parse_compat(L, where, x, &p->compat))
         return false;
     *models = pt_json_get(v, "models");
@@ -433,7 +473,7 @@ static const pt_model_entry *builtin_rows(uint8_t prov, uint32_t *n)
  * since the file is replaced atomically. */
 #define CAT_MAGIC "PYTTECAT"
 /* Bump CAT_VERSION when pt_model_entry changes without changing size. */
-enum { CAT_VERSION = 1, CAT_ORDER = 0x01020304 };
+enum { CAT_VERSION = 2, CAT_ORDER = 0x01020304 };
 
 typedef struct cat_head {
     char magic[8];
@@ -680,6 +720,39 @@ static bool has(const pt_json *arr, const char *z, pt_arena *ar)
     return false;
 }
 
+/* The rules of scripts/gen_models.py (efforts_dev, efforts_openrouter):
+ * a level counts only when the source lists it; no list is unknown (0). */
+static uint8_t dev_efforts(const pt_json *options, pt_arena *ar)
+{
+    const pt_json *o;
+    uint8_t bits = 0, b;
+    bool toggle = false;
+    for (o = pt_json_is(options, PT_J_ARR) ? options->child : NULL; o; o = o->next) {
+        pt_str type = pt_json_gets(o, "type", ar);
+        if (pt_str_eqz(type, "effort") && effort_bits(pt_json_get(o, "values"), false, &b, ar))
+            bits |= b;
+        toggle |= pt_str_eqz(type, "toggle");
+    }
+    if (!(bits & ~PT_EFF_OFF)) /* nothing but off (or "default"): unknown */
+        return 0;
+    return toggle ? (uint8_t)(bits | PT_EFF_OFF) : bits;
+}
+
+static uint8_t openrouter_efforts(const pt_json *reasoning, pt_arena *ar)
+{
+    bool mandatory = pt_json_truthy(pt_json_get(reasoning, "mandatory"));
+    uint8_t bits = 0;
+    if (!pt_json_is(reasoning, PT_J_OBJ))
+        return 0;
+    effort_bits(pt_json_get(reasoning, "supported_efforts"), false, &bits, ar);
+    if (!bits) { /* OpenRouter maps the level itself */
+        if (mandatory)
+            return 0;
+        bits = PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH;
+    }
+    return mandatory ? bits : (uint8_t)(bits | PT_EFF_OFF);
+}
+
 /* models.dev's models of one provider, sorted, into rows. */
 static void from_models_dev(pt_buf *rows, const pt_json *dev, const char *provider, pt_arena *ar)
 {
@@ -703,6 +776,7 @@ static void from_models_dev(pt_buf *rows, const pt_json *dev, const char *provid
             get_cost(x, &e.cost.cache_read);
         if ((x = pt_json_get(cost, "cache_write")))
             get_cost(x, &e.cost.cache_write);
+        e.efforts = dev_efforts(pt_json_get(m, "reasoning_options"), ar);
         pt_buf_put(rows, &e, sizeof e);
     }
     settle(rows, 0);
@@ -739,6 +813,7 @@ static void from_openrouter(pt_buf *rows, const pt_json *or, pt_arena *ar)
         e.cost.output = price(pt_json_gets(pricing, "completion", ar));
         e.cost.cache_read = price(pt_json_gets(pricing, "input_cache_read", ar));
         e.cost.cache_write = price(pt_json_gets(pricing, "input_cache_write", ar));
+        e.efforts = openrouter_efforts(pt_json_get(m, "reasoning"), ar);
         pt_buf_put(rows, &e, sizeof e);
     }
     settle(rows, 0);

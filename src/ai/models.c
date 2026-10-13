@@ -32,6 +32,11 @@ static int cmp_id(pt_str s, const char *z)
     return i < s.n ? 1 : z[i] ? -1 : 0;
 }
 
+static uint8_t efforts(const pt_ai_target *t)
+{
+    return t->model.efforts ? t->model.efforts : t->provider->efforts ? t->provider->efforts : t->api->efforts;
+}
+
 bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_arena *a,
                    const char **why)
 {
@@ -90,6 +95,7 @@ bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_a
         d->images = m->images;
         d->cost = m->cost;
         d->compat = m->compat;
+        d->efforts = m->efforts;
     } else {
         /* Not in the catalog: allowed, with the provider's defaults. */
         pt_model *d = &out->model;
@@ -108,6 +114,7 @@ bool pt_ai_resolve(const pt_ai_catalog *cat, pt_str ref, pt_ai_target *out, pt_a
         return false;
     }
     out->compat = merge(m ? &m->compat : &none, &p->compat, &out->api->defaults);
+    out->efforts = efforts(out);
     return !a->oom;
 }
 
@@ -119,5 +126,26 @@ bool pt_ai_retarget(pt_ai_target *t, pt_str api_id)
     t->api = api;
     t->model.api = api->id;
     t->compat = merge(&t->model.compat, &t->provider->compat, &api->defaults);
+    t->efforts = efforts(t);
     return true;
+}
+
+/* PT_EFF_* bits follow pt_reasoning. */
+typedef char eff_order[PT_EFF_LOW == 1 << (PT_REASON_LOW - PT_REASON_OFF) &&
+                               PT_EFF_MAX == 1 << (PT_REASON_MAX - PT_REASON_OFF)
+                           ? 1
+                           : -1];
+
+pt_reasoning pt_ai_effort(const pt_ai_target *t, pt_reasoning want)
+{
+    int r;
+    if (want < PT_REASON_OFF || want > PT_REASON_MAX || !t->model.reasoning || !t->efforts)
+        return want;
+    for (r = want; r <= PT_REASON_MAX; r++) /* at least what was asked for */
+        if (t->efforts & 1u << (r - PT_REASON_OFF))
+            return (pt_reasoning)r;
+    for (r = want - 1; r >= PT_REASON_OFF; r--)
+        if (t->efforts & 1u << (r - PT_REASON_OFF))
+            return (pt_reasoning)r;
+    return want;
 }

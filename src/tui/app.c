@@ -206,6 +206,8 @@ typedef struct app {
     char ask_prefix[128]; /* what "allow this session" allows: "git", or "" for the whole tool */
     uint64_t ctx_used;
     uint32_t ctx_window;
+    uint8_t efforts; /* the model's levels (PT_EFF_*, resolved) */
+    bool reasons;    /* the model reasons: effort means something */
     uint32_t nbg; /* background commands still running, in the footer */
     queued_input *queue;
     uint32_t nq, qcap;
@@ -1222,6 +1224,27 @@ static pt_str item_label(const app *a, int i)
     return (pt_str){a->items_buf.p + a->items[i].at, a->items[i].n};
 }
 
+/* The level requests use: the chosen one, moved to one the model takes. */
+static pt_reasoning effort_used(const app *a, pt_reasoning want)
+{
+    pt_ai_target t;
+    memset(&t, 0, sizeof t);
+    t.model.reasoning = a->reasons;
+    t.efforts = a->efforts;
+    return pt_ai_effort(&t, want);
+}
+
+/* "max", or "max→high" when the model does not take max. */
+static void effort_label(const app *a, char *out, size_t cap)
+{
+    pt_reasoning used = effort_used(a, a->o.reasoning);
+    if (used == a->o.reasoning)
+        snprintf(out, cap, "%s", pt_reasoning_name(used));
+    else
+        snprintf(out, cap, "%s%s%s", pt_reasoning_name(a->o.reasoning), a->ascii ? "->" : "→",
+                 pt_reasoning_name(used));
+}
+
 static void add_models(app *a, pt_str q)
 {
     const pt_ai_catalog *cat = cli_catalog();
@@ -1378,7 +1401,10 @@ static void menu_update(app *a)
         if (pt_str_eqz(cmd, "model")) {
             add_models(a, arg);
         } else if (pt_str_eqz(cmd, "effort")) {
-            add_list(a, levels, sizeof levels / sizeof levels[0], arg);
+            size_t i;
+            for (i = 0; i < sizeof levels / sizeof levels[0]; i++) /* those the model takes */
+                if ((!a->reasons || !a->efforts || a->efforts & 1u << i) && pt_str_starts(pt_strz(levels[i]), arg))
+                    add_item(a, levels[i], strlen(levels[i]), NULL);
         } else if (pt_str_eqz(cmd, "thinking")) {
             add_list(a, th_names, 3, arg);
         } else if (pt_str_eqz(cmd, "login") && pt_str_find(arg, ' ') < 0) {
@@ -1436,7 +1462,7 @@ static void tokens_short(char *out, size_t cap, uint64_t n)
  * or a question is open; or why the run is waiting. */
 static void status_row(app *a, int64_t now, int total, int sel)
 {
-    char line[600];
+    char line[600], eff[40];
     const char *model = strchr(a->model, '/');
     int n;
     pt_buf_reset(&a->tmp);
@@ -1464,7 +1490,8 @@ static void status_row(app *a, int64_t now, int total, int sel)
         pt_buf_putz(&a->tmp, pt_perm_name(a->o.perm));
         pt_buf_putz(&a->tmp, " · ");
         pt_buf_putz(&a->tmp, model ? model + 1 : a->model[0] ? a->model : "no model");
-        n = snprintf(line, sizeof line, " · %s", pt_reasoning_name(a->o.reasoning));
+        effort_label(a, eff, sizeof eff);
+        n = snprintf(line, sizeof line, " · %s", eff);
         if (a->ctx_window) { /* the context used, of the model's window */
             char used[16], all[16];
             tokens_short(used, sizeof used, a->ctx_used);
@@ -2006,9 +2033,14 @@ static void update_model(app *a)
         }
     a->ctx_used = a->open ? pt_context_tokens(a->s.a) : 0;
     a->ctx_window = 0;
+    a->efforts = 0;
+    a->reasons = false;
     pt_arena_reset(&a->ar);
-    if (a->model[0] && pt_ai_resolve(cli_catalog(), pt_strz(a->model), &t, &a->ar, &why))
+    if (a->model[0] && pt_ai_resolve(cli_catalog(), pt_strz(a->model), &t, &a->ar, &why)) {
         a->ctx_window = t.model.context_window;
+        a->efforts = t.efforts;
+        a->reasons = t.model.reasoning;
+    }
 }
 
 static void set_config(app *a)
@@ -2253,7 +2285,7 @@ static void cmd_ps(app *a)
 
 static void cmd_status(app *a)
 {
-    char line[5000], name[CLI_NAME_MAX + 1];
+    char line[5000], name[CLI_NAME_MAX + 1], eff[40];
     pt_str cwd = a->open ? pt_session_cwd(a->s.a) : PT_STR_NULL;
     snprintf(line, sizeof line, "session %s, owned by pid %ld\nstore %s", a->s.id, (long)getpid(), a->s.dir);
     out_z(a, TUI_DIM, line);
@@ -2263,8 +2295,8 @@ static void cmd_status(app *a)
     }
     snprintf(line, sizeof line, "directory %.*s", (int)(cwd.n < 4096 ? cwd.n : 4096), cwd.p ? cwd.p : "");
     out_z(a, TUI_DIM, line);
-    snprintf(line, sizeof line, "model %s · effort %s", a->model[0] ? a->model : "(none)",
-             pt_reasoning_name(a->o.reasoning));
+    effort_label(a, eff, sizeof eff);
+    snprintf(line, sizeof line, "model %s · effort %s", a->model[0] ? a->model : "(none)", eff);
     out_z(a, TUI_DIM, line);
     if (a->ctx_window)
         snprintf(line, sizeof line, "context %llu of %u tokens (%u%%)", (unsigned long long)a->ctx_used, a->ctx_window,
@@ -2437,7 +2469,12 @@ static void run_command(app *a, pt_str line)
             a->o.reasoning = r;
             set_config(a);
         }
-        snprintf(msg, sizeof msg, "%seffort: %s", arg.n ? "switched " : "", pt_reasoning_name(a->o.reasoning));
+        {
+            char eff[40];
+            effort_label(a, eff, sizeof eff);
+            snprintf(msg, sizeof msg, "%seffort: %s%s", arg.n ? "switched " : "", eff,
+                     effort_used(a, a->o.reasoning) != a->o.reasoning ? " (the nearest this model takes)" : "");
+        }
         out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "new")) {
         switch_session(a, NULL);

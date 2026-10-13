@@ -62,7 +62,7 @@ static const pt_provider providers[] = {
  * not listed still works, with its provider's defaults. */
 static const pt_model_entry models[] = {
 #include "models.gen.inc"
-    {PROV_FAUX, "faux", "Faux", true, false, 100000, 4096, {0, 0, 0, 0}, {0}},
+    {PROV_FAUX, "faux", "Faux", true, false, 100000, 4096, {0, 0, 0, 0}, {0}, 0},
 };
 
 static const pt_ai_catalog builtin = {

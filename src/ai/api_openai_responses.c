@@ -70,6 +70,7 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     pt_buf b;
     pt_jw w;
     uint32_t i, first = 0, max_tokens;
+    pt_reasoning effort;
     const char *sysrole = t->compat.system_role == PT_SYSROLE_SYSTEM ? "system" : "developer";
     bool summary = t->compat.thinking_display == PT_YES && !o->hide_thinking;
     pt_buf_init(&b, a->al);
@@ -95,14 +96,15 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
         pt_jw_key(&w, "max_output_tokens");
         pt_jw_uint(&w, max_tokens);
     }
-    if (t->model.reasoning && (o->reasoning != PT_REASON_DEFAULT || summary)) {
+    effort = pt_ai_effort(t, o->reasoning);
+    if (t->model.reasoning && (effort != PT_REASON_DEFAULT || summary)) {
         pt_jw_key(&w, "reasoning");
         pt_jw_obj(&w);
-        if (o->reasoning != PT_REASON_DEFAULT) {
+        if (effort != PT_REASON_DEFAULT) {
             pt_jw_key(&w, "effort");
-            pt_jw_strz(&w, pt_openai_effort(o->reasoning));
+            pt_jw_strz(&w, pt_openai_effort(effort));
         }
-        if (summary && o->reasoning != PT_REASON_OFF) {
+        if (summary && effort != PT_REASON_OFF) {
             pt_jw_key(&w, "summary");
             pt_jw_strz(&w, "auto");
         }
@@ -422,5 +424,6 @@ static void classify_error(int status, pt_str body, pt_ai_error *out, pt_arena *
 const pt_api_vt pt_api_openai_responses = {
     "openai-responses", build, sizeof(state), feed, finish, classify_error,
     {.system_role = PT_SYSROLE_DEVELOPER, .mid_conversation_system = PT_YES, .thinking_display = PT_YES},
+    PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH,
     64,
 };
