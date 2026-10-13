@@ -1,6 +1,7 @@
 #!/bin/sh
 # End-to-end checks of pytte-ai and pytte on the faux provider. No network.
 set -u
+exec </dev/null # pytte -p reads stdin that is not a terminal
 bin=${1:-build/pytte-ai}
 pytte=${2:-build/pytte}
 fail=0
@@ -77,9 +78,9 @@ check "pytte log shows the transcript" [ $ok -eq 0 ]
 "$pytte" -p -c </dev/null >/dev/null 2>&1
 check "resuming an idle session exits 0" [ $? -eq 0 ]
 
-out=$("$pytte" -p -m faux/faux --script tests/faux/tool_call.json "echo hi" 2>/dev/null)
-check "tool calls get an error result, then the run goes on" [ "$out" = "I'll echo that.
-The echo tool said: hi" ]
+out=$("$pytte" -p -m faux/faux --script tests/faux/tool_call.json "echo hi" 2>"$XDG_STATE_HOME/err")
+check "tool calls get an error result, then the run goes on" [ "$out" = "The echo tool said: hi" ]
+check "...and the text before a tool call goes to stderr" grep -qx "I'll echo that." "$XDG_STATE_HOME/err"
 
 out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/big_output.json "count" 2>/dev/null)
 check "a cut output runs on" [ "$out" = "Counted past the cap." ]
@@ -273,6 +274,20 @@ check "a piped prompt runs in print mode" [ "$out" = "Hello from the faux provid
 id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
 "$pytte" log "$id" | grep -q "hi from a pipe"
 check "...and is the newest session" [ $? -eq 0 ]
+printf 'line one\nline two\n' | "$pytte" -p -m faux/faux --script tests/faux/hello.json "sum up" >/dev/null 2>&1
+id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
+"$pytte" log "$id" | tr '\n' '|' | grep -q "> <stdin>|line one|line two|</stdin>||sum up|"
+check "piped stdin goes before the prompt, as data" [ $? -eq 0 ]
+check "...and the prompt names the session" [ "$(cat "$XDG_STATE_HOME/pytte/sessions/$id/name")" = "sum up" ]
+out=$( (sleep 2; echo never) | "$pytte" -p --no-stdin -m faux/faux --script tests/faux/hello.json "sum up" 2>/dev/null)
+check "--no-stdin leaves an open stdin unread" [ "$out" = "Hello from the faux provider! Nothing here touched the network." ]
+id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
+"$pytte" log "$id" | grep -q "^> sum up$"
+check "...and sends the prompt alone" [ $? -eq 0 ]
+rc=$({ ("$pytte" -p -m faux/faux --script tests/faux/slow.json --output-format stream-json x 2>/dev/null; echo $? >&3) | true; } 3>&1)
+check "a closed stdout stops the run with 141" [ "$rc" -eq 141 ]
+"$pytte" ls | head -1 | grep -q "closed .* x$"
+check "...and leaves it resumable" [ $? -eq 0 ]
 out=$("$pytte" -p -r "$id" -m faux/faux --script tests/faux/hello.json "again" 2>/dev/null)
 check "-r continues a session by ID" [ "$("$pytte" log "$id" | grep -c '^> ')" -eq 2 ]
 if command -v jq >/dev/null; then

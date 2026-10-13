@@ -3,6 +3,7 @@
  *   pytte ["PROMPT"]            the TUI in a new session
  *   pytte -c / -r [ID]          the TUI on this directory's newest session / on ID
  *   pytte -p "PROMPT"           one-shot: run until idle and print the answer
+ *   ... | pytte -p "PROMPT"     the same, with stdin as data for the prompt
  *   pytte log [ID] [--json]     print a session's transcript
  *   pytte approve ID TASK yes|no   answer a tool call waiting for approval
  *   pytte ls                    list sessions with their status
@@ -12,6 +13,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -28,7 +30,9 @@ static const char usage[] =
     "usage: pytte [options] [PROMPT]      the TUI in a new session\n"
     "       pytte -c | -r [ID] [PROMPT]   continue this directory's newest session, or ID\n"
     "       pytte -p [options] [PROMPT]   print mode: run until done, print the answer\n"
-    "                                     (PROMPT from stdin when it is piped)\n"
+    "                                     on stdout; tool calls, thinking and the\n"
+    "                                     text between them go to stderr. Piped\n"
+    "                                     stdin is the PROMPT, or data for it\n"
     "       pytte log [ID] [--json] [--all-epochs]\n"
     "                                     print a session's transcript (by default\n"
     "                                     since the last compaction)\n"
@@ -59,12 +63,14 @@ static const char usage[] =
     "  --permission-mode MODE  ask (default), auto or read-only: what tools that may\n"
     "                          change things do ($PYTTE_PERMISSION_MODE, permissions.mode)\n"
     "  --script FILE           faux provider script (default: $PYTTE_FAUX_SCRIPT)\n"
+    "  --no-stdin              with -p: leave stdin unread (as ssh -n does), for\n"
+    "                          loops and callers that keep it open\n"
     "  --no-sync               do not fsync commits (survives crashes, not power loss)\n"
     "  --force                 take over a session another host left open\n"
     "\n"
     "Exit codes: 0 done, 1 usage or setup, 3 waiting for approval (-p), 10 the run\n"
-    "failed, 20 storage error, "
-    "130 interrupted (the session stays resumable).\n";
+    "failed or stdout could not be written, 20 storage error, 130 interrupted, 141\n"
+    "stdout closed (the session stays resumable after either).\n";
 
 enum { OUT_TEXT, OUT_JSON, OUT_STREAM };
 
@@ -72,6 +78,7 @@ typedef struct opts {
     cli_opts c;
     const char *cmd_log, *cmd_approve, *cmd_ls, *id, *prompt, *task, *answer;
     bool print, cont, resume, json, all_epochs, model_flag, compact_flag, effort_flag, perm_flag;
+    bool no_stdin;
     int out;
 } opts;
 
@@ -122,6 +129,8 @@ static void parse_args(int argc, char **argv, opts *o)
             o->json = true;
         } else if (strcmp(a, "--all-epochs") == 0) { /* log */
             o->all_epochs = true;
+        } else if (strcmp(a, "--no-stdin") == 0) {
+            o->no_stdin = true;
         } else if (strcmp(a, "--no-sync") == 0) {
             o->c.no_sync = true;
         } else if (strcmp(a, "--force") == 0) {
@@ -259,11 +268,21 @@ static void apply_config(opts *o, cli_config *cfg, bool create)
 
 /* ---- print mode ---- */
 
+/* Where a message's text goes. stdout gets only answers: when it is not
+ * a terminal, a message's text waits until the message is known to call
+ * no tools (an answer, for stdout) or to call some (narration, for
+ * stderr). */
+enum { MSG_HOLD, MSG_OUT, MSG_ERR };
+
 typedef struct ui {
     int out;
-    bool tty_err;
+    bool tty_err, tty_out;
     bool text_nl, any_text, thinking_out;
+    FILE *text_to; /* where the last text went */
+    int msg;       /* MSG_*: the streaming message's text */
+    int out_errno; /* stdout failed: EPIPE when its reader left */
     int runs_failed, runs_done;
+    pt_buf held;          /* the message's text while MSG_HOLD */
     pt_buf result, error; /* for --output-format json */
 } ui;
 
@@ -281,20 +300,59 @@ static bool should_stop(void *ud)
     return interrupted != 0;
 }
 
+/* The first stdout failure stops the run: nobody gets the answer. */
+static void out_flush(ui *u)
+{
+    if ((fflush(stdout) != 0 || ferror(stdout)) && !u->out_errno) {
+        u->out_errno = errno ? errno : EIO;
+        interrupted = 1;
+    }
+}
+
 static void end_text(ui *u)
 {
     if (u->any_text && !u->text_nl)
-        fputc('\n', stdout);
+        fputc('\n', u->text_to);
     u->any_text = false;
     u->text_nl = true;
-    fflush(stdout);
+    if (u->text_to == stdout)
+        out_flush(u);
+}
+
+static void put_text(ui *u, FILE *f, pt_str s)
+{
+    if (!s.n)
+        return;
+    if (u->any_text && u->text_to != f)
+        end_text(u);
+    fwrite(s.p, 1, s.n, f);
+    u->text_to = f;
+    u->text_nl = s.p[s.n - 1] == '\n';
+    u->any_text = true;
+    if (f == stdout)
+        out_flush(u);
+    else
+        fflush(f);
+}
+
+/* The held text goes to f, and so does the rest of the message. */
+static void release(ui *u, FILE *f)
+{
+    put_text(u, f, pt_buf_str(&u->held));
+    pt_buf_reset(&u->held);
+    u->msg = f == stdout ? MSG_OUT : MSG_ERR;
 }
 
 static void on_stream(ui *u, const pt_ai_event *ev)
 {
     const pt_msg *m = ev->msg;
     switch (ev->kind) {
+    case PT_EV_START:
+        u->msg = u->tty_out ? MSG_OUT : MSG_HOLD;
+        break;
     case PT_EV_THINKING_DELTA:
+        if (u->any_text)
+            end_text(u);
         if (!u->thinking_out && u->tty_err)
             fputs("\x1b[2m", stderr);
         u->thinking_out = true;
@@ -306,11 +364,21 @@ static void on_stream(ui *u, const pt_ai_event *ev)
         u->thinking_out = false;
         break;
     case PT_EV_TEXT_DELTA:
-        fwrite(ev->delta.p, 1, ev->delta.n, stdout);
-        if (ev->delta.n)
-            u->text_nl = ev->delta.p[ev->delta.n - 1] == '\n';
-        u->any_text = true;
-        fflush(stdout);
+        if (u->msg == MSG_HOLD) {
+            pt_buf_puts(&u->held, ev->delta);
+            if (!u->held.oom)
+                break;
+            /* Out of memory: the text goes out now, as if it were the answer.
+             * The buffer keeps what it had; a fresh one forgets the failure. */
+            release(u, stdout);
+            pt_buf_free(&u->held);
+            pt_buf_init(&u->held, pt_sys_allocator());
+        }
+        put_text(u, u->msg == MSG_ERR ? stderr : stdout, ev->delta);
+        break;
+    case PT_EV_TOOLCALL_START:
+        if (u->msg == MSG_HOLD)
+            release(u, stderr);
         break;
     case PT_EV_TOOLCALL_END: {
         const pt_block *b = &m->blocks[ev->index];
@@ -324,6 +392,9 @@ static void on_stream(ui *u, const pt_ai_event *ev)
         if (u->thinking_out)
             fputs(u->tty_err ? "\x1b[0m\n" : "\n", stderr);
         u->thinking_out = false;
+        /* A cut-off message is no answer: a retry or the error follows. */
+        if (u->msg == MSG_HOLD)
+            release(u, ev->kind == PT_EV_DONE ? stdout : stderr);
         end_text(u);
         break;
     default:
@@ -352,7 +423,7 @@ static void on_event(void *ud, const pt_event *ev)
         if (ev->kind == PT_E_COMMITTED) {
             fwrite(ev->line.p, 1, ev->line.n, stdout);
             fputc('\n', stdout);
-            fflush(stdout);
+            out_flush(u);
         }
         return;
     }
@@ -377,7 +448,7 @@ static void on_event(void *ud, const pt_event *ev)
     }
 }
 
-static void print_json(const ui *u, const char *id, const char *status)
+static void print_json(ui *u, const char *id, const char *status)
 {
     pt_buf b;
     pt_jw w;
@@ -397,16 +468,47 @@ static void print_json(const ui *u, const char *id, const char *status)
     pt_jw_obj_end(&w);
     pt_buf_putc(&b, '\n');
     fwrite(b.p, 1, b.n, stdout);
+    out_flush(u);
     pt_buf_free(&b);
 }
 
-static pt_str read_stdin(pt_buf *b)
+#define STDIN_MAX ((size_t)64 << 20)
+
+/* All of stdin into b. False, with why in err, when it cannot be read
+ * whole: a prompt is never sent cut short. Says so on stderr when stdin
+ * stays silent, so an idle pipe is not a mystery hang. */
+static bool read_stdin(pt_buf *b, char *err, size_t cap)
 {
-    char tmp[4096];
-    size_t got;
-    while ((got = fread(tmp, 1, sizeof tmp, stdin)) > 0)
-        pt_buf_put(b, tmp, got);
-    return pt_str_trim(pt_buf_str(b));
+    struct stat st;
+    struct pollfd pfd;
+    if (fstat(STDIN_FILENO, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 &&
+        (uint64_t)st.st_size <= STDIN_MAX)
+        pt_buf_reserve(b, (size_t)st.st_size + 1);
+    pfd.fd = STDIN_FILENO;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, 3000) == 0)
+        fputs("pytte: waiting for stdin (--no-stdin runs without it)\n", stderr);
+    for (;;) {
+        ssize_t got;
+        if (b->n == b->cap && !pt_buf_reserve(b, 65536)) {
+            snprintf(err, cap, "out of memory reading stdin");
+            return false;
+        }
+        got = read(STDIN_FILENO, b->p + b->n, b->cap - b->n);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got < 0) {
+            snprintf(err, cap, "cannot read stdin: %s", strerror(errno));
+            return false;
+        }
+        if (got == 0)
+            return true;
+        b->n += (size_t)got;
+        if (b->n > STDIN_MAX) {
+            snprintf(err, cap, "stdin is over %u MiB", (unsigned)(STDIN_MAX >> 20));
+            return false;
+        }
+    }
 }
 
 /* Tool calls waiting for approval, with the command that answers each. */
@@ -431,21 +533,31 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
     cli_session s;
     ui u;
     pt_buf in_buf;
-    pt_str prompt = PT_STR_NULL;
+    pt_str prompt = PT_STR_NULL, data = PT_STR_NULL;
     char err[700];
     const char *status = "completed";
     int rc;
     memset(&u, 0, sizeof u);
     u.out = o->out;
     u.tty_err = isatty(STDERR_FILENO);
+    u.tty_out = isatty(STDOUT_FILENO);
     u.text_nl = true;
+    pt_buf_init(&u.held, pt_sys_allocator());
     pt_buf_init(&u.result, pt_sys_allocator());
     pt_buf_init(&u.error, pt_sys_allocator());
     pt_buf_init(&in_buf, pt_sys_allocator());
+    /* Piped stdin is the prompt, or data that goes with it. */
+    if (!o->cmd_approve && !o->no_stdin && !isatty(STDIN_FILENO)) {
+        if (!read_stdin(&in_buf, err, sizeof err))
+            die(err, NULL);
+        data = pt_str_trim(pt_buf_str(&in_buf));
+    }
     if (o->prompt)
         prompt = pt_strz(o->prompt);
-    else if (!isatty(STDIN_FILENO))
-        prompt = read_stdin(&in_buf);
+    else {
+        prompt = data;
+        data = PT_STR_NULL;
+    }
     if (!id && !prompt.n && !o->cmd_approve)
         die("no prompt (give one as an argument or on stdin)", NULL);
     apply_config(o, cfg, id == NULL);
@@ -465,9 +577,10 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
     }
     if (prompt.n) {
         pt_input in;
-        pt_buf text;
+        pt_buf text, joined;
         char in_dir[4200];
         pt_buf_init(&text, pt_sys_allocator());
+        pt_buf_init(&joined, pt_sys_allocator());
         memset(&in, 0, sizeof in);
         in.text = prompt;
         switch (pt_rt_expand_skills(s.rt, prompt, &text, err, sizeof err)) {
@@ -482,23 +595,34 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
             in.text = pt_buf_str(&text);
             break;
         }
-        if (!pt_submit(s.a, &in)) {
+        if (data.n) { /* the data first, then what to do with it */
+            pt_buf_reserve(&joined, data.n + in.text.n + 32);
+            pt_buf_putz(&joined, "<stdin>\n");
+            pt_buf_puts(&joined, data);
+            pt_buf_putz(&joined, "\n</stdin>\n\n");
+            pt_buf_puts(&joined, in.text);
+            in.text = pt_buf_str(&joined);
+        }
+        if (joined.oom || !pt_submit(s.a, &in)) {
             char dir[4200];
-            fprintf(stderr, "pytte: %s\n", pt_error(s.a));
+            fprintf(stderr, "pytte: %s\n", joined.oom ? "out of memory" : pt_error(s.a));
             snprintf(dir, sizeof dir, "%s", s.dir);
             cli_session_close(&s);
             if (!id)
                 cli_session_discard(dir); /* discard a newly-created empty session */
             pt_buf_free(&text);
+            pt_buf_free(&joined);
             return 1;
         }
         pt_buf_free(&text);
+        pt_buf_free(&joined);
         cli_session_name_set(s.dir, prompt);
     }
     if (o->out == OUT_TEXT)
         fprintf(stderr, "%ssession %s%s\n", u.tty_err ? "\x1b[2m" : "", s.id, u.tty_err ? "\x1b[0m" : "");
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN); /* a closed stdout is an EPIPE out_flush sees */
     switch (pt_rt_run(s.rt)) {
     case PT_RT_IDLE:
         end_text(&u);
@@ -544,6 +668,13 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
     }
     if (o->out == OUT_JSON)
         print_json(&u, s.id, status);
+    if (u.out_errno && (rc == 0 || rc == 130)) {
+        /* An EPIPE is quiet, as a SIGPIPE would be; other failures are not. */
+        if (u.out_errno != EPIPE)
+            fprintf(stderr, "pytte: cannot write to stdout: %s\n", strerror(u.out_errno));
+        rc = u.out_errno == EPIPE ? 141 : 10;
+    }
+    pt_buf_free(&u.held);
     pt_buf_free(&u.result);
     pt_buf_free(&u.error);
     pt_buf_free(&in_buf);

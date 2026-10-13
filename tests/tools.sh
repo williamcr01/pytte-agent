@@ -2,6 +2,7 @@
 # End-to-end checks of the built-in tools on the faux provider: read, edit,
 # grep, find and ls, and what read-only mode lets run. No network.
 set -u
+exec </dev/null # pytte -p reads stdin that is not a terminal
 pytte=${1:-build/pytte}
 fail=0
 
