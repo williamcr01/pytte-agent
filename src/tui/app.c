@@ -53,6 +53,8 @@ static const struct {
     {"effort", " [level]", "set the reasoning effort of this session"},
     {"new", "", "start a new session"},
     {"resume", " [id]", "open another session from this directory"},
+    {"fork", "", "continue in a copy of this session"},
+    {"worktree", " [name]", "a new session in a git worktree (also /wt)"},
     {"status", "", "session, model, context and terminal"},
     {"compact", "", "summarize the conversation to free the context"},
     {"ps", "", "background commands"},
@@ -121,6 +123,7 @@ typedef struct queued_input {
 typedef struct session_list {
     pt_worker *worker;
     char cwd[4096], ids[50][64];
+    char names[50][CLI_NAME_MAX + 80]; /* the name, after "<worktree> · " for one in a worktree */
     uint32_t n;
     bool pending, ready;
 } session_list;
@@ -140,8 +143,11 @@ typedef struct app {
     cli_config *cfg;
     cli_session s;
     bool open; /* s holds a session */
+    bool named; /* it has a name, or no longer needs one (see cli_session_name) */
+    char start_dir[4096]; /* where pytte started: /resume lists its sessions and its worktrees' */
     cli_open_job *opening;
     char fallback[64]; /* /resume restores the old session on failure */
+    bool fallback_created;
     bool history_ready, drop_restored_draft;
     pt_buf pending_history, command;
     session_list *sessions;
@@ -1280,7 +1286,18 @@ static void add_list(app *a, const char *const *v, size_t n, pt_str q)
 static void list_sessions(void *ud)
 {
     session_list *list = (session_list *)ud;
-    list->n = cli_sessions_list(list->cwd, list->ids, 50);
+    char root[4096], dir[4200], cwd[4096], name[CLI_NAME_MAX + 1];
+    uint32_t i;
+    list->n = cli_sessions_list(list->cwd, true, list->ids, 50);
+    cli_sessions_dir(root, sizeof root);
+    for (i = 0; i < list->n; i++) {
+        const char *wt = "";
+        snprintf(dir, sizeof dir, "%s/%s", root, list->ids[i]);
+        cli_session_name(dir, name, sizeof name);
+        if (cli_session_cwd(list->ids[i], cwd, sizeof cwd) && strcmp(cwd, list->cwd) != 0)
+            wt = strrchr(cwd, '/') + 1; /* under list->cwd: there is a slash */
+        snprintf(list->names[i], sizeof list->names[i], "%.64s%s%s", wt, wt[0] && name[0] ? " · " : "", name);
+    }
 }
 
 static session_list *get_sessions(app *a, bool refresh)
@@ -1291,11 +1308,11 @@ static session_list *get_sessions(app *a, bool refresh)
         if (!list)
             return NULL;
         list->worker = pt_worker_new();
-        if (!list->worker || !getcwd(list->cwd, sizeof list->cwd)) {
-            pt_worker_free(list->worker);
+        if (!list->worker) {
             free(list);
             return NULL;
         }
+        snprintf(list->cwd, sizeof list->cwd, "%s", a->start_dir);
         a->sessions = list;
     }
     if (refresh && !list->pending)
@@ -1375,9 +1392,9 @@ static void menu_update(app *a)
             uint32_t i;
             a->sessions_menu = true;
             for (i = 0; list && i < list->n; i++)
-                if (pt_str_starts(pt_strz(list->ids[i]), arg) &&
+                if ((pt_str_starts(pt_strz(list->ids[i]), arg) || pt_str_icontains(pt_strz(list->names[i]), arg)) &&
                     (!a->open || strcmp(list->ids[i], a->s.id) != 0))
-                    add_item(a, list->ids[i], strlen(list->ids[i]), NULL);
+                    add_item(a, list->ids[i], strlen(list->ids[i]), list->names[i]);
         }
         if (!a->nitems)
             a->menu = MENU_NONE;
@@ -2141,6 +2158,7 @@ static void switch_session(app *a, const char *id)
     snprintf(back, sizeof back, "%s", a->s.id);
     a->o.continue_current = false;
     snprintf(a->fallback, sizeof a->fallback, "%s", back);
+    a->fallback_created = a->created;
     if (!open_session(a, id)) {
         a->fallback[0] = 0;
         a->code = 0; /* allocation failed before the old session was handed off */
@@ -2235,8 +2253,15 @@ static void cmd_ps(app *a)
 
 static void cmd_status(app *a)
 {
-    char line[5000];
+    char line[5000], name[CLI_NAME_MAX + 1];
+    pt_str cwd = a->open ? pt_session_cwd(a->s.a) : PT_STR_NULL;
     snprintf(line, sizeof line, "session %s, owned by pid %ld\nstore %s", a->s.id, (long)getpid(), a->s.dir);
+    out_z(a, TUI_DIM, line);
+    if (cli_session_name(a->s.dir, name, sizeof name)) {
+        snprintf(line, sizeof line, "name %s", name);
+        out_z(a, TUI_DIM, line);
+    }
+    snprintf(line, sizeof line, "directory %.*s", (int)(cwd.n < 4096 ? cwd.n : 4096), cwd.p ? cwd.p : "");
     out_z(a, TUI_DIM, line);
     snprintf(line, sizeof line, "model %s · effort %s", a->model[0] ? a->model : "(none)",
              pt_reasoning_name(a->o.reasoning));
@@ -2424,6 +2449,28 @@ static void run_command(app *a, pt_str line)
             return;
         }
         switch_session(a, v);
+    } else if (pt_str_eqz(cmd, "fork")) {
+        if (!a->open)
+            out_z(a, TUI_RED, "no session to fork");
+        else if (session_empty(a))
+            out_z(a, TUI_DIM, "nothing to fork yet");
+        else if (a->running)
+            out_z(a, TUI_RED, "/fork waits for the run to end (esc esc stops it)");
+        else {
+            a->o.fork = true;
+            switch_session(a, NULL);
+            a->o.fork = false;
+            a->created = false; /* a copy: never discarded as empty */
+        }
+    } else if (pt_str_eqz(cmd, "worktree") || pt_str_eqz(cmd, "wt")) {
+        if (arg.n && !cli_worktree_name_ok(v)) {
+            snprintf(msg, sizeof msg, "not a worktree name: %.100s (letters, digits, - _ .)", v);
+            out_z(a, TUI_RED, msg);
+            return;
+        }
+        a->o.worktree = v; /* copied by the open */
+        switch_session(a, NULL);
+        a->o.worktree = NULL;
     } else if (pt_str_eqz(cmd, "status")) {
         cmd_status(a);
     } else if (pt_str_eqz(cmd, "compact")) {
@@ -2607,6 +2654,10 @@ static void queued_submit(app *a)
                 out_z(a, TUI_RED, pt_error(a->s.a));
                 return;
             }
+            if (!a->named) { /* the first prompt names the session */
+                cli_session_name_set(a->s.dir, pt_buf_str(&q->text));
+                a->named = true;
+            }
             q->submitted = true;
             i++;
         }
@@ -2629,8 +2680,10 @@ static void finish_session(app *a)
             char back[64];
             snprintf(back, sizeof back, "%s", a->fallback);
             a->fallback[0] = 0;
-            if (open_session(a, back))
+            if (open_session(a, back)) {
+                a->created = a->fallback_created; /* still discarded if nothing is said */
                 return;
+            }
         }
         a->code = rc;
         a->quit = true;
@@ -2638,6 +2691,23 @@ static void finish_session(app *a)
     }
     a->open = true;
     a->fallback[0] = 0;
+    {
+        char name[CLI_NAME_MAX + 1], dir[4096];
+        pt_str cwd = pt_session_cwd(a->s.a);
+        uint32_t i, ne = pt_entry_count(a->s.a);
+        pt_entry_view v;
+        /* a session from before names, or whose prompts are compacted away,
+         * is not named after a later one */
+        a->named = cli_session_name(a->s.dir, name, sizeof name);
+        for (i = 0; i < ne && !a->named && pt_entry_at(a->s.a, i, &v); i++)
+            a->named = strcmp(v.kind, "user") == 0 || (strcmp(v.kind, "epoch") == 0 && v.epoch > 1);
+        /* new sessions start here: in the session's directory */
+        if (cwd.n && cwd.n < sizeof dir) {
+            memcpy(dir, cwd.p, cwd.n);
+            dir[cwd.n] = 0;
+            (void)!chdir(dir);
+        }
+    }
     if (!a->history_ready) {
         text = cli_session_take_history(&a->s, &n);
         if (text && !tui_hist_load(&a->in, (pt_str){text, n}, 1000))
@@ -2672,6 +2742,8 @@ static void finish_session(app *a)
     free(text);
     set_config(a);
     out_tail(a);
+    if (cli_session_note(&a->s)[0])
+        out_z(a, TUI_DIM, cli_session_note(&a->s));
     queued_submit(a);
     if (a->pager_pending && !a->quit && a->open) {
         a->pager_pending = false;
@@ -2744,6 +2816,9 @@ static bool complete(app *a)
                 pt_buf_putc(&nd, ' ');
         if (pt_str_starts(label, PT_S("skill:"))) /* then what it is for */
             pt_buf_putc(&nd, ' ');
+    } else if (a->sessions_menu) { /* the whole argument: names have spaces */
+        pt_buf_puts(&nd, PT_S("/resume "));
+        pt_buf_puts(&nd, label);
     } else { /* replace the last word */
         pt_buf_put(&nd, d.p, (size_t)(last_word(d).p - d.p));
         pt_buf_puts(&nd, label);
@@ -3118,6 +3193,8 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
     }
     tui_term_size(a.t, &a.rows, &a.cols);
     history_load(&a);
+    if (!getcwd(a.start_dir, sizeof a.start_dir))
+        a.start_dir[0] = 0;
     if (id)
         snprintf(picked, sizeof picked, "%s", id);
     if (!open_session(&a, id ? picked : NULL)) {
@@ -3125,6 +3202,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, const char *id, const char *prom
         fprintf(stderr, "pytte: %s\n", a.err);
         return a.code ? a.code : 1;
     }
+    a.o.worktree = NULL; /* -w: this open only; copied by it */
     set_config(&a);
     tui_band_init(&a.band, a.rows, a.cols, pt_sys_allocator());
     a.band.reflow = reflows();

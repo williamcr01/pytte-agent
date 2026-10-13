@@ -297,9 +297,31 @@ static void csi(vt *v, const char *s, int n)
         clear_cells(&v->screen[v->r], v->c, v->cols);
         v->screen[v->r].wrapped = false;
         return;
-    case 'J':
+    case 'H': /* home: only with the clears below (a session switch) */
         if (num) {
-            vt_fail(v, "erase other than to the end", s, n);
+            vt_fail(v, "cursor position other than home", s, n);
+            return;
+        }
+        v->r = v->c = 0;
+        v->pending = false;
+        return;
+    case 'J':
+        if (num == 3) { /* the scrollback */
+            for (i = 0; i < v->nsb; i++)
+                row_free(&v->sb[i]);
+            v->nsb = 0;
+            return;
+        }
+        if (num == 2) { /* the screen; the cursor stays */
+            for (i = 0; i < v->rows; i++) {
+                clear_cells(&v->screen[i], 0, v->cols);
+                v->screen[i].wrapped = false;
+                v->screen[i].used = 0;
+            }
+            return;
+        }
+        if (num) {
+            vt_fail(v, "erase other than to the end, the screen or the scrollback", s, n);
             return;
         }
         clear_cells(&v->screen[v->r], v->c, v->cols);

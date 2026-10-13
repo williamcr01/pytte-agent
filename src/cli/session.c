@@ -8,10 +8,12 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -27,7 +29,8 @@ struct cli_open_job {
     void *ud;
     int code;
     bool active, history, discard_previous;
-    char err[700];
+    char err[700], note[700];
+    char forked[64]; /* the fork's ID */
     char *history_text, *draft;
     size_t history_n, draft_n;
 };
@@ -143,7 +146,7 @@ static int newer_first(const void *x, const void *y)
     return -strcmp((const char *)x, (const char *)y);
 }
 
-uint32_t cli_sessions_list(const char *cwd, char (*ids)[64], uint32_t max)
+uint32_t cli_sessions_list(const char *cwd, bool worktrees, char (*ids)[64], uint32_t max)
 {
     char root[4096], c[4096];
     char(*all)[64] = NULL;
@@ -168,10 +171,74 @@ uint32_t cli_sessions_list(const char *cwd, char (*ids)[64], uint32_t max)
     if (n)
         qsort(all, n, sizeof *all, newer_first);
     for (i = 0; i < n && out < max; i++)
-        if (!cwd || (cli_session_cwd(all[i], c, sizeof c) && strcmp(c, cwd) == 0))
+        if (!cwd || (cli_session_cwd(all[i], c, sizeof c) &&
+                     (worktrees ? cli_session_cwd_under(c, cwd) : strcmp(c, cwd) == 0)))
             memcpy(ids[out++], all[i], 64);
     free(all);
     return out;
+}
+
+bool cli_session_cwd_under(const char *cwd, const char *base)
+{
+    size_t n = strlen(base);
+    return strcmp(cwd, base) == 0 ||
+           (strncmp(cwd, base, n) == 0 && strncmp(cwd + n, "/.pytte/worktrees/", 18) == 0 && cwd[n + 18]);
+}
+
+/* ---- names ---- */
+
+/* The first line that is not blank, without control characters, cut on
+ * a character to fit CLI_NAME_MAX bytes. */
+static size_t name_of(pt_str text, char *out, size_t cap)
+{
+    size_t i = 0, n = 0, max = cap - 1 < CLI_NAME_MAX ? cap - 1 : CLI_NAME_MAX;
+    while (i < text.n && (text.p[i] == ' ' || text.p[i] == '\t' || text.p[i] == '\n' || text.p[i] == '\r'))
+        i++;
+    for (; i < text.n && text.p[i] != '\n' && n < max; i++) {
+        unsigned char c = (unsigned char)text.p[i];
+        out[n++] = c < 0x20 || c == 0x7f ? ' ' : (char)c;
+    }
+    if (i < text.n && ((unsigned char)text.p[i] & 0xC0) == 0x80) { /* cut inside a character: drop it */
+        while (n && ((unsigned char)out[n - 1] & 0xC0) == 0x80)
+            n--;
+        if (n)
+            n--;
+    }
+    while (n && (out[n - 1] == ' ' || out[n - 1] == '\r'))
+        n--;
+    out[n] = 0;
+    return n;
+}
+
+bool cli_session_name(const char *dir, char *out, size_t cap)
+{
+    char path[4300], buf[CLI_NAME_MAX + 8];
+    ssize_t got;
+    int fd;
+    out[0] = 0;
+    snprintf(path, sizeof path, "%s/name", dir);
+    if ((fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)) < 0)
+        return false;
+    got = read(fd, buf, sizeof buf);
+    close(fd);
+    return got > 0 && name_of((pt_str){buf, (size_t)got}, out, cap) > 0;
+}
+
+void cli_session_name_set(const char *dir, pt_str prompt)
+{
+    char path[4300], name[CLI_NAME_MAX + 2];
+    size_t n = name_of(prompt, name, sizeof name - 1);
+    int fd;
+    if (!n)
+        return;
+    name[n++] = '\n';
+    snprintf(path, sizeof path, "%s/name", dir);
+    /* the first prompt names it: a name already there stays */
+    if ((fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0)
+        return;
+    if (write(fd, name, n) != (ssize_t)n)
+        unlink(path);
+    close(fd);
 }
 
 /* ---- HTTP: faux:// to the faux driver, everything else to curl ---- */
@@ -340,7 +407,7 @@ void cli_session_close(cli_session *s)
 
 void cli_session_discard(const char *dir)
 {
-    static const char *const files[] = {"log.jsonl", "LOCK", "draft"};
+    static const char *const files[] = {"log.jsonl", "LOCK", "draft", "name"};
     char p[4300];
     size_t i;
     for (i = 0; i < sizeof files / sizeof files[0]; i++) {
@@ -477,6 +544,290 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     return 0;
 }
 
+/* ---- /fork: a copy of a closed session ---- */
+
+static bool sync_dir(const char *dir)
+{
+    int fd = open(dir, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    bool ok = fd >= 0 && fsync(fd) == 0;
+    if (fd >= 0)
+        close(fd);
+    return ok;
+}
+
+/* The whole file, synced. A file that is not there is copied as nothing
+ * unless it must be. */
+static bool copy_file(const char *from, const char *to, bool must)
+{
+    char buf[16384];
+    int in = open(from, O_RDONLY | O_CLOEXEC | O_NOFOLLOW), out;
+    bool ok = true;
+    if (in < 0)
+        return !must && errno == ENOENT;
+    if ((out = open(to, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600)) < 0) {
+        close(in);
+        return false;
+    }
+    while (ok) {
+        ssize_t n = read(in, buf, sizeof buf), at = 0;
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            ok = n == 0;
+            break;
+        }
+        while (ok && at < n) {
+            ssize_t w = write(out, buf + at, (size_t)(n - at));
+            if (w < 0 && errno != EINTR)
+                ok = false;
+            else if (w > 0)
+                at += w;
+        }
+    }
+    ok = ok && fsync(out) == 0;
+    ok = close(out) == 0 && ok;
+    close(in);
+    return ok;
+}
+
+/* blobs/ab/cdef...: written once and never changed, so shared by links
+ * (copied where the file system cannot link). blobs/tmp is not copied. */
+static bool copy_blobs(const char *from, const char *to)
+{
+    char src[4700], dst[4700];
+    DIR *top, *sub;
+    struct dirent *e, *f;
+    bool ok = true;
+    snprintf(src, sizeof src, "%s/blobs", from);
+    if (!(top = opendir(src)))
+        return errno == ENOENT;
+    snprintf(dst, sizeof dst, "%s/blobs", to);
+    if (mkdir(dst, 0700) != 0) {
+        closedir(top);
+        return false;
+    }
+    while (ok && (e = readdir(top))) {
+        if (strlen(e->d_name) != 2 || e->d_name[0] == '.')
+            continue;
+        snprintf(src, sizeof src, "%.4096s/blobs/%.255s", from, e->d_name);
+        snprintf(dst, sizeof dst, "%.4096s/blobs/%.255s", to, e->d_name);
+        if (!(sub = opendir(src)) || mkdir(dst, 0700) != 0) {
+            ok = false;
+            if (sub)
+                closedir(sub);
+            break;
+        }
+        while (ok && (f = readdir(sub))) {
+            if (f->d_name[0] == '.')
+                continue;
+            snprintf(src, sizeof src, "%.4096s/blobs/%.255s/%.255s", from, e->d_name, f->d_name);
+            snprintf(dst, sizeof dst, "%.4096s/blobs/%.255s/%.255s", to, e->d_name, f->d_name);
+            ok = link(src, dst) == 0 || copy_file(src, dst, true);
+        }
+        closedir(sub);
+        snprintf(dst, sizeof dst, "%.4096s/blobs/%.255s", to, e->d_name);
+        ok = ok && sync_dir(dst);
+    }
+    closedir(top);
+    snprintf(dst, sizeof dst, "%s/blobs", to);
+    return ok && sync_dir(dst);
+}
+
+/* Remove a fork that could not be made: blobs/, then the rest. */
+static void remove_fork(const char *dir)
+{
+    char p[4700];
+    DIR *top, *sub;
+    struct dirent *e, *f;
+    snprintf(p, sizeof p, "%s/blobs", dir);
+    if ((top = opendir(p))) {
+        while ((e = readdir(top))) {
+            if (e->d_name[0] == '.')
+                continue;
+            snprintf(p, sizeof p, "%.4096s/blobs/%.255s", dir, e->d_name);
+            if ((sub = opendir(p))) {
+                while ((f = readdir(sub)))
+                    if (f->d_name[0] != '.') {
+                        snprintf(p, sizeof p, "%.4096s/blobs/%.255s/%.255s", dir, e->d_name, f->d_name);
+                        unlink(p);
+                    }
+                closedir(sub);
+            }
+            snprintf(p, sizeof p, "%.4096s/blobs/%.255s", dir, e->d_name);
+            rmdir(p);
+        }
+        closedir(top);
+        snprintf(p, sizeof p, "%s/blobs", dir);
+        rmdir(p);
+    }
+    cli_session_discard(dir);
+}
+
+/* Copy the closed session in from to a new one (job->forked): its log,
+ * blobs, name and draft. The copy's log is the original's, so it opens
+ * as the original would, with every entry and setting. */
+static bool fork_session(cli_open_job *job, const char *from)
+{
+    static const char *const files[] = {"name", "draft", "log.jsonl"}; /* the log last */
+    char root[4096], to[4200], a[4400], b[4400];
+    size_t i;
+    bool ok;
+    cli_sessions_dir(root, sizeof root);
+    new_session_id(job->forked, sizeof job->forked);
+    snprintf(to, sizeof to, "%s/%s", root, job->forked);
+    if (mkdir(to, 0700) != 0) {
+        snprintf(job->err, sizeof job->err, "cannot create %.400s: %s", to, strerror(errno));
+        return false;
+    }
+    ok = copy_blobs(from, to);
+    for (i = 0; ok && i < sizeof files / sizeof files[0]; i++) {
+        snprintf(a, sizeof a, "%s/%s", from, files[i]);
+        snprintf(b, sizeof b, "%s/%s", to, files[i]);
+        ok = copy_file(a, b, i == 2);
+    }
+    ok = ok && sync_dir(to) && sync_dir(root);
+    if (!ok) {
+        snprintf(job->err, sizeof job->err, "cannot fork the session: %s", strerror(errno));
+        remove_fork(to);
+    }
+    return ok;
+}
+
+/* ---- /worktree ---- */
+
+extern char **environ;
+
+/* git with args, in the working directory: its exit status (-1: it did
+ * not run), and the start of what it printed (both streams) in out. */
+static int git(const char *const *argv, char *out, size_t cap)
+{
+    posix_spawn_file_actions_t fa;
+    int p[2], st = -1;
+    pid_t pid;
+    size_t n = 0;
+    out[0] = 0;
+    if (pipe(p) != 0)
+        return -1;
+    fcntl(p[0], F_SETFD, FD_CLOEXEC);
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    posix_spawn_file_actions_adddup2(&fa, p[1], 1);
+    posix_spawn_file_actions_adddup2(&fa, p[1], 2);
+    posix_spawn_file_actions_addclose(&fa, p[1]);
+    if (posix_spawnp(&pid, "git", &fa, NULL, (char *const *)argv, environ) != 0)
+        pid = -1;
+    posix_spawn_file_actions_destroy(&fa);
+    close(p[1]);
+    for (;;) { /* to the end: git must not block on a full pipe */
+        char buf[1024];
+        ssize_t got = read(p[0], buf, sizeof buf);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        if (n + 1 < cap) {
+            size_t take = (size_t)got < cap - 1 - n ? (size_t)got : cap - 1 - n;
+            memcpy(out + n, buf, take);
+            n += take;
+        }
+    }
+    close(p[0]);
+    out[n] = 0;
+    if (pid < 0)
+        return -1;
+    while (waitpid(pid, &st, 0) < 0)
+        if (errno != EINTR)
+            return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+bool cli_worktree_name_ok(const char *name)
+{
+    size_t i, n = strlen(name);
+    if (!n || n > 64 || name[0] == '.' || name[0] == '-' || strstr(name, ".."))
+        return false;
+    for (i = 0; i < n; i++)
+        if (!((name[i] >= 'a' && name[i] <= 'z') || (name[i] >= 'A' && name[i] <= 'Z') ||
+              (name[i] >= '0' && name[i] <= '9') || name[i] == '-' || name[i] == '_' || name[i] == '.'))
+            return false;
+    return true;
+}
+
+static void first_line(char *s)
+{
+    s[strcspn(s, "\n")] = 0;
+}
+
+/* See cli.h. */
+bool cli_worktree_enter(const char *want, char *note, size_t ncap, char *err, size_t ecap)
+{
+    static const char b32[] = "234567abcdefghijklmnopqrstuvwxyz";
+    const char *rev[] = {"git", "rev-parse", "--path-format=absolute", "--git-common-dir", NULL};
+    char name[72], root[4096], dir[4200], path[4300], branch[96], out[1024];
+    char *slash;
+    struct stat st;
+    bool made = false;
+    snprintf(name, sizeof name, "%s", want ? want : "");
+    if (!name[0]) {
+        unsigned char r[6];
+        size_t i;
+        pt_sys_random(NULL, r, sizeof r);
+        memcpy(name, "wt-", 3);
+        for (i = 0; i < sizeof r; i++)
+            name[3 + i] = b32[r[i] & 31];
+        name[3 + sizeof r] = 0;
+    }
+    if (!cli_worktree_name_ok(name)) {
+        snprintf(err, ecap, "not a worktree name: %s (letters, digits, - _ .)", name);
+        return false;
+    }
+    /* the main checkout's: from a worktree, the new one is its sibling */
+    if (git(rev, root, sizeof root) != 0) {
+        first_line(root);
+        snprintf(err, ecap, "not in a git repository%s%.300s", root[0] ? ": " : "", root);
+        return false;
+    }
+    first_line(root);
+    if (!(slash = strrchr(root, '/')) || strcmp(slash, "/.git") != 0) {
+        snprintf(err, ecap, "worktrees need a checkout with .git in it (git dir: %.400s)", root);
+        return false;
+    }
+    *slash = 0;
+    snprintf(dir, sizeof dir, "%s/.pytte/worktrees", root);
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    snprintf(branch, sizeof branch, "worktree-%s", name);
+    if (stat(path, &st) != 0) {
+        const char *add[] = {"git", "worktree", "add", "-b", branch, path, NULL};
+        const char *attach[] = {"git", "worktree", "add", path, branch, NULL};
+        char ignore[4300];
+        if (!mkdirs(dir)) {
+            snprintf(err, ecap, "cannot create %.400s: %s", dir, strerror(errno));
+            return false;
+        }
+        snprintf(ignore, sizeof ignore, "%s/.gitignore", dir); /* the worktrees are not the checkout's files */
+        if (stat(ignore, &st) != 0)
+            pt_sys_write_file(ignore, "*\n", 2);
+        if (git(add, out, sizeof out) != 0 && (!strstr(out, "already exists") || git(attach, out, sizeof out) != 0)) {
+            first_line(out);
+            snprintf(err, ecap, "git worktree add: %.300s", out[0] ? out : "failed");
+            return false;
+        }
+        made = true;
+    } else if (!S_ISDIR(st.st_mode)) {
+        snprintf(err, ecap, "%.400s is not a directory", path);
+        return false;
+    }
+    if (chdir(path) != 0) {
+        snprintf(err, ecap, "cannot enter %.400s: %s", path, strerror(errno));
+        return false;
+    }
+    if (made)
+        snprintf(note, ncap, "made worktree %.400s on branch %s", path, branch);
+    else
+        snprintf(note, ncap, "in worktree %.400s", path);
+    return true;
+}
+
 static void job_event(void *ud, const pt_event *ev)
 {
     cli_open_job *job = (cli_open_job *)ud;
@@ -491,6 +842,10 @@ static void job_open(void *ud)
     cli_open_job *job = (cli_open_job *)ud;
     char path[4300], picked[64], cwd[4096];
     const char *id = job->id;
+    /* first: when there is no worktree, the previous session is kept
+     * (even an empty one) for the host to open again */
+    bool entered = !job->o.worktree ||
+                   cli_worktree_enter(job->o.worktree, job->note, sizeof job->note, job->err, sizeof job->err);
     if (job->previous) {
         cli_session *s = job->previous;
         snprintf(path, sizeof path, "%s/draft", s->dir);
@@ -502,12 +857,24 @@ static void job_open(void *ud)
             cli_session_free(s);
         else
             cli_session_close(s);
-        if (job->discard_previous)
+        if (job->discard_previous && entered)
             cli_session_discard(s->dir);
         job->previous = NULL;
+        if (job->o.fork && !job->discard_previous) {
+            if (!fork_session(job, s->dir)) {
+                job->code = 1;
+                return;
+            }
+            snprintf(job->note, sizeof job->note, "forked from %s", s->id);
+            id = job->forked;
+        }
+    }
+    if (!entered) {
+        job->code = 1;
+        return;
     }
     if (!id && job->o.continue_current) {
-        if (!getcwd(cwd, sizeof cwd) || !cli_sessions_list(cwd, &picked, 1)) {
+        if (!getcwd(cwd, sizeof cwd) || !cli_sessions_list(cwd, false, &picked, 1)) {
             snprintf(job->err, sizeof job->err, "no session to continue in this directory");
             job->code = 1;
             return;
@@ -559,7 +926,7 @@ cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *i
                                 char *err, size_t cap)
 {
     cli_open_job *job;
-    const char *values[5];
+    const char *values[6];
     const char *failure = "could not allocate the session I/O worker";
     size_t total = s->a ? sizeof(cli_session) : 0, i;
     if (draft.n > SIZE_MAX - total) {
@@ -572,7 +939,8 @@ cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *i
     values[2] = o->append_system;
     values[3] = o->script;
     values[4] = id;
-    for (i = 0; i < 5; i++)
+    values[5] = o->worktree;
+    for (i = 0; i < 6; i++)
         if (values[i]) {
             size_t n = strlen(values[i]) + 1;
             if (n > SIZE_MAX - total) {
@@ -595,7 +963,7 @@ cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *i
     }
     job->previous_draft = (pt_str){draft.n ? job->args.p + job->args.n : NULL, draft.n};
     pt_buf_puts(&job->args, draft);
-    for (i = 0; i < 5; i++)
+    for (i = 0; i < 6; i++)
         if (values[i]) {
             const char *v = job->args.p + job->args.n;
             pt_buf_put(&job->args, values[i], strlen(values[i]) + 1);
@@ -611,6 +979,7 @@ cli_open_job *cli_session_begin(cli_session *s, const cli_opts *o, const char *i
     job->o.append_system = values[2];
     job->o.script = values[3];
     job->id = values[4];
+    job->o.worktree = values[5]; /* for job_open only: args are freed after */
     job->s = s;
     job->history = history;
     job->discard_previous = discard;
@@ -684,6 +1053,11 @@ char *cli_session_take_history(cli_session *s, size_t *n)
         job->history_n = 0;
     }
     return text;
+}
+
+const char *cli_session_note(const cli_session *s)
+{
+    return s->background ? s->background->note : "";
 }
 
 char *cli_session_take_draft(cli_session *s, size_t *n)

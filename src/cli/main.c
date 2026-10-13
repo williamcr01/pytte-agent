@@ -35,11 +35,15 @@ static const char usage[] =
     "       pytte approve ID TASK yes|no  answer a tool call waiting for approval,\n"
     "                                     then go on as -p would\n"
     "       pytte ls                      list sessions, newest first: status, directory\n"
-    "                                     and first prompt\n"
+    "                                     and name (its first prompt)\n"
     "\n"
     "  -c, --continue          the newest session started in this directory\n"
     "  -r, --resume [ID]       that session, or pick from this directory's\n"
     "  -p, --print             no TUI (also when stdin or stdout is not a terminal)\n"
+    "  -w, --worktree [NAME]   start in the git worktree <repo>/.pytte/worktrees/NAME\n"
+    "                          on branch worktree-NAME, made if missing (default: a\n"
+    "                          random name; --worktree=NAME, or -- before a PROMPT\n"
+    "                          that could be a name)\n"
     "  -m, --model REF         provider/model-id (default: $PYTTE_MODEL, the config\n"
     "                          file; else the session's last, or " DEFAULT_MODEL ")\n"
     "  --effort LEVEL          off, minimal, low, medium, high, xhigh, max ($PYTTE_EFFORT)\n"
@@ -106,6 +110,14 @@ static void parse_args(int argc, char **argv, opts *o)
             o->resume = true;
             if (v && looks_like_id(v))
                 o->id = argv[++i];
+        } else if (strcmp(a, "-w") == 0 || strcmp(a, "--worktree") == 0) {
+            o->c.worktree = ""; /* a random name */
+            if (v && cli_worktree_name_ok(v))
+                o->c.worktree = argv[++i];
+        } else if (strncmp(a, "--worktree=", 11) == 0) {
+            o->c.worktree = a + 11;
+            if (!cli_worktree_name_ok(o->c.worktree))
+                die("not a worktree name (letters, digits, - _ .)", o->c.worktree);
         } else if (strcmp(a, "--json") == 0) { /* log */
             o->json = true;
         } else if (strcmp(a, "--all-epochs") == 0) { /* log */
@@ -481,6 +493,7 @@ static int print_mode(opts *o, const char *id, cli_config *cfg)
             return 1;
         }
         pt_buf_free(&text);
+        cli_session_name_set(s.dir, prompt);
     }
     if (o->out == OUT_TEXT)
         fprintf(stderr, "%ssession %s%s\n", u.tty_err ? "\x1b[2m" : "", s.id, u.tty_err ? "\x1b[0m" : "");
@@ -683,7 +696,7 @@ static int cmd_log(const opts *o)
     cli_sessions_dir(root, sizeof root);
     if (o->id)
         snprintf(id, sizeof id, "%s", o->id);
-    else if (!cli_sessions_list(NULL, &id, 1))
+    else if (!cli_sessions_list(NULL, false, &id, 1))
         die("no sessions in", root);
     snprintf(dir, sizeof dir, "%s/%s", root, id);
     snprintf(path, sizeof path, "%s/log.jsonl", dir);
@@ -820,7 +833,7 @@ static void ls_status(const ls_row *r, char *out, size_t cap)
 
 static int cmd_ls(void)
 {
-    char root[4096], path[4200], status[300], *peek;
+    char root[4096], path[4200], status[300], name[CLI_NAME_MAX + 1], *peek;
     char(*ids)[64];
     const char *home = getenv("HOME");
     size_t hn = home ? strlen(home) : 0;
@@ -832,7 +845,7 @@ static int cmd_ls(void)
     peek = (char *)malloc(LS_PEEK);
     if (!ids || !peek)
         die("out of memory", NULL);
-    n = cli_sessions_list(NULL, ids, 4096);
+    n = cli_sessions_list(NULL, false, ids, 4096);
     pt_arena_init(&r.ar, pt_sys_allocator(), 0);
     pt_buf_init(&first, pt_sys_allocator());
     for (i = 0; i < n; i++) {
@@ -878,6 +891,9 @@ static int cmd_ls(void)
                 close(bf);
             }
         }
+        snprintf(path, sizeof path, "%s/%s", root, ids[i]);
+        if (cli_session_name(path, name, sizeof name))
+            r.title = pt_strz(name);
         ls_status(&r, status, sizeof status);
         /* the first line of the first prompt, cut on a character */
         t = r.title.p ? r.title : PT_S("(no prompts)");
@@ -909,13 +925,18 @@ static int cmd_ls(void)
 /* -r without an ID, in a terminal: pick from this directory's sessions. */
 static bool pick_session(char *out, size_t cap)
 {
-    char ids[20][64], cwd[4096], line[64];
+    char ids[20][64], cwd[4096], line[64], root[4096];
     uint32_t n, i;
+    cli_sessions_dir(root, sizeof root);
     unsigned long k;
-    if (!getcwd(cwd, sizeof cwd) || !(n = cli_sessions_list(cwd, ids, 20)))
+    if (!getcwd(cwd, sizeof cwd) || !(n = cli_sessions_list(cwd, false, ids, 20)))
         return false;
-    for (i = 0; i < n; i++)
-        fprintf(stderr, "%3u  %s\n", i + 1, ids[i]);
+    for (i = 0; i < n; i++) {
+        char dir[4200], name[CLI_NAME_MAX + 1];
+        snprintf(dir, sizeof dir, "%s/%s", root, ids[i]);
+        cli_session_name(dir, name, sizeof name);
+        fprintf(stderr, "%3u  %s  %s\n", i + 1, ids[i], name);
+    }
     fprintf(stderr, "session [1]: ");
     if (!fgets(line, sizeof line, stdin))
         return false;
@@ -951,8 +972,17 @@ int main(int argc, char **argv)
     if (warn[0])
         fprintf(stderr, "pytte: %s\n", warn);
     tty = isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+    if (o.c.worktree && (o.cont || o.resume))
+        die("-w starts a new session: not with -c or -r", NULL);
+    if (o.c.worktree && (o.print || !tty)) { /* the TUI's open goes in, and says so */
+        char note[700], err[700];
+        if (!cli_worktree_enter(o.c.worktree, note, sizeof note, err, sizeof err))
+            die(err, NULL);
+        fprintf(stderr, "pytte: %s\n", note);
+        o.c.worktree = NULL;
+    }
     if (o.cont && (o.print || !tty)) {
-        if (!getcwd(cwd, sizeof cwd) || !cli_sessions_list(cwd, &picked, 1))
+        if (!getcwd(cwd, sizeof cwd) || !cli_sessions_list(cwd, false, &picked, 1))
             die("no session to continue in this directory", NULL);
         o.id = picked;
     } else if (o.resume && !o.id) {

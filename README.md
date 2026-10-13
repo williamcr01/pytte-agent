@@ -63,7 +63,7 @@ build/pytte -p "what is 25*18?"              # print mode: run, print the answer
 echo "hello" | build/pytte -p --output-format json
 build/pytte log [ID]                         # a transcript (--json: records,
                                              #   --all-epochs: before compactions too)
-build/pytte ls                               # every session: status, directory, first prompt
+build/pytte ls                               # every session: status, directory, name
 build/pytte --permission-mode auto           # run every tool call without asking
 build/pytte approve ID TASK yes              # answer a call -p left waiting (exit 3)
 build/pytte -m faux/faux --script tests/faux/slow.json   # offline
@@ -73,9 +73,19 @@ In the TUI: Enter sends (queued while a run is active), Shift+Enter or
 Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft (twice
 on an empty one quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
-command menu: `/model`, `/effort`, `/new`, `/resume`, `/status`,
-`/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/help`, `/quit`. Settings are saved to
+command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
+`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/help`, `/quit`. Settings are saved to
 `~/.config/pytte/config.json`.
+
+A session is named after the first line of its first prompt; `/resume`,
+`pytte -r` and `pytte ls` show the name, and `/resume <words>` finds
+sessions by it. `/fork` continues in a copy of the session (the original
+stays as it was). `/worktree [name]` (or `/wt`) starts a new session in a
+git worktree at `<repo>/.pytte/worktrees/<name>`, on a new branch
+`worktree-<name>`; the same name later opens that worktree again, and
+`/resume` lists the worktrees' sessions with the repository's. `pytte -w
+[name]` (or `--worktree`) starts in one; `--worktree=<name>` or `--` keeps
+a one-word prompt from being taken for the name.
 
 `/login <provider>` asks for an API key (shown masked, kept out of the input
 history) and saves it to `~/.config/pytte/auth.json` (mode 0600), so no

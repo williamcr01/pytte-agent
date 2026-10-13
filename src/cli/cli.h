@@ -74,6 +74,13 @@ typedef struct cli_opts {
     pt_perm_mode perm;
     uint32_t max_tokens, retry_base_ms, context_window;
     bool no_sync, force, continue_current;
+    /* For cli_session_begin replacing an open session: fork copies it to a
+     * new session and opens the copy; worktree (a name) makes a git
+     * worktree at <repo>/.pytte/worktrees/<name> on branch worktree-<name>,
+     * or reuses it, and starts a new session there (the process changes
+     * into it). */
+    bool fork;
+    const char *worktree;
     bool (*stop)(void *ud); /* polled by pt_rt_run (print mode) */
 } cli_opts;
 
@@ -90,15 +97,33 @@ typedef struct cli_session {
 
 /* $XDG_STATE_HOME/pytte/sessions (by default ~/.local/state/...). */
 void cli_sessions_dir(char *out, size_t cap);
-/* Session IDs, newest first; with cwd, only those started there. Returns
+/* Session IDs, newest first; with cwd, only those started there (with
+ * worktrees, also in its worktrees: see cli_session_cwd_under). Returns
  * how many were written (at most max). */
-uint32_t cli_sessions_list(const char *cwd, char (*ids)[64], uint32_t max);
+uint32_t cli_sessions_list(const char *cwd, bool worktrees, char (*ids)[64], uint32_t max);
+/* cwd is base, or a worktree /worktree made there (base/.pytte/worktrees/...). */
+bool cli_session_cwd_under(const char *cwd, const char *base);
 /* A log's first line, without its newline: the session record and the
  * first epoch, as long as its system prompt made it. False when the line
  * is unfinished, past 16 MiB, or cannot be read. */
 bool cli_log_first_line(int fd, pt_buf *line);
 /* The session's original working directory, from its header. */
 bool cli_session_cwd(const char *id, char *out, size_t cap);
+
+/* A session's name, in <dir>/name: the first line of its first prompt, at
+ * most CLI_NAME_MAX bytes, without control characters. */
+#define CLI_NAME_MAX 80
+/* False (out empty) when it has none. */
+bool cli_session_name(const char *dir, char *out, size_t cap);
+/* Name the session after prompt, unless it has a name. */
+void cli_session_name_set(const char *dir, pt_str prompt);
+
+/* 1 to 64 of letters, digits, - _ and ., not starting with - or ., no "..". */
+bool cli_worktree_name_ok(const char *name);
+/* Make the git worktree <repo>/.pytte/worktrees/<name> on branch
+ * worktree-<name> (name NULL or "": a random one), or reuse it, and chdir
+ * into it. note gets what was done; false with err on failure. */
+bool cli_worktree_enter(const char *name, char *note, size_t ncap, char *err, size_t ecap);
 
 /* Open a session: a new one (id NULL; then submit the first input), or an
  * existing one, recovered. Takes ownership (an open claim). Returns 0, or
@@ -123,6 +148,8 @@ void cli_session_cancel(cli_open_job *job);
 /* Take malloc'd setup data (NULL when absent); caller frees it. */
 char *cli_session_take_history(cli_session *s, size_t *n);
 char *cli_session_take_draft(cli_session *s, size_t *n);
+/* What a fork or worktree open did, for the user ("" when nothing). */
+const char *cli_session_note(const cli_session *s);
 /* Clean exit: the close claim, then free everything. */
 void cli_session_close(cli_session *s);
 /* Free without closing (the agent is fatal). */

@@ -863,11 +863,11 @@ static void test_commands(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
-    CHECK(wait_for(&p, "  › /model    set the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/14", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "  › /model     set the model", 1000)); /* descriptions in a column */
+    CHECK(wait_for(&p, "enter run · esc close · 1/16", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "  › /quit", 1000));
-    CHECK(wait_for(&p, "14/14", 1000));
+    CHECK(wait_for(&p, "16/16", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");
@@ -960,6 +960,107 @@ static void test_commands(void)
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
     pty_free(&p);
+}
+
+/* The first prompt names a session; /fork continues a copy of it; /resume
+ * finds sessions by name; /wt starts a session in a git worktree. */
+static void test_fork_worktree(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
+    char cwd[4096], path[4400], script[4200], first[64] = "", *at;
+    const char *in_repo[] = {"-m", "faux/faux", "--script", script, NULL};
+    const char *launch[] = {"-w", "launched", "-m", "faux/faux", "--script", script, NULL};
+    size_t n;
+    char *name;
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "/fork\r");
+    CHECK(wait_for(&p, "nothing to fork yet", 1000));
+    keys(&p, "  hi fork test\r");
+    CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "say more\r");
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "/status\r");
+    CHECK(wait_for(&p, "\n· name hi fork test\n", 1000)); /* the first prompt's, trimmed */
+    if ((at = strstr(p.scratch.p, "session 2")))
+        sscanf(at + 8, "%63[^,]", first);
+    snprintf(path, sizeof path, "%s/pytte/sessions/%s/name", state_dir, first);
+    name = pt_sys_read_file(path, &n);
+    CHECK(name && strcmp(name, "hi fork test\n") == 0);
+    free(name);
+    keys(&p, "/fork\r");
+    snprintf(path, sizeof path, "forked from %s", first);
+    CHECK(wait_for(&p, path, 3000));
+    CHECK(wait_for(&p, "› hi fork test", 1000)); /* the conversation came along */
+    keys(&p, "/status\r");
+    CHECK(wait_for(&p, "· name hi fork test\n· directory ", 1000));
+    keys(&p, "and in the fork\r");
+    CHECK(wait_idle(&p, 5000));
+    /* the original is found by its name, not only its id */
+    keys(&p, "/resume FORK T");
+    snprintf(path, sizeof path, "  › %s  hi fork test", first);
+    CHECK(wait_for(&p, path, 3000));
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "› say more", 3000));
+    CHECK(!has(&p, "› and in the fork")); /* only in the copy */
+    /* outside a repository, /wt says so and the session stays */
+    keys(&p, "/wt\r");
+    CHECK(wait_for(&p, "not in a git repository", 3000));
+    keys(&p, "/wt ../x\r");
+    CHECK(wait_for(&p, "not a worktree name: ../x", 1000));
+    keys(&p, "/status\r");
+    snprintf(path, sizeof path, "· session %s,", first);
+    CHECK(wait_for(&p, path, 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+
+    /* in a repository: a worktree under .pytte/worktrees, on its own branch */
+    CHECK(getcwd(cwd, sizeof cwd) != NULL);
+    CHECK(system("mkdir repo && cd repo && git init -q && git -c user.name=t -c user.email=t@t "
+                 "commit -q --allow-empty -m init") == 0);
+    snprintf(script, sizeof script, "%s/tests/faux/hello.json", cwd); /* the session moves */
+    CHECK(chdir("repo") == 0);
+    pty_start(&p, 30, 100, in_repo);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "/worktree feature\r");
+    snprintf(path, sizeof path, "made worktree %s/repo/.pytte/worktrees/feature on branch worktree-feature", cwd);
+    CHECK(wait_for(&p, path, 5000));
+    keys(&p, "/status\r");
+    snprintf(path, sizeof path, "· directory %s/repo/.pytte/worktrees/feature\n", cwd);
+    CHECK(wait_for(&p, path, 1000));
+    keys(&p, "hi fork test\r");
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "/new\r");
+    pump(&p, 300);
+    keys(&p, "/wt feature\r"); /* again: the same worktree */
+    snprintf(path, sizeof path, "in worktree %s/repo/.pytte/worktrees/feature", cwd);
+    CHECK(wait_for(&p, path, 5000));
+    keys(&p, "/resume ");
+    CHECK(wait_for(&p, "feature · hi fork test", 3000)); /* a worktree's session says where it is */
+    keys(&p, "\x1b\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f"); /* close the menu, empty the draft */
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    /* -w: start in one */
+    pty_start(&p, 30, 100, launch);
+    snprintf(path, sizeof path, "made worktree %s/repo/.pytte/worktrees/launched on branch worktree-launched", cwd);
+    CHECK(wait_for(&p, path, 5000));
+    keys(&p, "/new\r"); /* this open only: the next session is not another worktree */
+    pump(&p, 300);
+    keys(&p, "/status\r");
+    snprintf(path, sizeof path, "· directory %s/repo/.pytte/worktrees/launched\n", cwd);
+    CHECK(wait_for(&p, path, 1000));
+    CHECK(!has(&p, "in worktree"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    CHECK(chdir(cwd) == 0);
+    CHECK(system("cd repo/.pytte/worktrees/feature && test \"$(git branch --show-current)\" = worktree-feature") == 0);
+    CHECK(system("cd repo && test -z \"$(git status --porcelain)\"") == 0); /* the worktrees are ignored */
 }
 
 /* ↑ recalls history; Ctrl-O shows the full view in the pager; an unsent
@@ -1146,6 +1247,7 @@ int main(int argc, char **argv)
     RUN(test_resize_while_streaming);
     RUN(test_commands);
     RUN(test_skills);
+    RUN(test_fork_worktree);
     RUN(test_history_pager_draft);
     RUN(test_sigterm);
     RUN(test_early_input);

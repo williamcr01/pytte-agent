@@ -225,6 +225,26 @@ PYTTE_PERMISSION_MODE=ask "$pytte" -p -m faux/faux --script tests/faux/tools.jso
 check "a tool call waiting for approval exits with 3" [ $? -eq 3 ]
 "$pytte" ls | head -1 | grep -q "waiting .* may I$"
 check "...and ls shows it waiting" [ $? -eq 0 ]
+newest=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
+check "the first prompt names the session" [ "$(cat "$XDG_STATE_HOME/pytte/sessions/$newest/name")" = "may I" ]
+if command -v git >/dev/null 2>&1; then
+    (
+        r=$XDG_STATE_HOME/repo
+        script=$(pwd)/tests/faux/hello.json
+        mkdir "$r" && cd "$r" || exit 1
+        git init -q . && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init || exit 1
+        err=$("$pytte" -p -w feat -m faux/faux --script "$script" hi 2>&1 >/dev/null)
+        check "-w starts in a new worktree" [ "$(echo "$err" | head -1)" = "pytte: made worktree $r/.pytte/worktrees/feat on branch worktree-feat" ]
+        id=$(echo "$err" | sed -n 's/^session //p')
+        grep -q "\"cwd\":\"$r/.pytte/worktrees/feat\"" "$XDG_STATE_HOME/pytte/sessions/$id/log.jsonl"
+        check "...and its session works there" [ $? -eq 0 ]
+        err=$("$pytte" -p --worktree=feat -m faux/faux --script "$script" hi 2>&1 >/dev/null | head -1)
+        check "...and --worktree=feat goes in again" [ "$err" = "pytte: in worktree $r/.pytte/worktrees/feat" ]
+        check "...and the checkout stays clean" [ -z "$(git status --porcelain)" ]
+        "$pytte" -p -w -c hi >/dev/null 2>&1
+        check "...but not with -c" [ $? -eq 1 ]
+    )
+fi
 (
     XDG_STATE_HOME=$(mktemp -d)
     "$pytte" -p -m faux/faux --script tests/faux/slow.json "doomed" >/dev/null 2>&1 &
