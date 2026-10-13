@@ -13,7 +13,10 @@
  * Calls send a progress token (the call's effect ID); progress shows as
  * the call's output. Cancelling sends notifications/cancelled. The model
  * sees text and the first image of a result; long text is cut like any
- * tool's output. */
+ * tool's output.
+ *
+ * Arguments the config fills in (pt_rt_mcp_server.arguments) leave a
+ * tool's schema when it is listed, and are added to each call's. */
 #define _POSIX_C_SOURCE 200809L
 #include "rt/mcp_int.h"
 
@@ -898,7 +901,16 @@ static void got_tools(srv *s, const pt_json *r)
         mt->name = pt_arena_dup(la, name);
         mt->full = pt_arena_dup(la, pt_buf_str(&full));
         mt->desc = pt_arena_dup(la, mcp_cut(desc.n ? desc : name, DESC_MAX));
-        mt->schema = pt_arena_dup(la, pt_json_is(schema, PT_J_OBJ) ? schema->raw : PT_S("{\"type\":\"object\"}"));
+        if (!pt_json_is(schema, PT_J_OBJ))
+            schema = NULL;
+        mt->schema = pt_arena_dup(la, schema ? schema->raw : PT_S("{\"type\":\"object\"}"));
+        pt_buf_reset(&full);
+        if (mcp_fill_of(s->fill, name, schema, &full)) {
+            mt->fill = pt_arena_dup(la, pt_buf_str(&full));
+            pt_buf_reset(&full);
+            if (schema && mcp_schema_strip(schema, mt->fill, &full, ma))
+                mt->schema = pt_arena_dup(la, pt_buf_str(&full));
+        }
         mt->ro = s->trust && pt_json_truthy(pt_json_get(ann, "readOnlyHint"));
         mt->safe = s->trust && (mt->ro || pt_json_truthy(pt_json_get(ann, "idempotentHint")));
     }
@@ -1331,7 +1343,16 @@ static void call_send(mcall *c)
     pt_buf_putz(&params, "{\"name\":");
     pt_json_quote(&params, t->name);
     pt_buf_putz(&params, ",\"arguments\":");
-    pt_buf_putz(&params, c->args && c->args[0] ? c->args : "{}");
+    if (t->fill.n) {
+        pt_arena tmp;
+        pt_arena_init(&tmp, pt_sys_allocator(), 0);
+        mcp_fill_args(t->fill, pt_strz(c->args), pt_session_model(pt_rt_agent(s->m->rt)), pt_strz(s->m->rt->session),
+                      &params, &tmp);
+        if (tmp.oom)
+            params.oom = true;
+        pt_arena_free(&tmp);
+    } else
+        pt_buf_putz(&params, c->args && c->args[0] ? c->args : "{}");
     pt_buf_putz(&params, ",\"_meta\":{\"progressToken\":");
     pt_buf_u64(&params, c->fx);
     pt_buf_putz(&params, "}}");
@@ -1515,6 +1536,11 @@ static srv *srv_new(mcp *m, const pt_rt_mcp_server *c)
     s->timeout_s = c->timeout_s ? c->timeout_s : 600;
     s->startup_s = c->startup_s ? c->startup_s : 15;
     s->trust = c->trust_hints;
+    if (c->arguments) {
+        pt_json_err e;
+        const pt_json *f = pt_json_parse(pt_arena_dup(a, pt_strz(c->arguments)), a, &e);
+        s->fill = pt_json_is(f, PT_J_OBJ) ? f : NULL;
+    }
     snprintf(s->prefix, sizeof s->prefix, "mcp__%s__", s->name);
     /* sh finds the command on PATH: exec "$0" "$@" */
     s->argv = (const char **)pt_arena_zalloc(a, sizeof *s->argv * (c->nargs + 5));

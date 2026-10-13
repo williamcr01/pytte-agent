@@ -71,6 +71,7 @@ struct pt_rt {
     bool io_pending, io_ok;
     char io_error[512];
     char io_blob[72]; /* a stored BLOB's ref: "sha256:<hex>" */
+    char session[64]; /* c.session's copy */
     /* tools */
     pt_rt_tool *tools;
     pt_tool_def *defs;

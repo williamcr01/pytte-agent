@@ -1,5 +1,13 @@
 # Development rules
 
+## Documentation
+
+- `docs/` is the reference for how pytte behaves, one page per feature
+  area, indexed in `docs/README.md` (which also gives the page layout).
+  A change to user-facing behavior (config keys, commands, flags, what is
+  sent or stored) updates its page in the same change; a new area gets a
+  new page. The top-level README stays a short tour that links there.
+
 ## Code quality
 
 - Never add backward compatibility unless the user explicitly asks for it.

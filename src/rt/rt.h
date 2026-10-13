@@ -23,6 +23,8 @@ typedef struct pt_rt_cfg {
     /* Whose API key variables tools never see; NULL: the built-in one.
      * Must outlive the runtime. */
     const pt_ai_catalog *catalog;
+    /* The session's ID, for {session} in MCP arguments (copied); NULL: none. */
+    const char *session;
 } pt_rt_cfg;
 
 pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a);
@@ -175,6 +177,13 @@ typedef struct pt_rt_mcp_server {
     uint32_t timeout_s; /* a tool call; 0: 600 */
     uint32_t startup_s; /* listing its tools at start; 0: 15 */
     bool trust_hints;   /* the server's readOnlyHint makes a tool read-only */
+    /* Arguments pytte fills in, as JSON text: {"<tool>" or "*": {"<arg>":
+     * value}}; NULL: none. The model is not shown them: they leave the
+     * tool's schema, and a call gets them in place of the model's. "*"
+     * applies to the tools whose schema has the argument. In strings,
+     * {model} becomes the session's model ("provider/model-id"),
+     * {model_id} the part after the provider, {session} its ID. */
+    const char *arguments;
 } pt_rt_mcp_server;
 
 /* The host's side: what to tell the user, and where OAuth tokens live.

@@ -65,4 +65,19 @@ void mcp_resource_text(const pt_json *result, pt_arena *a, pt_buf *text);
 /* At most n bytes of s, ending on a whole UTF-8 character. */
 pt_str mcp_cut(pt_str s, size_t n);
 
+/* ---- arguments the config fills in (pt_rt_mcp_server.arguments) ---- */
+
+/* Those of tool, from fill ({"<tool>" or "*": {...}}; NULL: none): its own
+ * entry's, and the "*" entry's its schema has (properties) and its own
+ * does not set, as a JSON object into out. False (out empty) when none. */
+bool mcp_fill_of(const pt_json *fill, pt_str tool, const pt_json *schema, pt_buf *out);
+/* schema (an object) without the arguments of fill (a JSON object), in
+ * properties and required, into out. False when fill does not parse. */
+bool mcp_schema_strip(const pt_json *schema, pt_str fill, pt_buf *out, pt_arena *tmp);
+/* args (the model's, a JSON object; anything else counts as none) with
+ * fill's in place of its own, as a JSON object into out. In fill's
+ * strings, {model} becomes model ("provider/model-id"), {model_id} the
+ * part after the provider, {session} session. */
+void mcp_fill_args(pt_str fill, pt_str args, pt_str model, pt_str session, pt_buf *out, pt_arena *tmp);
+
 #endif

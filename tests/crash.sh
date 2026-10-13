@@ -29,8 +29,9 @@ run_and_kill() {
 }
 
 for round in $(seq "$rounds"); do
-    export XDG_STATE_HOME
+    export XDG_STATE_HOME XDG_CONFIG_HOME
     XDG_STATE_HOME=$(mktemp -d)
+    XDG_CONFIG_HOME=$XDG_STATE_HOME/config # not the user's (MCP servers, a model)
     if [ $((round % 2)) -eq 1 ]; then
         script=$PWD/tests/faux/crash.json
         want="No tools are available yet, so I cannot list the files. This answer streams slowly enough to be killed halfway."

@@ -247,37 +247,12 @@ resources. They go in `mcpServers` of `~/.config/pytte/config.json`:
 }
 ```
 
-A server with `command` runs as a child process speaking over stdin and
-stdout (`args`, `env`, `cwd`); one with `url` is remote, over Streamable
-HTTP (`headers`). `${VAR}` and `${VAR:-default}` take the environment's
-values. Also: `timeout` (seconds for a tool call, 600), `startup_timeout`
-(15), `disabled`, and `trust_hints`, which lets the server's `readOnlyHint`
-make a tool read-only (by default every MCP tool asks). The provider API
-keys pytte knows are removed from a stdio server's environment unless its
-`env` sets them.
-
-A project's servers, in `.mcp.json` or `mcpServers` of `.pytte/config.json`,
-start programs, so they run only once trusted: the TUI says which there
-are, and `/mcp trust` (or `pytte mcp trust`) runs them. Trust is kept in
-`~/.config/pytte/trust.json` with a hash of the project's server config;
-any change asks again. A trusted project server replaces a user server of
-the same name.
-
-Servers start with the session, in the background. A new session's first
-request waits for them to list their tools (up to `startup_timeout`), so
-a prompt sent at once shows as sent and goes a moment later. Their tools
-are `mcp__<server>__<tool>`. A server that dies starts again at the next
-call of its tools. Prompts are slash commands, `/<server>:<prompt> [args]`
-(arguments in order, the last taking the rest, or `name=value`), and send
-the prompt's text as the message; `@<server>:<uri>` anywhere in a message
-adds that resource's contents (typing `@` lists them). Remote servers that
-ask for a login get one with OAuth (discovery, dynamic client registration
-or `client_id`/`client_secret`/`scope` in the config, PKCE, and a
-browser that answers to 127.0.0.1): `/mcp login <name>` or `pytte mcp
-login <name>`. Tokens are kept in `~/.config/pytte/mcp-auth.json` (0600)
-and refreshed when they expire. `/mcp` shows each server's state; `/mcp
-restart`, `/mcp logout` and `/mcp untrust` do what they say, and
-`--no-mcp` starts none.
+Their tools are `mcp__<server>__<tool>`, prompts are slash commands
+(`/<server>:<prompt>`) and resources are `@<server>:<uri>` mentions. A
+project's servers (`.mcp.json`) run once trusted (`/mcp trust`), remote
+servers can log in with OAuth (`/mcp login <name>`), and `arguments` fills
+in tool arguments the model should not choose, such as the calling
+model's name. Every key and rule is in [docs/mcp.md](docs/mcp.md).
 
 Long sessions: before a request that would not fit the context window
 (less 24k tokens, or a quarter of a small window), or after the provider
@@ -350,6 +325,7 @@ tests/crash.sh         the same with real processes and kill -9
 tests/vt.c             a strict terminal emulator for the TUI tests
 tests/test_screen.c    random sessions checked against the emulator's screen
 tests/test_pty.c       the real pytte in a pseudo-terminal
+docs/                  the reference: config keys and behavior, by feature
 ```
 
 ## Fixtures

@@ -1,6 +1,7 @@
 /* MCP messages from a server: parsing never crashes, a tool or prompt
  * result becomes text whatever its shape, tool names stay short and in
- * [A-Za-z0-9_-], and the messages built for the wire parse back. */
+ * [A-Za-z0-9_-], and the messages built for the wire parse back, as do
+ * schemas and arguments with the config's filled-in arguments. */
 #include <stdlib.h>
 #include <string.h>
 
@@ -63,6 +64,30 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t size)
     }
     if (mcp_cut(in, half).n > half)
         abort();
+    /* filled-in arguments: the input as a schema, the config and the
+     * model's arguments; what is built parses back as an object */
+    {
+        pt_json *j = pt_json_parse(in, &a, NULL);
+        pt_buf f;
+        const pt_json *o;
+        pt_buf_init(&f, al);
+        pt_buf_reset(&b);
+        if (mcp_fill_of(j, PT_S("t"), j, &f) && !f.oom &&
+            (!pt_json_is(o = pt_json_parse(pt_buf_str(&f), &a, NULL), PT_J_OBJ) ||
+             (mcp_schema_strip(j, pt_buf_str(&f), &b, &a) && !b.oom &&
+              !pt_json_is(pt_json_parse(pt_buf_str(&b), &a, NULL), PT_J_OBJ))))
+            abort();
+        pt_buf_reset(&b);
+        if (mcp_schema_strip(j, PT_S("{\"a\":1,\"b\":2}"), &b, &a) && !b.oom &&
+            !pt_json_is(pt_json_parse(pt_buf_str(&b), &a, NULL), PT_J_OBJ))
+            abort();
+        pt_buf_reset(&b);
+        mcp_fill_args(PT_S("{\"a\":\"{model}/{model_id}{session}{x}\",\"b\":[1]}"), in,
+                      (pt_str){in.p, half}, (pt_str){in.p + half, size - half}, &b, &a);
+        if (!b.oom && !a.oom && !pt_json_is(pt_json_parse(pt_buf_str(&b), &a, NULL), PT_J_OBJ))
+            abort();
+        pt_buf_free(&f);
+    }
     pt_buf_free(&b);
     pt_arena_free(&a);
     return 0;

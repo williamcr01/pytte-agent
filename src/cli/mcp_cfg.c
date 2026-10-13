@@ -98,6 +98,49 @@ static uint32_t num_of(const pt_json *o, const char *key)
 }
 
 /* One server's config; false (with a warning) skips it. */
+/* "arguments": {"<tool>" or "*": {"<arg>": value}}, with ${VAR} expanded
+ * in string values, as JSON text; NULL (and a warning) when malformed. */
+static const char *arguments_of(cli_mcp *m, const pt_json *e, const char *where, const char *name, pt_arena *tmp)
+{
+    const pt_json *fill = pt_json_get(e, "arguments"), *t, *v;
+    const char *out;
+    pt_buf b;
+    if (!fill)
+        return NULL;
+    if (!pt_json_is(fill, PT_J_OBJ)) {
+        warnf(m, where, name, "arguments is an object of tool names (or *) to arguments");
+        return NULL;
+    }
+    for (t = fill->child; t; t = t->next)
+        if (!pt_json_is(t, PT_J_OBJ)) {
+            warnf(m, where, name, "each tool's arguments is an object");
+            return NULL;
+        }
+    pt_buf_init(&b, pt_sys_allocator());
+    pt_buf_putc(&b, '{');
+    for (t = fill->child; t; t = t->next) {
+        if (t != fill->child)
+            pt_buf_putc(&b, ',');
+        pt_json_quote(&b, t->key);
+        pt_buf_putz(&b, ":{");
+        for (v = t->child; v; v = v->next) {
+            if (v != t->child)
+                pt_buf_putc(&b, ',');
+            pt_json_quote(&b, v->key);
+            pt_buf_putc(&b, ':');
+            if (pt_json_is(v, PT_J_STR))
+                pt_json_quote(&b, pt_strz(expand(tmp, pt_json_str(v, tmp))));
+            else
+                pt_buf_puts(&b, v->raw);
+        }
+        pt_buf_putc(&b, '}');
+    }
+    pt_buf_putc(&b, '}');
+    out = b.oom ? NULL : pt_arena_cstr(&m->ar, pt_buf_str(&b));
+    pt_buf_free(&b);
+    return out;
+}
+
 static bool parse_server(cli_mcp *m, const pt_json *e, const char *where, const char *dir, pt_rt_mcp_server *s,
                          pt_arena *tmp)
 {
@@ -197,6 +240,7 @@ static bool parse_server(cli_mcp *m, const pt_json *e, const char *where, const 
     s->timeout_s = num_of(e, "timeout");
     s->startup_s = num_of(e, "startup_timeout");
     s->trust_hints = pt_json_truthy(pt_json_get(e, "trust_hints"));
+    s->arguments = arguments_of(m, e, where, name, tmp);
     return !a->oom;
 }
 

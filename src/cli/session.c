@@ -482,6 +482,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     rc.http = s->http;
     rc.stop = o->stop;
     rc.catalog = cli_catalog();
+    rc.session = s->id;
     if (!(s->a = pt_new(&ao)) || !(s->rt = pt_rt_new(&rc, s->a))) {
         st->close(st);
         return fail(s, 1, err, cap, "out of memory");

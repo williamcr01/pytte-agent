@@ -93,7 +93,13 @@ static int server(const char *mode)
         } else if (pt_str_eqz(method, "notifications/cancelled")) {
             cancelled++;
         } else if (pt_str_eqz(method, "tools/list")) {
-            if (!pt_json_gets(params, "cursor", &ar).n)
+            if (!strcmp(mode, "fill"))
+                result(&b, id,
+                       "{\"tools\":[{\"name\":\"show\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{"
+                       "\"type\":\"string\"},\"model_name\":{\"type\":\"string\"},\"session_id\":{\"type\":\"string\"}},"
+                       "\"required\":[\"q\",\"session_id\"]}},{\"name\":\"plain\",\"inputSchema\":{\"type\":\"object\","
+                       "\"properties\":{\"q\":{\"type\":\"string\"}}}}]}");
+            else if (!pt_json_gets(params, "cursor", &ar).n)
                 result(&b, id,
                        "{\"tools\":[{\"name\":\"echo\",\"description\":\"Says it back.\",\"inputSchema\":{\"type\":"
                        "\"object\",\"properties\":{\"text\":{\"type\":\"string\"}}},\"annotations\":{\"readOnlyHint\":"
@@ -105,7 +111,9 @@ static int server(const char *mode)
                 result(&b, id, "{\"tools\":[{\"name\":\"img\"},{\"name\":\"fail\"},{\"name\":\"crash\"},{\"name\":"
                                "\"stats\"},{\"name\":\"changes\"}]}");
         } else if (pt_str_eqz(method, "tools/call")) {
-            if (pt_str_eqz(name, "echo")) {
+            if (!strcmp(mode, "fill")) {
+                text_result(&b, id, "got: ", args ? args->raw : PT_STR_NULL, false);
+            } else if (pt_str_eqz(name, "echo")) {
                 text_result(&b, id, "echo: ", pt_json_gets(args, "text", &ar), false);
             } else if (pt_str_eqz(name, "slow")) {
                 pt_str tok = pt_json_get(pt_json_get(params, "_meta"), "progressToken")->raw;
@@ -310,6 +318,7 @@ static void open_sess(sess *s, const char *script, const pt_rt_mcp_server *srv, 
     memset(&rc, 0, sizeof rc);
     rc.store = s->st;
     rc.http = s->http;
+    rc.session = "sid-1";
     s->rt = pt_rt_new(&rc, s->a);
     CHECK(pt_rt_add_builtins(s->rt));
     pt_rt_set_perm(s->rt, perm);
@@ -459,6 +468,30 @@ static void test_tools(void)
     }
     CHECK(pt_rt_tool_has(s.rt, PT_S("mcp__t__extra")));
     CHECK(info(&s, 0).ntools == 8);
+    close_sess(&s);
+}
+
+/* Arguments the config fills in: hidden from the model, sent instead of its own. */
+static void test_fill(void)
+{
+    sess s;
+    pt_rt_mcp_server c;
+    bool err = true;
+    pt_str ep;
+    srv_cfg(&c, "f", "fill");
+    c.arguments = "{\"*\":{\"model_name\":\"{model_id}\",\"session_id\":\"s-{session}\"},"
+                  "\"plain\":{\"fixed\":3,\"who\":\"{model} {nope}\"}}";
+    open_sess(&s,
+              "{\"turns\":[" TURN(CALL("mcp__f__show", "{\"q\":\"x\",\"model_name\":\"liar\"}") "," CALL(
+                  "mcp__f__plain", "{\"q\":\"y\"}")) "," DONE "]}",
+              &c, 1, PT_PERM_AUTO);
+    say(&s, "go");
+    ep = epoch_raw(&s);
+    CHECK(has(ep, "mcp__f__show") && has(ep, "\"properties\":{\"q\":{\"type\":\"string\"}},\"required\":[\"q\"]"));
+    CHECK(!has(ep, "model_name") && !has(ep, "session_id"));
+    CHECK(tool_result(&s, "got: {\"q\":\"x\",\"model_name\":\"faux\",\"session_id\":\"s-sid-1\"}", &err, NULL) && !err);
+    /* "*" only where the schema has it; the tool's own entry always */
+    CHECK(tool_result(&s, "got: {\"q\":\"y\",\"fixed\":3,\"who\":\"faux/faux {nope}\"}", &err, NULL) && !err);
     close_sess(&s);
 }
 
@@ -974,7 +1007,7 @@ static void test_config(void)
         "\"a\": {\"command\": \"srv-${PT_T_NAME}\", \"args\": [\"--x=${PT_T_NOPE:-dflt}\", \"$plain\"], "
         "\"env\": {\"K\": \"${PT_T_NAME}\", \"N\": 3}, \"timeout\": 9, \"trust_hints\": true},"
         "\"b\": {\"type\": \"http\", \"url\": \"https://h.test/mcp\", \"headers\": {\"X-Key\": \"k-${PT_T_NAME}\"}, "
-        "\"oauth\": {\"client_id\": \"cid\"}},"
+        "\"oauth\": {\"client_id\": \"cid\"}, \"arguments\": {\"*\": {\"k\": \"${PT_T_NAME}-{model}\", \"n\": [1]}}},"
         "\"off\": {\"command\": \"x\", \"disabled\": true}}}";
     static const char proj[] = "{\"mcpServers\": {\"p\": {\"command\": \"p\", \"cwd\": \"sub\"}, \"a\": {\"command\": \"pa\"}}}";
     if (!dir)
@@ -1002,6 +1035,8 @@ static void test_config(void)
         CHECK(m.run[0].timeout_s == 9 && m.run[0].trust_hints && !m.run[0].cwd);
         CHECK(!strcmp(m.run[1].url, "https://h.test/mcp") && m.run[1].nheaders == 1);
         CHECK(!strcmp(m.run[1].headers[0].value, "k-nm") && !strcmp(m.run[1].client_id, "cid"));
+        CHECK(m.run[1].arguments && !strcmp(m.run[1].arguments, "{\"*\":{\"k\":\"nm-{model}\",\"n\":[1]}}"));
+        CHECK(!m.run[0].arguments);
     }
     CHECK(!strcmp(m.info[2].source, ".mcp.json") && !m.info[2].runs);
     CHECK(cli_mcp_trust(&m, true, err, sizeof err));
@@ -1045,6 +1080,16 @@ static void test_config(void)
     cli_mcp_load(&m, path);
     CHECK(strstr(m.warn, "names are 1 to 32") != NULL);
     CHECK(m.n == 0);
+    cli_mcp_free(&m);
+    snprintf(path, sizeof path, "%s/pytte/config.json", dir);
+    {
+        static const char bad[] = "{\"mcpServers\": {\"s\": {\"url\": \"https://x\", \"arguments\": {\"*\": 3}}}}";
+        CHECK(pt_sys_write_file(path, bad, sizeof bad - 1));
+    }
+    snprintf(path, sizeof path, "%s/proj", dir);
+    cli_mcp_load(&m, path);
+    CHECK(strstr(m.warn, "each tool's arguments is an object") != NULL);
+    CHECK(m.n == 1 && !m.run[0].arguments); /* the server still runs, without them */
     cli_mcp_free(&m);
     {
         char cmd[700];
@@ -1091,6 +1136,7 @@ int main(int argc, char **argv)
     }
     RUN(test_proto);
     RUN(test_tools);
+    RUN(test_fill);
     RUN(test_ask);
     RUN(test_timeout);
     RUN(test_crash);

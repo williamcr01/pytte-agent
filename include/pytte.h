@@ -317,6 +317,10 @@ uint32_t pt_asks(const pt_agent *a, pt_ask_view *out, uint32_t max);
 pt_str pt_doc(const pt_agent *a, pt_str key);
 /* The working directory the session was started in. */
 pt_str pt_session_cwd(const pt_agent *a);
+/* The model the newest run asked for ("provider/model-id"); before the
+ * first, the one the session was created with (pt_config.model), or
+ * empty. Lives until the next commit applies. */
+pt_str pt_session_model(const pt_agent *a);
 /* The host's prompt settings from the session header (pt_session_cfg.prompt),
  * or empty. */
 pt_str pt_session_prompt(const pt_agent *a);

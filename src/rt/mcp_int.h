@@ -58,7 +58,8 @@ typedef struct list {
 typedef struct mtool {
     pt_str name; /* the server's */
     pt_str full; /* mcp__server__name: the model's */
-    pt_str desc, schema;
+    pt_str desc, schema; /* schema: without the arguments pytte fills in */
+    pt_str fill;         /* those arguments: a JSON object, or empty */
     bool ro, safe;
 } mtool;
 
@@ -71,6 +72,7 @@ struct srv {
     pt_header *headers;
     uint32_t nheaders, timeout_s, startup_s;
     bool trust, http;
+    const pt_json *fill; /* "arguments": {"<tool>" or "*": {...}}; NULL: none */
     char prefix[48]; /* "mcp__<name>__" */
     pt_mcp_state state;
     char error[600];

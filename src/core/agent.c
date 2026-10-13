@@ -366,6 +366,10 @@ static void build_create(pt_agent *a)
     pt_jw_strz(w, PT_VERSION);
     pt_jw_key(w, "forked_from");
     pt_jw_null(w);
+    if (a->o.config.model.n) { /* resuming before the first request keeps it */
+        pt_jw_key(w, "model");
+        pt_jw_str(w, a->o.config.model);
+    }
     if (c->prompt.n) {
         pt_jw_key(w, "prompt");
         pt_jw_raw(w, c->prompt);
@@ -1118,6 +1122,11 @@ pt_str pt_doc(const pt_agent *a, pt_str key)
 pt_str pt_session_cwd(const pt_agent *a)
 {
     return a->cwd.n ? a->cwd : a->create.cwd;
+}
+
+pt_str pt_session_model(const pt_agent *a)
+{
+    return a->last_model;
 }
 
 uint64_t pt_context_tokens(const pt_agent *a)

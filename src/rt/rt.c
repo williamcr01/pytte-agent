@@ -36,6 +36,9 @@ pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a)
     if (!rt->c.sleep)
         rt->c.sleep = sys_sleep;
     rt->a = a;
+    if (c->session)
+        snprintf(rt->session, sizeof rt->session, "%s", c->session);
+    rt->c.session = NULL;
     pt_buf_init(&rt->scratch, pt_sys_allocator());
     pt_buf_init(&rt->mat_cur, pt_sys_allocator());
     pt_arena_init(&rt->ar, pt_sys_allocator(), 4096);

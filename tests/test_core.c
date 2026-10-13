@@ -41,6 +41,7 @@ typedef struct host {
     bool mat_hold;     /* keep EPOCH_MATERIALS unanswered: h_run returns false */
     uint32_t mat_held; /* ...its effect */
     bool provisional;  /* h_create: the first epoch is settled later */
+    bool no_model;     /* h_agent: no configured model (pytte -c) */
 } host;
 
 static bool h_blob(void *ud, pt_str ref, pt_arena *ar, pt_str *out)
@@ -99,7 +100,7 @@ static pt_agent *h_agent(host *h)
     o.random = h_random;
     o.on_event = h_event;
     o.ud = h;
-    o.config.model = PT_S("faux/faux");
+    o.config.model = h->no_model ? PT_STR_NULL : PT_S("faux/faux");
     o.config.live_interval_ms = 1;
     o.blob = h_blob;
     o.blob_ud = h;
@@ -696,8 +697,11 @@ static void test_provisional_epoch(void)
     CHECK(pt_entry_count(h.a) == 2); /* the prompt is in: shown as sent */
     CHECK(pt_entry_at(h.a, 1, &v) && strcmp(v.kind, "user") == 0);
     CHECK(has(pt_buf_str(&h.log), PT_S("\"provisional\":true")));
-    /* a crash meanwhile: the new owner asks again */
+    /* a crash meanwhile: the new owner, configured with no model, asks
+     * again and keeps the one the session was created with */
+    h.no_model = true;
     CHECK(h_reload(&h) == PT_LOAD_OK);
+    CHECK(pt_str_eqz(pt_session_model(h.a), "faux/faux"));
     h.mat_held = 0;
     h_open(&h, "testhost", false, true);
     CHECK(!h_run(&h));
@@ -707,6 +711,7 @@ static void test_provisional_epoch(void)
     h.mat_hold = false;
     CHECK(h_run(&h));
     CHECK(h.done == 1 && h.requests == 1);
+    h.no_model = false;
     CHECK(has(pt_buf_str(&h.last_request), PT_S("Rebuilt.")));
     CHECK(has(pt_buf_str(&h.last_request), PT_S("\"tools\":1")));
     CHECK(pt_entry_at(h.a, 0, &v) && pt_str_eqz(v.msg->text, "Rebuilt."));

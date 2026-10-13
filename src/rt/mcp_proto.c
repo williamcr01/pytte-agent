@@ -287,3 +287,144 @@ void mcp_resource_text(const pt_json *result, pt_arena *a, pt_buf *text)
         }
     }
 }
+
+/* ---- arguments the config fills in ---- */
+
+static const pt_json *member(const pt_json *obj, pt_str key)
+{
+    const pt_json *v;
+    for (v = pt_json_is(obj, PT_J_OBJ) ? obj->child : NULL; v; v = v->next)
+        if (pt_str_eq(v->key, key))
+            return v;
+    return NULL;
+}
+
+static void put_member(pt_buf *out, bool *first, pt_str key)
+{
+    pt_buf_putc(out, *first ? '{' : ',');
+    pt_json_quote(out, key);
+    pt_buf_putc(out, ':');
+    *first = false;
+}
+
+bool mcp_fill_of(const pt_json *fill, pt_str tool, const pt_json *schema, pt_buf *out)
+{
+    const pt_json *own = member(fill, tool), *any = member(fill, PT_S("*"));
+    const pt_json *props = pt_json_get(schema, "properties"), *v;
+    bool first = true;
+    if (!pt_json_is(own, PT_J_OBJ))
+        own = NULL;
+    for (v = own ? own->child : NULL; v; v = v->next) {
+        put_member(out, &first, v->key);
+        pt_buf_puts(out, v->raw);
+    }
+    for (v = pt_json_is(any, PT_J_OBJ) ? any->child : NULL; v; v = v->next) {
+        if (member(own, v->key) || !member(props, v->key))
+            continue;
+        put_member(out, &first, v->key);
+        pt_buf_puts(out, v->raw);
+    }
+    if (!first)
+        pt_buf_putc(out, '}');
+    return !first;
+}
+
+bool mcp_schema_strip(const pt_json *schema, pt_str fill, pt_buf *out, pt_arena *tmp)
+{
+    const pt_json *f = pt_json_parse(fill, tmp, NULL), *m, *v;
+    if (!pt_json_is(f, PT_J_OBJ) || !pt_json_is(schema, PT_J_OBJ))
+        return false;
+    pt_buf_putc(out, '{');
+    for (m = schema->child; m; m = m->next) {
+        bool first = true;
+        if (m != schema->child)
+            pt_buf_putc(out, ',');
+        pt_json_quote(out, m->key);
+        pt_buf_putc(out, ':');
+        if (pt_str_eqz(m->key, "properties") && pt_json_is(m, PT_J_OBJ)) {
+            pt_buf_putc(out, '{');
+            for (v = m->child; v; v = v->next) {
+                if (member(f, v->key))
+                    continue;
+                if (!first)
+                    pt_buf_putc(out, ',');
+                pt_json_quote(out, v->key);
+                pt_buf_putc(out, ':');
+                pt_buf_puts(out, v->raw);
+                first = false;
+            }
+            pt_buf_putc(out, '}');
+        } else if (pt_str_eqz(m->key, "required") && pt_json_is(m, PT_J_ARR)) {
+            pt_buf_putc(out, '[');
+            for (v = m->child; v; v = v->next) {
+                if (pt_json_is(v, PT_J_STR) && member(f, pt_json_str(v, tmp)))
+                    continue;
+                if (!first)
+                    pt_buf_putc(out, ',');
+                pt_buf_puts(out, v->raw);
+                first = false;
+            }
+            pt_buf_putc(out, ']');
+        } else {
+            pt_buf_puts(out, m->raw);
+        }
+    }
+    pt_buf_putc(out, '}');
+    return true;
+}
+
+/* A string with the placeholders replaced, quoted; anything else as is. */
+static void fill_value(const pt_json *v, pt_str model, pt_str session, pt_buf *out, pt_arena *tmp)
+{
+    pt_str z;
+    pt_buf b;
+    size_t i;
+    if (!pt_json_is(v, PT_J_STR)) {
+        pt_buf_puts(out, v->raw);
+        return;
+    }
+    z = pt_json_str(v, tmp);
+    pt_buf_init(&b, out->al);
+    for (i = 0; i < z.n; i++) {
+        pt_str rest = {z.p + i, z.n - i};
+        if (pt_str_starts(rest, PT_S("{model}"))) {
+            pt_buf_puts(&b, model);
+            i += 6;
+        } else if (pt_str_starts(rest, PT_S("{model_id}"))) {
+            long k = pt_str_find(model, '/');
+            if (k >= 0) {
+                pt_str id = {model.p + k + 1, model.n - (size_t)k - 1};
+                pt_buf_puts(&b, id);
+            } else {
+                pt_buf_puts(&b, model);
+            }
+            i += 9;
+        } else if (pt_str_starts(rest, PT_S("{session}"))) {
+            pt_buf_puts(&b, session);
+            i += 8;
+        } else {
+            pt_buf_putc(&b, z.p[i]);
+        }
+    }
+    pt_json_quote(out, pt_buf_str(&b));
+    if (b.oom)
+        out->oom = true;
+    pt_buf_free(&b);
+}
+
+void mcp_fill_args(pt_str fill, pt_str args, pt_str model, pt_str session, pt_buf *out, pt_arena *tmp)
+{
+    const pt_json *f = pt_json_parse(fill, tmp, NULL), *a = args.n ? pt_json_parse(args, tmp, NULL) : NULL, *v;
+    bool first = true;
+    for (v = pt_json_is(a, PT_J_OBJ) ? a->child : NULL; v; v = v->next) {
+        if (member(f, v->key))
+            continue;
+        put_member(out, &first, v->key);
+        pt_buf_puts(out, v->raw);
+    }
+    for (v = pt_json_is(f, PT_J_OBJ) ? f->child : NULL; v; v = v->next) {
+        put_member(out, &first, v->key);
+        fill_value(v, model, session, out, tmp);
+    }
+    pt_buf_putz(out, first ? "{}" : "}");
+}
