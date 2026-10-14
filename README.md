@@ -164,8 +164,9 @@ Sessions live in `$XDG_STATE_HOME/pytte/sessions/<id>/` (by default
 `~/.local/state/pytte`). `log.jsonl` is the whole truth: one commit per line,
 readable with `jq`. Kill the process at any point and `pytte -c` continues
 from the last commit: a half-streamed answer is kept as an interrupted entry
-and the request is sent again. A watchdog process restores the terminal
-modes even after `kill -9` (run `reset` if keys still misbehave). Exit codes:
+and the request is sent again. pytte restores the terminal modes on every
+exit it can see (quit, Ctrl-C, `kill`, a hang-up, a crash); after `kill -9`
+it cannot, so run `reset` if keys misbehave. Exit codes:
 0 done, 1 setup (such as a missing key), 3 a tool call waits for approval
 (print mode), 10 the run failed, 20 storage error, 130 detached (Ctrl-C in
 print mode).

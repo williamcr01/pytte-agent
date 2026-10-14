@@ -451,7 +451,7 @@ static int finish(pty *p, int ms)
         }
         pump(p, 20);
     }
-    pump(p, 100); /* the last bytes, the watchdog's */
+    pump(p, 100); /* the last bytes */
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
@@ -549,10 +549,7 @@ static void test_kill9(void)
     keys(&p, "list the files\r");
     CHECK(wait_for(&p, "No tools are available", 5000));
     kill(p.pid, SIGKILL);
-    CHECK(finish(&p, 3000) == 137);
-    CHECK(p.v->kitty == 0); /* the watchdog popped the flags */
-    CHECK(!p.v->paste);
-    modes_restored(&p);
+    CHECK(finish(&p, 3000) == 137); /* the modes stay as kill -9 left them */
     pty_free(&p);
     /* the transcript is the same after pytte -c, with the partial marked */
     pty_start(&p, 24, 80, again);
