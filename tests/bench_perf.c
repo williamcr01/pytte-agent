@@ -181,16 +181,16 @@ static void core_work(counts *c, size_t reply, unsigned turns)
 #ifndef PT_BENCH_LEGACY
     arena_usage(c, &h.a->objects);
 #endif
-    arena_usage(c, &h.a->reqs);
-    arena_usage(c, &h.a->subs_a);
-    arena_usage(c, &h.a->after_a);
+    arena_usage(c, &h.a->req.ar);
+    arena_usage(c, &h.a->subs.ar);
+    arena_usage(c, &h.a->commit.ar);
     for (i = 0; i < h.a->ntasks; i++)
         arena_usage(c, &h.a->tasks[i]->a);
     for (i = 0; i < h.a->ninputs; i++)
         arena_usage(c, &h.a->inputs[i]->a);
-    c->buffer_cap = h.a->commit.cap + h.a->live_out.cap;
+    c->buffer_cap = h.a->commit.buf.cap + h.a->live_out.cap;
     for (i = 0; i < PT_FXQ; i++)
-        c->buffer_cap += h.a->q[i].bytes.cap;
+        c->buffer_cap += h.a->fxq.v[i].bytes.cap;
     pt_free(h.a);
     pt_buf_free(&h.log);
     pt_buf_free(&h.live);

@@ -138,7 +138,7 @@ static bool start_compaction(pt_agent *a, task *t, uint32_t cutoff)
     nt.compact = pt_compact_write(a, t->id, cutoff);
     nt.status = ST_WAITING;
     nt.phase = PH_COMPACT;
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     return pt_core_commit_end(a);
 }
 
@@ -177,7 +177,7 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     nt.reasoning = c->reasoning;
     nt.max_tokens = c->max_tokens ? c->max_tokens : pt_ai_auto_max_tokens(&target, &ctx, used < UINT32_MAX ? (uint32_t)(used ? used : 1) : UINT32_MAX);
     pt_core_commit_begin(a, t->id);
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     ok = pt_core_commit_end(a);
     pt_buf_free(&ref);
     return ok;
@@ -346,7 +346,7 @@ void pt_run_add_usage(pt_agent *a, const pt_msg *m, pt_str model)
     static const char *const keys[] = {"input", "output", "cache_read", "cache_write", "requests"};
     const pt_usage *u = &m->usage;
     const pt_json *old, *c;
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     uint64_t add[5];
     bool found = false;
     unsigned k;
@@ -387,14 +387,14 @@ void pt_run_add_usage(pt_agent *a, const pt_msg *m, pt_str model)
 void pt_run_write_assistant(pt_agent *a, uint32_t id, const pt_msg *m)
 {
     pt_core_entry_begin(a, id, "assistant");
-    pt_jw_key(&a->cw, "message");
-    pt_msg_write_json(&a->cw, m);
+    pt_jw_key(&a->commit.w, "message");
+    pt_msg_write_json(&a->commit.w, m);
     pt_core_entry_end(a);
 }
 
 void pt_run_write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int64_t retry_at)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     pt_core_entry_begin(a, pt_core_new_id(a), "error");
     pt_jw_key(w, "attempt");
     pt_jw_uint(w, attempt);
@@ -413,7 +413,7 @@ void pt_run_write_error(pt_agent *a, uint32_t attempt, const pt_ai_error *e, int
 
 void pt_run_write_tool_error(pt_agent *a, uint32_t id, pt_str call_id, pt_str name, pt_str text)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     pt_core_entry_begin(a, id, "tool_result");
     pt_jw_key(w, "call_id");
     pt_jw_str(w, call_id);
@@ -460,7 +460,7 @@ static bool write_round(pt_agent *a, task *nt, const pt_msg *m, uint32_t calls)
         tt.phase = PH_CALL;
         tt.entry = aid;
         tt.call_id = b->id;
-        pt_write_task(&a->cw, &tt);
+        pt_write_task(&a->commit.w, &tt);
         nt->parallel[k] = !a->o.config.serial_tools && tool_parallel(a, b->name);
         nt->calls[k++] = tt.id;
     }
@@ -483,7 +483,7 @@ static bool classify(pt_agent *a, task *t)
     for (i = 0; i < m->nblocks; i++)
         calls += m->blocks[i].kind == PT_BLOCK_TOOL_CALL;
     pt_core_commit_begin(a, t->id);
-    a->after_live_del = t->id;
+    a->commit.live_del = t->id;
     if (in)
         nin = *in;
     else
@@ -545,9 +545,9 @@ static bool classify(pt_agent *a, task *t)
     }
     if (a->fatal)
         return false; /* discard this incomplete write-ahead batch */
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     if (in && input_changed)
-        pt_write_input(&a->cw, &nin);
+        pt_write_input(&a->commit.w, &nin);
     pt_run_add_usage(a, m, t->model);
     ok = pt_core_commit_end(a);
     if (!rl->http_done) /* the stream ended on its final event before the transfer did */
@@ -580,7 +580,7 @@ static bool commit_rescued(pt_agent *a, task *t)
         return true;
     }
     pt_core_commit_begin(a, t->id);
-    a->after_live_del = t->id;
+    a->commit.live_del = t->id;
     pt_run_write_assistant(a, pt_core_new_id(a), &m);
     return pt_core_commit_end(a);
 }
@@ -619,16 +619,16 @@ static bool end_aborted(pt_agent *a, task *t)
         pt_run_write_assistant(a, pt_core_new_id(a), &m);
     }
     if (t->phase == PH_REQUEST)
-        a->after_live_del = t->id;
+        a->commit.live_del = t->id;
     nt.status = ST_DONE;
     nt.outcome = PT_S("aborted");
     nt.reason = PT_S("interrupted by the user");
     nt.result = 0;
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     if (in) {
         nin = *in;
         nin.status = IN_ABORTED;
-        pt_write_input(&a->cw, &nin);
+        pt_write_input(&a->commit.w, &nin);
     }
     pt_core_after(a, AFTER_RUN_DONE, "aborted", PT_S("interrupted by the user"), 0);
     ok = pt_core_commit_end(a);
@@ -672,7 +672,7 @@ bool pt_run_abort(pt_agent *a, task *t)
         return true; /* already decided */
     pt_core_commit_begin(a, t->id);
     nt.abort = true;
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     for (i = 0; i < a->ntasks; i++)
         if (a->tasks[i]->kind == TASK_TOOL && a->tasks[i]->owner == t->id)
             pt_tool_abort(a, a->tasks[i]);

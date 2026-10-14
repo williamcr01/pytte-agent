@@ -79,9 +79,9 @@ static void snapshot(const char *phase, unsigned turn, const counters *c, const 
         arena_usage(&a->epoch, &acap, &used);
         arena_usage(&a->scratch, &acap, &used);
         arena_usage(&a->objects, &acap, &used);
-        arena_usage(&a->reqs, &acap, &used);
-        arena_usage(&a->subs_a, &acap, &used);
-        arena_usage(&a->after_a, &acap, &used);
+        arena_usage(&a->req.ar, &acap, &used);
+        arena_usage(&a->subs.ar, &acap, &used);
+        arena_usage(&a->commit.ar, &acap, &used);
         for (i = 0; i < a->ntasks; i++) {
             arena_usage(&a->tasks[i]->a, &acap, &used);
             bcap += a->tasks[i]->rescued.cap + a->tasks[i]->gate_text.cap;
@@ -92,9 +92,9 @@ static void snapshot(const char *phase, unsigned turn, const counters *c, const 
         }
         for (i = 0; i < a->ninputs; i++)
             arena_usage(&a->inputs[i]->a, &acap, &used);
-        bcap += a->commit.cap + a->live_out.cap;
+        bcap += a->commit.buf.cap + a->live_out.cap;
         for (i = 0; i < PT_FXQ; i++)
-            bcap += a->q[i].bytes.cap;
+            bcap += a->fxq.v[i].bytes.cap;
     }
     printf("{\"phase\":\"%s\",\"turn\":%u,\"elapsed_ms\":%.6f,\"first_text_ms\":%.6f,"
            "\"text_bytes\":%zu,\"core_allocations\":%zu,\"core_reallocations\":%zu,"

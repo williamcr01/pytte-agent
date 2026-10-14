@@ -154,6 +154,58 @@ typedef struct queued_fx {
 
 typedef enum { AFTER_NONE, AFTER_RETRY, AFTER_RUN_DONE, AFTER_COMPACT } after_kind;
 
+/* The session writes the host requested, applied at the next step. */
+typedef struct session_reqs {
+    bool create, open, close;
+    bool compact;       /* pt_compact: commit a compact task when no run is active */
+    pt_session_cfg cfg; /* create's */
+    pt_arena ar;        /* the strings of cfg, and of claims (below) */
+} session_reqs;
+
+/* Our claim on the session (section 6.8), and the newest claim seen. */
+typedef struct claims {
+    claim newest;    /* the newest claim record */
+    uint32_t mine;   /* our claim's ID, once open */
+    pt_identity me;  /* strings in req.ar */
+    pt_str token, takeover;
+    int64_t opened;
+} claims;
+
+/* The next epoch's materials (PT_FX_EPOCH_MATERIALS), for the compact
+ * task `task`: asked for once its request is about to start. */
+typedef struct epoch_mat {
+    uint32_t task, fx;
+    bool ready, keep; /* keep: the host had nothing newer */
+    pt_buf system, tools, skills; /* tools, skills: JSON arrays, as frozen */
+} epoch_mat;
+
+/* Submissions waiting for their commit. */
+typedef struct sub_list {
+    sub *v;
+    uint32_t n, cap;
+    pt_arena ar;
+} sub_list;
+
+/* The commit in flight (at most one), and what happens when it lands. */
+typedef struct commit_flight {
+    pt_buf buf;
+    pt_jw w; /* its records are written with this */
+    uint32_t fx, task;
+    bool out, close;
+    uint32_t live_del; /* delete this task's live file when it lands */
+    after_kind after;
+    pt_str outcome, error; /* in ar */
+    int64_t until;
+    pt_arena ar;
+} commit_flight;
+
+/* Effects waiting for the host to take them (pt_poll). */
+typedef struct fx_queue {
+    queued_fx v[PT_FXQ];
+    uint32_t head, len;
+    uint32_t next; /* the next effect ID */
+} fx_queue;
+
 struct pt_agent {
     pt_opts o;
     pt_allocator al;
@@ -176,46 +228,19 @@ struct pt_agent {
     pt_str cwd;      /* from the session header (perm) */
     pt_str prompt;   /* the host's prompt settings, from the header (perm) */
     task *free_tasks; /* finished tool tasks, kept for reuse */
-    claim newest;    /* the newest claim record */
-    uint32_t mine;   /* our claim's ID, once open */
     uint32_t next_id;
     uint64_t seq;    /* of the last applied commit */
     uint32_t cur_epoch;
     bool have_session, loaded;
+    bool closing, closed;
     pt_str last_model; /* the newest model a run pinned, else the session's first (in perm) */
 
-    /* requested session writes */
-    bool want_create, want_open, want_close, closing, closed;
-    bool want_compact; /* pt_compact: commit a compact task when no run is active */
-    /* The next epoch's materials (PT_FX_EPOCH_MATERIALS), for the compact
-     * task mat_task: asked for once its request is about to start. */
-    uint32_t mat_task, mat_fx;
-    bool mat_ready, mat_keep; /* keep: the host had nothing newer */
-    pt_buf mat_system, mat_tools, mat_skills; /* tools, skills: JSON arrays, as frozen */
-    pt_session_cfg create;
-    pt_identity me;
-    pt_str my_token, takeover;
-    int64_t my_opened;
-    pt_arena reqs; /* their strings */
-
-    sub *subs;
-    uint32_t nsubs, scap;
-    pt_arena subs_a;
-
-    /* the commit in flight (at most one) */
-    pt_buf commit;
-    pt_jw cw;
-    uint32_t commit_fx, commit_task;
-    bool commit_out, commit_close;
-    uint32_t after_live_del; /* delete this task's live file when it lands */
-    after_kind after;
-    pt_str after_outcome, after_error; /* in after_a */
-    int64_t after_until;
-    pt_arena after_a;
-
-    queued_fx q[PT_FXQ];
-    uint32_t qhead, qlen;
-    uint32_t next_fx;
+    session_reqs req;
+    claims claims;
+    epoch_mat mat;
+    sub_list subs;
+    commit_flight commit;
+    fx_queue fxq;
     run_live *pending_http_free; /* requests retained until their cancel is delivered */
     pt_buf live_out; /* the LIVE snapshot handed out by pt_poll */
 
@@ -237,13 +262,13 @@ uint32_t pt_core_new_fx(pt_agent *a);
 /* Grow an array allocated with the agent's allocator to hold need items. */
 bool pt_core_grow(pt_agent *a, void **arr, uint32_t *cap, uint32_t need, size_t elem);
 /* Start a commit on behalf of task (0 = session); records are written
- * with a->cw; pt_core_commit_end queues it. */
+ * with a->commit.w; pt_core_commit_end queues it. */
 void pt_core_commit_begin(pt_agent *a, uint32_t task);
 bool pt_core_commit_end(pt_agent *a);
 task *pt_core_task(pt_agent *a, uint32_t id);
 input *pt_core_input(pt_agent *a, uint32_t id);
 entry *pt_core_last_entry(pt_agent *a);
-/* An entry record in the current epoch: write its data fields with a->cw
+/* An entry record in the current epoch: write its data fields with a->commit.w
  * between these two. */
 void pt_core_entry_begin(pt_agent *a, uint32_t id, const char *kind);
 void pt_core_entry_end(pt_agent *a);
@@ -254,7 +279,7 @@ void pt_core_entry_head(pt_agent *a, uint32_t id, const char *kind, uint32_t epo
 entry *pt_core_entry(pt_agent *a, uint32_t id);
 /* A doc record in the commit being written; value is valid JSON. */
 void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value);
-/* ...or write the value with a->cw, then pt_jw_obj_end(&a->cw). */
+/* ...or write the value with a->commit.w, then pt_jw_obj_end(&a->commit.w). */
 void pt_core_doc_begin(pt_agent *a, pt_str key);
 /* Remember what to tell the host after the commit lands. */
 void pt_core_after(pt_agent *a, after_kind k, const char *outcome, pt_str error, int64_t until);
