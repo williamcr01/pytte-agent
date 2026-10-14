@@ -157,104 +157,160 @@ typedef struct config_job {
     char next[CFG_N][512];
 } config_job;
 
-typedef struct app {
-    cli_opts o;
-    cli_config *cfg;
-    cli_mcp *mcp;      /* the configured servers; NULL: --no-mcp */
-    pt_buf mcp_notes;  /* what servers said, shown at the next pass */
-    xreq *xs;          /* fetches on their way */
-    uint64_t next_xid;
-    bool expanded;     /* a fetch ended: the queue may go on */
-    bool mention_menu; /* the menu lists @-mentions */
-    cli_session s;
-    bool open; /* s holds a session */
-    bool named; /* it has a name, or no longer needs one (see cli_session_name) */
-    char start_dir[4096]; /* where pytte started: /resume lists its sessions and its worktrees' */
+/* The session this TUI shows, and how it got there. */
+typedef struct app_sess {
     cli_open_job *opening;
     char fallback[64]; /* /resume restores the old session on failure */
     bool fallback_created;
-    bool history_ready, drop_restored_draft;
-    pt_buf pending_history, command;
+    bool named;        /* it has a name, or no longer needs one (see cli_session_name) */
+    bool created;      /* this process created the session */
+    bool discarded;    /* ...and left it empty: closing deleted it */
+    bool keep_on_quit; /* /quit keeps even an empty session for resuming */
+    char start_dir[4096]; /* where pytte started: /resume lists its sessions and its worktrees' */
+    char err[700];
+} app_sess;
+
+/* The input history file; lines typed before the session opened wait in
+ * pending. */
+typedef struct app_hist {
+    bool ready;
+    pt_buf pending;
+    char path[4200];
+} app_hist;
+
+/* The draft, saved to the session a second after it changes. */
+typedef struct app_draft {
+    bool dirty;
+    bool drop_restored; /* the draft the session kept is not put back */
+    int64_t at;
+} app_draft;
+
+/* The display model: which entries are shown, and the streaming block. */
+typedef struct app_view {
+    uint32_t seen;   /* entries already shown */
+    uint32_t epoch;  /* ...of this epoch */
+    pt_buf live;     /* the unfinished source line of the streaming block */
+    int kind, col;   /* LIVE_*, and the column cleaning reached */
+    tui_md md;
+    bool streamed;   /* this attempt was streamed: do not print its entry again */
+    bool started;    /* the current message has its blank line */
+    bool printed;    /* ...and some content */
+    int64_t think_at;
+} app_view;
+
+/* The run going on: what it does, its clock, and its running calls. */
+typedef struct app_run {
+    bool active;
+    int phase;
+    int64_t at, retry_until;
+    int64_t wait_at; /* the run waits for an answer since then: its clock stands still */
+    int64_t tick;    /* the clock's half second last painted */
+    pt_buf retry_err;
+    run_call calls[RUN_MAX]; /* in the order they started */
+    int ncalls;
+    uint32_t nbg; /* background commands still running, in the footer */
+} app_run;
+
+/* The open group of finished calls: in the band until something else is shown. */
+typedef struct app_group {
+    pt_buf buf;
+    grow rows[GROUP_MAX];
+    int n;
+} app_group;
+
+/* A tool call waiting for approval (refreshed from pt_asks). */
+typedef struct app_ask {
+    pt_ask_view view;
+    uint32_t task;
+    int sel;
+    bool shown; /* the band shows the question */
+    char prefix[128]; /* what "allow this session" allows: "git", or "" for the whole tool */
+} app_ask;
+
+/* The model in use, and what the catalog says of it. */
+typedef struct app_model {
+    char name[256]; /* shown */
+    char ref[256];  /* o.model points here */
+    uint64_t ctx_used;
+    uint32_t ctx_window;
+    uint8_t efforts; /* the model's levels (PT_EFF_*, resolved) */
+    bool reasons;    /* the model reasons: effort means something */
+} app_model;
+
+/* Inputs waiting to be sent, and the MCP fetches they wait for. */
+typedef struct app_queue {
+    queued_input *items;
+    uint32_t n, cap;
+    xreq *xs; /* fetches on their way */
+    uint64_t next_xid;
+    bool expanded; /* a fetch ended: the queue may go on */
+} app_queue;
+
+/* The menu under the input. */
+typedef struct app_menu {
+    int kind; /* MENU_* */
+    bool closed;
+    item items[MAX_ITEMS];
+    int n, sel, label_w; /* label_w: the widest label shown, for the column */
+    int top;             /* the first row of the menu's window */
+    pt_buf buf;          /* the items' labels and descriptions */
+    int set_sel;         /* the selection in the settings menu */
+    bool of_mentions;    /* it lists @-mentions */
+    bool of_sessions;    /* ...sessions (/resume) */
+    bool of_skills;      /* ...skills (read when it opens) */
     session_list *sessions;
-    bool sessions_menu;
-    bool skills_menu; /* the menu lists skills (read when it opens) */
+} app_menu;
+
+/* When to paint, and double presses. */
+typedef struct app_pace {
+    bool dirty, urgent;
+    int64_t last_paint, winch_at, keys_at;
+    int interval;
+    int64_t esc_at, ctrlc_at;
+} app_pace;
+
+/* What the terminal answered. */
+typedef struct app_caps {
+    bool kitty, cpr, answered;
+    int start_col; /* CPR if already available before the first paint */
+} app_caps;
+
+typedef struct app {
+    cli_opts o;
+    cli_config *cfg;
+    cli_mcp *mcp;     /* the configured servers; NULL: --no-mcp */
+    pt_buf mcp_notes; /* what servers said, shown at the next pass */
+    cli_session s;
+    bool open; /* s holds a session */
+    app_sess sess;
+    app_hist hist;
+    app_draft draft;
+    pt_buf command;
     config_job *saving;
     bool pager_pending;
-    char model[256];     /* shown */
-    char model_ref[256]; /* o.model points here */
-    bool created;        /* this process created the session */
-    bool discarded;      /* ...and left it empty: closing deleted it */
-    char err[700];
     tui_term *t;
     tui_keys keys;
     tui_band band;
     tui_frame frame;
     tui_input in;
     int rows, cols;
-    bool ascii, color, kitty, cpr, answered;
-    int start_col; /* CPR if already available before the first paint */
+    app_caps caps;
+    bool ascii, color;
     const syms *sy;
     int thinking;
     /* output: styled lines for the scrollback, committed at the next paint */
     pt_buf lines;
-    pt_buf tmp, tmp2, wrap, live_rows; /* scratch, reused */
+    pt_buf tmp, tmp2, wrap, live_rows, diff; /* scratch, reused */
     pt_arena ar;
-    /* the display model */
-    uint32_t seen;   /* entries already shown */
-    uint32_t shown_epoch;
-    pt_buf live;     /* the unfinished source line of the streaming block */
-    int live_kind, live_col;
-    tui_md md;
-    bool streamed;   /* this attempt was streamed: do not print its entry again */
-    bool started;    /* the current message has its blank line */
-    bool printed;    /* ...and some content */
-    int64_t think_at;
-    bool running;
-    int phase;
-    int64_t run_at, retry_until;
-    int64_t wait_at; /* the run waits for an answer since then: its clock stands still */
-    int64_t tick;    /* the clock's half second last painted */
-    pt_buf retry_err;
-    /* the running calls, in the order they started */
-    run_call runs[RUN_MAX];
-    int nruns;
-    pt_buf diff;      /* scratch for the band, reused */
-    /* the open group of finished calls: in the band until something else is shown */
-    pt_buf grp;
-    grow grows[GROUP_MAX];
-    int ngrows;
-    /* a tool call waiting for approval (refreshed from pt_asks) */
-    pt_ask_view ask;
-    uint32_t ask_task;
-    int ask_sel;
-    bool asked; /* the band shows the question */
-    char ask_prefix[128]; /* what "allow this session" allows: "git", or "" for the whole tool */
-    uint64_t ctx_used;
-    uint32_t ctx_window;
-    uint8_t efforts; /* the model's levels (PT_EFF_*, resolved) */
-    bool reasons;    /* the model reasons: effort means something */
-    uint32_t nbg; /* background commands still running, in the footer */
-    queued_input *queue;
-    uint32_t nq, qcap;
-    /* the menu */
-    int menu;
-    bool menu_closed;
-    item items[MAX_ITEMS];
-    int nitems, sel, label_w; /* label_w: the widest label shown, for the column */
-    int menu_top;             /* the first row of the menu's window */
-    pt_buf items_buf;
-    int set_sel;
-    /* double presses and hints */
-    int64_t esc_at, ctrlc_at;
-    /* pacing */
-    bool dirty, urgent;
-    int64_t last_paint, winch_at, keys_at;
-    int interval;
-    bool draft_dirty;
-    int64_t draft_at;
-    char hist_path[4200];
+    app_view view;
+    app_run run;
+    app_group group;
+    app_ask ask;
+    app_model model;
+    app_queue queue;
+    app_menu menu;
+    app_pace pace;
     bool quit;
-    bool keep_on_quit; /* /quit keeps even an empty session for resuming */
     int code;
 } app;
 
@@ -264,7 +320,7 @@ static bool mcp_known(app *a, pt_str name);
 
 static void set_dirty(app *a)
 {
-    a->dirty = true;
+    a->pace.dirty = true;
 }
 
 /* ---- output to the scrollback ---- */
@@ -505,14 +561,14 @@ static void secs_short(char *out, size_t cap, int64_t ms)
  * question does not count. */
 static int64_t run_clock(const app *a, int64_t now)
 {
-    return (a->wait_at ? a->wait_at : now) - a->run_at;
+    return (a->run.wait_at ? a->run.wait_at : now) - a->run.at;
 }
 
 /* The activity mark blinks with the clock, lighting as its seconds change;
  * it stays lit while the clock stands still. */
 static const char *blink(const app *a, int64_t now)
 {
-    return a->wait_at || run_clock(a, now) / BLINK_MS % 2 == 0 ? a->sy->dot : " ";
+    return a->run.wait_at || run_clock(a, now) / BLINK_MS % 2 == 0 ? a->sy->dot : " ";
 }
 
 /* The call a result answers: searched from the newest entry back. */
@@ -581,9 +637,9 @@ static void put_lines(app *a, pt_str s, const char *prefix, int *left)
         while (e < s.n && s.p[e] != '\n')
             e++;
         if (*left > 0) {
-            pt_buf_putz(&a->grp, prefix);
-            pt_buf_put(&a->grp, s.p + at, e - at);
-            pt_buf_putc(&a->grp, '\n');
+            pt_buf_putz(&a->group.buf, prefix);
+            pt_buf_put(&a->group.buf, s.p + at, e - at);
+            pt_buf_putc(&a->group.buf, '\n');
         }
         (*left)--;
         at = e + 1;
@@ -604,9 +660,9 @@ static void group_add(app *a, const pt_entry_view *v)
     int ti = tool_of(m->name), left = TOOL_FAIL;
     char seg[160], tail[64];
     grow *g;
-    if (a->ngrows == GROUP_MAX)
+    if (a->group.n == GROUP_MAX)
         group_close(a);
-    g = &a->grows[a->ngrows];
+    g = &a->group.rows[a->group.n];
     memset(g, 0, sizeof *g);
     g->cat = (uint8_t)(ti < 0 ? CAT_OTHER : tools[ti].cat);
     pt_arena_reset(&a->ar);
@@ -638,7 +694,7 @@ static void group_add(app *a, const pt_entry_view *v)
         g->bad = timed ? G_TIMEOUT : G_FAILED;
     /* the details, and what the row ends with */
     tail[0] = 0;
-    g->dat = (uint32_t)a->grp.n;
+    g->dat = (uint32_t)a->group.buf.n;
     if (g->bad == G_OK && g->cat == CAT_EDIT) {
         const pt_json *e;
         j = pt_json_parse(args, &a->ar, NULL);
@@ -659,7 +715,7 @@ static void group_add(app *a, const pt_entry_view *v)
     } else if (g->bad == G_FAILED || g->bad == G_TIMEOUT) {
         put_lines(a, last_lines(text, TOOL_FAIL), "", &left);
     }
-    g->dn = (uint32_t)(a->grp.n - g->dat);
+    g->dn = (uint32_t)(a->group.buf.n - g->dat);
     if (on && g->bad == G_OK && pt_str_eqz(m->name, "bash")) {
         snprintf(tail, sizeof tail, " · still running as session %lld", (long long)session);
     } else if (on && g->bad == G_OK) {
@@ -670,16 +726,16 @@ static void group_add(app *a, const pt_entry_view *v)
         snprintf(tail, sizeof tail, " · %s", took);
     }
     /* the row: the call, then what came of it */
-    g->at = (uint32_t)a->grp.n;
-    phrase(a, &a->grp, m->name, args);
+    g->at = (uint32_t)a->group.buf.n;
+    phrase(a, &a->group.buf, m->name, args);
     if (stats) { /* "+3", "+3 -1" */
         snprintf(seg, sizeof seg, " +%u", add);
-        tui_style(&a->grp, TUI_GREEN);
-        pt_buf_putz(&a->grp, seg);
+        tui_style(&a->group.buf, TUI_GREEN);
+        pt_buf_putz(&a->group.buf, seg);
         if (g->cat == CAT_EDIT) {
             snprintf(seg, sizeof seg, " -%u", del);
-            tui_style(&a->grp, TUI_RED);
-            pt_buf_putz(&a->grp, seg);
+            tui_style(&a->group.buf, TUI_RED);
+            pt_buf_putz(&a->group.buf, seg);
         }
     }
     if (g->bad) {
@@ -687,18 +743,18 @@ static void group_add(app *a, const pt_entry_view *v)
             snprintf(seg, sizeof seg, "exit %lld", (long long)code);
         else
             snprintf(seg, sizeof seg, "%s", bad_names[g->bad]);
-        tui_style(&a->grp, TUI_DIM);
-        pt_buf_putz(&a->grp, " · ");
-        tui_style(&a->grp, TUI_RED);
-        pt_buf_putz(&a->grp, seg);
+        tui_style(&a->group.buf, TUI_DIM);
+        pt_buf_putz(&a->group.buf, " · ");
+        tui_style(&a->group.buf, TUI_RED);
+        pt_buf_putz(&a->group.buf, seg);
     }
     if (tail[0]) {
-        tui_style(&a->grp, TUI_DIM);
-        pt_buf_putz(&a->grp, tail);
+        tui_style(&a->group.buf, TUI_DIM);
+        pt_buf_putz(&a->group.buf, tail);
     }
-    tui_style(&a->grp, 0);
-    g->n = (uint32_t)(a->grp.n - g->at);
-    a->ngrows++;
+    tui_style(&a->group.buf, 0);
+    g->n = (uint32_t)(a->group.buf.n - g->at);
+    a->group.n++;
 }
 
 /* One row: a mark in the left column, then styled text, cut to the width. */
@@ -722,7 +778,7 @@ static const char detail_pad[] = "        "; /* MARGIN + NAME_W */
 /* A row's details, each line under the gist. */
 static void group_details(app *a, pt_buf *out, const grow *g)
 {
-    pt_str s = {a->grp.p + g->dat, g->dn};
+    pt_str s = {a->group.buf.p + g->dat, g->dn};
     size_t at = 0;
     while (at < s.n) {
         size_t e = at, k;
@@ -749,11 +805,11 @@ static void group_details(app *a, pt_buf *out, const grow *g)
 static void run_done(app *a, pt_str call_id)
 {
     int i;
-    for (i = 0; i < a->nruns; i++)
-        if (pt_str_eq(pt_buf_str(&a->runs[i].id), call_id)) {
-            run_call r = a->runs[i];
-            memmove(&a->runs[i], &a->runs[i + 1], (size_t)(a->nruns - i - 1) * sizeof r);
-            a->runs[--a->nruns] = r;
+    for (i = 0; i < a->run.ncalls; i++)
+        if (pt_str_eq(pt_buf_str(&a->run.calls[i].id), call_id)) {
+            run_call r = a->run.calls[i];
+            memmove(&a->run.calls[i], &a->run.calls[i + 1], (size_t)(a->run.ncalls - i - 1) * sizeof r);
+            a->run.calls[--a->run.ncalls] = r;
             return;
         }
 }
@@ -762,7 +818,7 @@ static bool runs_oom(const app *a)
 {
     int i;
     for (i = 0; i < RUN_MAX; i++)
-        if (a->runs[i].id.oom || a->runs[i].head.oom || a->runs[i].out.oom)
+        if (a->run.calls[i].id.oom || a->run.calls[i].head.oom || a->run.calls[i].out.oom)
             return true;
     return false;
 }
@@ -772,33 +828,33 @@ static bool runs_oom(const app *a)
  * by the blinking dot (the newest with the end of its output). */
 static void group_render(app *a, pt_buf *out, bool live)
 {
-    bool running = live && a->nruns;
+    bool running = live && a->run.ncalls;
     int i, first = 0;
     const char *mark = blink(a, pt_sys_now_ms());
     char more[48];
-    if (!a->ngrows && !running)
+    if (!a->group.n && !running)
         return;
-    if (live && a->ngrows > GROUP_LIVE) {
-        first = a->ngrows - GROUP_LIVE;
+    if (live && a->group.n > GROUP_LIVE) {
+        first = a->group.n - GROUP_LIVE;
         snprintf(more, sizeof more, "%s %d more", a->sy->more, first);
         pt_buf_reset(&a->wrap);
         tui_style(&a->wrap, TUI_DIM);
         pt_buf_putz(&a->wrap, more);
         group_row(a, out, " ", 0, pt_buf_str(&a->wrap));
     }
-    for (i = first; i < a->ngrows; i++) {
-        const grow *g = &a->grows[i];
-        if (g->at + g->n > a->grp.n || g->dat + g->dn > a->grp.n)
+    for (i = first; i < a->group.n; i++) {
+        const grow *g = &a->group.rows[i];
+        if (g->at + g->n > a->group.buf.n || g->dat + g->dn > a->group.buf.n)
             break; /* out of memory: paint() says so */
         group_row(a, out, g->bad ? a->sy->fail : a->sy->ok, g->bad ? TUI_RED : TUI_GREEN | TUI_DIM,
-                  (pt_str){a->grp.p + g->at, g->n});
+                  (pt_str){a->group.buf.p + g->at, g->n});
         if (!live)
             group_details(a, out, g);
     }
-    for (i = 0; running && i < a->nruns; i++)
-        group_row(a, out, mark, ACCENT | TUI_BOLD, pt_buf_str(&a->runs[i].head));
+    for (i = 0; running && i < a->run.ncalls; i++)
+        group_row(a, out, mark, ACCENT | TUI_BOLD, pt_buf_str(&a->run.calls[i].head));
     if (running) { /* the end of the newest one's output */
-        const run_call *r = &a->runs[a->nruns - 1];
+        const run_call *r = &a->run.calls[a->run.ncalls - 1];
         pt_str o = pt_buf_str(&r->out), rows;
         size_t at = o.n;
         int lines = 0;
@@ -827,12 +883,12 @@ static void group_render(app *a, pt_buf *out, bool live)
 /* The open group goes to the scrollback. */
 static void group_close(app *a)
 {
-    if (!a->ngrows)
+    if (!a->group.n)
         return;
     out_blank(&a->lines);
     group_render(a, &a->lines, false);
-    a->ngrows = 0;
-    pt_buf_reset(&a->grp);
+    a->group.n = 0;
+    pt_buf_reset(&a->group.buf);
 }
 
 static void out_thinking(app *a, pt_buf *out, pt_str text, int64_t ms, bool full)
@@ -1004,83 +1060,83 @@ static void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
 static void begin_msg(app *a)
 {
     group_close(a);
-    if (!a->started)
+    if (!a->view.started)
         out_blank(&a->lines);
-    a->started = true;
+    a->view.started = true;
 }
 
 /* A complete source line of the streaming block. */
 static void live_line(app *a, pt_str line)
 {
-    if (a->live_kind == LIVE_TEXT) {
+    if (a->view.kind == LIVE_TEXT) {
         begin_msg(a);
-        tui_md_line(&a->md, line, a->cols, 0, false, &a->lines);
-        a->printed = true;
+        tui_md_line(&a->view.md, line, a->cols, 0, false, &a->lines);
+        a->view.printed = true;
     } else if (a->thinking == TH_FULL) {
         begin_msg(a);
-        tui_md_line(&a->md, line, a->cols, TUI_DIM, false, &a->lines);
+        tui_md_line(&a->view.md, line, a->cols, TUI_DIM, false, &a->lines);
     }
 }
 
 static void live_add(app *a, pt_str delta)
 {
-    size_t at = 0, i = a->live.n;
-    tui_clean(&a->live, delta, &a->live_col);
+    size_t at = 0, i = a->view.live.n;
+    tui_clean(&a->view.live, delta, &a->view.col);
     /* Earlier bytes are the unfinished line, already checked for newlines. */
-    for (; i < a->live.n; i++)
-        if (a->live.p[i] == '\n') {
-            live_line(a, (pt_str){a->live.p + at, i - at});
+    for (; i < a->view.live.n; i++)
+        if (a->view.live.p[i] == '\n') {
+            live_line(a, (pt_str){a->view.live.p + at, i - at});
             at = i + 1;
         }
     if (at) {
-        memmove(a->live.p, a->live.p + at, a->live.n - at);
-        a->live.n -= at;
+        memmove(a->view.live.p, a->view.live.p + at, a->view.live.n - at);
+        a->view.live.n -= at;
     }
 }
 
 /* The block ended: its unfinished line is complete now. */
 static void live_end(app *a)
 {
-    if (a->live_kind != LIVE_NONE && a->live.n)
-        live_line(a, pt_buf_str(&a->live));
-    if (a->live_kind == LIVE_THINK && a->thinking == TH_COLLAPSED && !a->ngrows) { /* a group goes on over it */
+    if (a->view.kind != LIVE_NONE && a->view.live.n)
+        live_line(a, pt_buf_str(&a->view.live));
+    if (a->view.kind == LIVE_THINK && a->thinking == TH_COLLAPSED && !a->group.n) { /* a group goes on over it */
         begin_msg(a);
-        out_thinking(a, &a->lines, PT_STR_NULL, pt_sys_now_ms() - a->think_at, false);
+        out_thinking(a, &a->lines, PT_STR_NULL, pt_sys_now_ms() - a->view.think_at, false);
     }
-    pt_buf_reset(&a->live);
-    a->live_kind = LIVE_NONE;
-    a->live_col = 0;
+    pt_buf_reset(&a->view.live);
+    a->view.kind = LIVE_NONE;
+    a->view.col = 0;
 }
 
 static void live_begin(app *a, int kind)
 {
     live_end(a);
-    a->live_kind = kind;
-    memset(&a->md, 0, sizeof a->md);
-    a->md.ascii = a->ascii;
-    a->md.margin = MARGIN;
+    a->view.kind = kind;
+    memset(&a->view.md, 0, sizeof a->view.md);
+    a->view.md.ascii = a->ascii;
+    a->view.md.margin = MARGIN;
 }
 
 static void on_ai(app *a, const pt_ai_event *ev)
 {
     switch (ev->kind) {
     case PT_EV_START:
-        a->streamed = true;
-        a->started = false;
-        a->printed = false;
-        a->phase = PH_WAIT;
+        a->view.streamed = true;
+        a->view.started = false;
+        a->view.printed = false;
+        a->run.phase = PH_WAIT;
         break;
     case PT_EV_THINKING_START:
         if (a->thinking == TH_FULL)
             group_close(a);
         live_begin(a, LIVE_THINK);
-        a->think_at = pt_sys_now_ms();
-        a->phase = PH_THINK;
+        a->view.think_at = pt_sys_now_ms();
+        a->run.phase = PH_THINK;
         break;
     case PT_EV_TEXT_START: /* the calls before it are over */
         group_close(a);
         live_begin(a, LIVE_TEXT);
-        a->phase = PH_WRITE;
+        a->run.phase = PH_WRITE;
         break;
     case PT_EV_THINKING_DELTA:
     case PT_EV_TEXT_DELTA:
@@ -1094,7 +1150,7 @@ static void on_ai(app *a, const pt_ai_event *ev)
         break;
     case PT_EV_TOOLCALL_END: /* shown with its result, or in the band as it runs */
         live_end(a);
-        a->printed = true;
+        a->view.printed = true;
         break;
     default:
         break;
@@ -1113,7 +1169,7 @@ static bool shows(app *a, const pt_entry_view *v)
     for (i = 0; i < m->nblocks; i++)
         if ((m->blocks[i].kind == PT_BLOCK_TEXT) ||
             (m->blocks[i].kind == PT_BLOCK_THINKING && m->blocks[i].text.n &&
-             (a->thinking == TH_FULL || (a->thinking == TH_COLLAPSED && !a->ngrows))))
+             (a->thinking == TH_FULL || (a->thinking == TH_COLLAPSED && !a->group.n))))
             return true;
     return false;
 }
@@ -1136,41 +1192,41 @@ static void on_entries(app *a)
 {
     uint32_t n = pt_entry_count(a->s.a), i;
     pt_entry_view v;
-    if (n < a->seen || (n && a->seen && pt_entry_at(a->s.a, 0, &v) && v.epoch != a->shown_epoch))
-        a->seen = 0; /* a new epoch */
-    a->ctx_used = pt_context_tokens(a->s.a);
+    if (n < a->view.seen || (n && a->view.seen && pt_entry_at(a->s.a, 0, &v) && v.epoch != a->view.epoch))
+        a->view.seen = 0; /* a new epoch */
+    a->model.ctx_used = pt_context_tokens(a->s.a);
     if (n && pt_entry_at(a->s.a, 0, &v))
-        a->shown_epoch = v.epoch;
-    for (i = a->seen; i < n && pt_entry_at(a->s.a, i, &v); i++) {
+        a->view.epoch = v.epoch;
+    for (i = a->view.seen; i < n && pt_entry_at(a->s.a, i, &v); i++) {
         if (v.kept) /* a compaction's copy: on screen already, as the original */
             continue;
         if (strcmp(v.kind, "user") == 0) /* answers a key: no frame wait */
-            a->urgent = true;
-        if (strcmp(v.kind, "user") == 0 && a->nq && !is_note(&v)) { /* a queued input was placed */
-            queued_input first = a->queue[0];
-            memmove(a->queue, a->queue + 1, (a->nq - 1) * sizeof *a->queue);
-            a->queue[--a->nq] = first;
-            pt_buf_reset(&a->queue[a->nq].text);
+            a->pace.urgent = true;
+        if (strcmp(v.kind, "user") == 0 && a->queue.n && !is_note(&v)) { /* a queued input was placed */
+            queued_input first = a->queue.items[0];
+            memmove(a->queue.items, a->queue.items + 1, (a->queue.n - 1) * sizeof *a->queue.items);
+            a->queue.items[--a->queue.n] = first;
+            pt_buf_reset(&a->queue.items[a->queue.n].text);
         }
         if (strcmp(v.kind, "tool_result") == 0 && v.msg) {
             run_done(a, v.msg->call_id);
-            if (a->phase == PH_TOOL && !a->nruns)
-                a->phase = PH_WAIT;
+            if (a->run.phase == PH_TOOL && !a->run.ncalls)
+                a->run.phase = PH_WAIT;
         }
-        if (strcmp(v.kind, "assistant") == 0 && a->streamed) {
+        if (strcmp(v.kind, "assistant") == 0 && a->view.streamed) {
             /* already on screen; an interrupted partial gets its mark */
             live_end(a);
             if (v.msg->stop == PT_STOP_ABORTED || v.msg->stop == PT_STOP_ERROR) {
                 begin_msg(a);
-                out_z(a, TUI_DIM, a->printed ? "interrupted" : "interrupted, nothing arrived");
+                out_z(a, TUI_DIM, a->view.printed ? "interrupted" : "interrupted, nothing arrived");
             }
-            a->streamed = false;
-            a->started = false;
+            a->view.streamed = false;
+            a->view.started = false;
             continue;
         }
         show_entry(a, &v);
     }
-    a->seen = n;
+    a->view.seen = n;
 }
 
 static void on_event(void *ud, const pt_event *ev)
@@ -1186,16 +1242,16 @@ static void on_event(void *ud, const pt_event *ev)
         break;
     case PT_E_COMPACT:
         if (pt_str_eqz(ev->outcome, "started"))
-            a->phase = PH_COMPACT;
+            a->run.phase = PH_COMPACT;
         else if (pt_str_eqz(ev->outcome, "failed")) {
             group_close(a);
             out_note(a, &a->lines, TUI_RED, ev->error);
         }
         break;
     case PT_E_TOOL_START:
-        a->phase = PH_TOOL;
-        if (a->nruns < RUN_MAX) {
-            run_call *r = &a->runs[a->nruns++];
+        a->run.phase = PH_TOOL;
+        if (a->run.ncalls < RUN_MAX) {
+            run_call *r = &a->run.calls[a->run.ncalls++];
             r->task = ev->task;
             snprintf(r->name, sizeof r->name, "%.*s", (int)(ev->name.n > 60 ? 60 : ev->name.n), ev->name.p);
             pt_buf_reset(&r->id);
@@ -1208,9 +1264,9 @@ static void on_event(void *ud, const pt_event *ev)
     case PT_E_TOOL_OUTPUT: {
         run_call *r = NULL;
         int i;
-        for (i = 0; i < a->nruns && !r; i++)
-            if (a->runs[i].task == ev->task)
-                r = &a->runs[i];
+        for (i = 0; i < a->run.ncalls && !r; i++)
+            if (a->run.calls[i].task == ev->task)
+                r = &a->run.calls[i];
         if (!r)
             break;
         if (ev->data.n >= TOOL_KEEP) {
@@ -1227,10 +1283,10 @@ static void on_event(void *ud, const pt_event *ev)
         break;
     }
     case PT_E_RETRY:
-        a->phase = PH_RETRY;
-        a->retry_until = ev->until;
-        pt_buf_reset(&a->retry_err);
-        tui_clean(&a->retry_err, ev->error, &(int){0});
+        a->run.phase = PH_RETRY;
+        a->run.retry_until = ev->until;
+        pt_buf_reset(&a->run.retry_err);
+        tui_clean(&a->run.retry_err, ev->error, &(int){0});
         break;
     case PT_E_RUN_DONE:
         group_close(a);
@@ -1248,8 +1304,8 @@ static void on_event(void *ud, const pt_event *ev)
             out_blank(&a->lines);
             out_z(a, TUI_DIM, line);
         }
-        a->run_at = pt_sys_now_ms(); /* a queued input runs next */
-        a->wait_at = 0;
+        a->run.at = pt_sys_now_ms(); /* a queued input runs next */
+        a->run.wait_at = 0;
         break;
     case PT_E_FATAL:
         group_close(a);
@@ -1283,21 +1339,21 @@ static bool menu_takes_arg(pt_str cmd)
 static void add_item(app *a, const char *label, size_t ln, const char *desc)
 {
     item *it;
-    if (a->nitems >= MAX_ITEMS)
+    if (a->menu.n >= MAX_ITEMS)
         return;
-    it = &a->items[a->nitems++];
-    it->at = a->items_buf.n;
+    it = &a->menu.items[a->menu.n++];
+    it->at = a->menu.buf.n;
     it->n = ln;
-    pt_buf_put(&a->items_buf, label, ln);
-    it->dat = a->items_buf.n;
+    pt_buf_put(&a->menu.buf, label, ln);
+    it->dat = a->menu.buf.n;
     it->dn = desc ? strlen(desc) : 0;
     if (desc)
-        pt_buf_putz(&a->items_buf, desc);
+        pt_buf_putz(&a->menu.buf, desc);
 }
 
 static pt_str item_label(const app *a, int i)
 {
-    return (pt_str){a->items_buf.p + a->items[i].at, a->items[i].n};
+    return (pt_str){a->menu.buf.p + a->menu.items[i].at, a->menu.items[i].n};
 }
 
 /* The level requests use: the chosen one, moved to one the model takes. */
@@ -1305,8 +1361,8 @@ static pt_reasoning effort_used(const app *a, pt_reasoning want)
 {
     pt_ai_target t;
     memset(&t, 0, sizeof t);
-    t.model.reasoning = a->reasons;
-    t.efforts = a->efforts;
+    t.model.reasoning = a->model.reasons;
+    t.efforts = a->model.efforts;
     return pt_ai_effort(&t, want);
 }
 
@@ -1350,7 +1406,7 @@ static void add_skills(app *a, const char *lead, pt_str q, bool rescan)
             add_item(a, label, (size_t)ln, a->tmp.p);
         }
     }
-    a->skills_menu = true;
+    a->menu.of_skills = true;
 }
 
 /* MCP prompts whose command ("server:name") starts with q. */
@@ -1404,7 +1460,7 @@ static void add_mentions(app *a, pt_str q)
     uint32_t i, n = 0;
     const pt_rt_mcp_resource *r = a->open ? pt_rt_mcp_resources(a->s.rt, &n) : NULL;
     pt_str rest = {q.p + 1, q.n - 1};
-    for (i = 0; i < n && a->nitems < MAX_ITEMS; i++) {
+    for (i = 0; i < n && a->menu.n < MAX_ITEMS; i++) {
         pt_buf_reset(&a->tmp2);
         pt_buf_putc(&a->tmp2, '@');
         pt_buf_puts(&a->tmp2, r[i].server);
@@ -1475,7 +1531,7 @@ static void list_sessions(void *ud)
 
 static session_list *get_sessions(app *a, bool refresh)
 {
-    session_list *list = a->sessions;
+    session_list *list = a->menu.sessions;
     if (!list) {
         list = (session_list *)calloc(1, sizeof *list);
         if (!list)
@@ -1485,8 +1541,8 @@ static session_list *get_sessions(app *a, bool refresh)
             free(list);
             return NULL;
         }
-        snprintf(list->cwd, sizeof list->cwd, "%s", a->start_dir);
-        a->sessions = list;
+        snprintf(list->cwd, sizeof list->cwd, "%s", a->sess.start_dir);
+        a->menu.sessions = list;
     }
     if (refresh && !list->pending)
         list->ready = false;
@@ -1497,39 +1553,39 @@ static session_list *get_sessions(app *a, bool refresh)
 
 static void menu_update(app *a)
 {
-    bool was_sessions = a->sessions_menu, was_skills = a->skills_menu;
+    bool was_sessions = a->menu.of_sessions, was_skills = a->menu.of_skills;
     pt_str d = pt_buf_str(&a->in.text), cmd, arg, word = last_word(d);
     long sp;
-    int old = a->nitems;
-    a->nitems = 0;
-    pt_buf_reset(&a->items_buf);
-    a->sessions_menu = a->skills_menu = a->mention_menu = false;
-    if (a->menu == MENU_SETTINGS)
+    int old = a->menu.n;
+    a->menu.n = 0;
+    pt_buf_reset(&a->menu.buf);
+    a->menu.of_sessions = a->menu.of_skills = a->menu.of_mentions = false;
+    if (a->menu.kind == MENU_SETTINGS)
         return;
-    a->menu = MENU_NONE;
-    if (!a->menu_closed && word.n && word.p[0] == '@') { /* @server:uri anywhere */
+    a->menu.kind = MENU_NONE;
+    if (!a->menu.closed && word.n && word.p[0] == '@') { /* @server:uri anywhere */
         add_mentions(a, word);
-        a->menu = a->nitems ? MENU_ARG : MENU_NONE;
-        a->mention_menu = a->nitems > 0;
-        if (a->nitems != old || a->sel >= a->nitems)
-            a->sel = a->menu_top = 0;
+        a->menu.kind = a->menu.n ? MENU_ARG : MENU_NONE;
+        a->menu.of_mentions = a->menu.n > 0;
+        if (a->menu.n != old || a->menu.sel >= a->menu.n)
+            a->menu.sel = a->menu.top = 0;
         return;
     }
-    if (!a->menu_closed && word.n && word.p[0] == '$') { /* $skill anywhere */
+    if (!a->menu.closed && word.n && word.p[0] == '$') { /* $skill anywhere */
         add_skills(a, "$", word, !was_skills);
-        a->menu = a->nitems ? MENU_ARG : MENU_NONE;
-        if (a->nitems != old || a->sel >= a->nitems)
-            a->sel = a->menu_top = 0;
+        a->menu.kind = a->menu.n ? MENU_ARG : MENU_NONE;
+        if (a->menu.n != old || a->menu.sel >= a->menu.n)
+            a->menu.sel = a->menu.top = 0;
         return;
     }
-    if (a->menu_closed || !d.n || d.p[0] != '/' || pt_str_find(d, '\n') >= 0)
+    if (a->menu.closed || !d.n || d.p[0] != '/' || pt_str_find(d, '\n') >= 0)
         return;
     d.p++;
     d.n--;
     sp = pt_str_find(d, ' ');
     if (sp < 0) {
         size_t i;
-        a->menu = MENU_CMD;
+        a->menu.kind = MENU_CMD;
         for (i = 0; i < NCMDS; i++)
             if (pt_str_starts(pt_strz(cmds[i].name), d))
                 add_item(a, cmds[i].name, strlen(cmds[i].name), cmds[i].desc);
@@ -1538,7 +1594,7 @@ static void menu_update(app *a)
     } else {
         cmd = (pt_str){d.p, (size_t)sp};
         arg = (pt_str){d.p + sp + 1, d.n - (size_t)sp - 1};
-        a->menu = MENU_ARG;
+        a->menu.kind = MENU_ARG;
         if (pt_str_eqz(cmd, "settings")) { /* "/settings model <id>" etc. */
             long sp2 = pt_str_find(arg, ' ');
             if (sp2 >= 0) {
@@ -1562,7 +1618,7 @@ static void menu_update(app *a)
         } else if (pt_str_eqz(cmd, "effort")) {
             size_t i;
             for (i = 0; i < sizeof levels / sizeof levels[0]; i++) /* those the model takes */
-                if ((!a->reasons || !a->efforts || a->efforts & 1u << i) && pt_str_starts(pt_strz(levels[i]), arg))
+                if ((!a->model.reasons || !a->model.efforts || a->model.efforts & 1u << i) && pt_str_starts(pt_strz(levels[i]), arg))
                     add_item(a, levels[i], strlen(levels[i]), NULL);
         } else if (pt_str_eqz(cmd, "thinking")) {
             add_list(a, th_names, 3, arg);
@@ -1588,17 +1644,17 @@ static void menu_update(app *a)
         } else if (pt_str_eqz(cmd, "resume")) {
             session_list *list = get_sessions(a, !was_sessions);
             uint32_t i;
-            a->sessions_menu = true;
+            a->menu.of_sessions = true;
             for (i = 0; list && i < list->n; i++)
                 if ((pt_str_starts(pt_strz(list->ids[i]), arg) || pt_str_icontains(pt_strz(list->names[i]), arg)) &&
                     (!a->open || strcmp(list->ids[i], a->s.id) != 0))
                     add_item(a, list->ids[i], strlen(list->ids[i]), list->names[i]);
         }
-        if (!a->nitems)
-            a->menu = MENU_NONE;
+        if (!a->menu.n)
+            a->menu.kind = MENU_NONE;
     }
-    if (a->nitems != old || a->sel >= a->nitems)
-        a->sel = a->menu_top = 0;
+    if (a->menu.n != old || a->menu.sel >= a->menu.n)
+        a->menu.sel = a->menu.top = 0;
 }
 
 static void row(app *a, pt_str styled)
@@ -1635,43 +1691,43 @@ static void tokens_short(char *out, size_t cap, uint64_t n)
 static void status_row(app *a, int64_t now, int total, int sel)
 {
     char line[600], eff[40];
-    const char *model = strchr(a->model, '/');
+    const char *model = strchr(a->model.name, '/');
     int n;
     pt_buf_reset(&a->tmp);
     pt_buf_putz(&a->tmp, "  ");
     tui_style(&a->tmp, TUI_DIM);
-    if (now - a->ctrlc_at < DOUBLE_MS) {
+    if (now - a->pace.ctrlc_at < DOUBLE_MS) {
         pt_buf_putz(&a->tmp, "ctrl-c again to quit");
-    } else if (a->running && now - a->esc_at < DOUBLE_MS) {
+    } else if (a->run.active && now - a->pace.esc_at < DOUBLE_MS) {
         pt_buf_putz(&a->tmp, "esc again to interrupt");
-    } else if (a->asked) {
+    } else if (a->ask.shown) {
         pt_buf_putz(&a->tmp, "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
-    } else if (a->menu == MENU_SETTINGS) {
+    } else if (a->menu.kind == MENU_SETTINGS) {
         pt_buf_putz(&a->tmp, "↑↓ select · ←→ change · enter edit · esc close");
-    } else if (a->menu != MENU_NONE) {
+    } else if (a->menu.kind != MENU_NONE) {
         pt_buf_putz(&a->tmp, "↑↓ select · tab complete · enter run · esc close");
         if (total > 1) {
             snprintf(line, sizeof line, " · %d/%d", sel + 1, total);
             pt_buf_putz(&a->tmp, line);
         }
-    } else if (a->running && a->phase == PH_RETRY) {
-        snprintf(line, sizeof line, "retrying · %.*s", (int)(a->retry_err.n > 200 ? 200 : a->retry_err.n),
-                 a->retry_err.p);
+    } else if (a->run.active && a->run.phase == PH_RETRY) {
+        snprintf(line, sizeof line, "retrying · %.*s", (int)(a->run.retry_err.n > 200 ? 200 : a->run.retry_err.n),
+                 a->run.retry_err.p);
         pt_buf_putz(&a->tmp, line);
     } else {
         pt_buf_putz(&a->tmp, pt_perm_name(a->o.perm));
         pt_buf_putz(&a->tmp, " · ");
-        pt_buf_putz(&a->tmp, model ? model + 1 : a->model[0] ? a->model : "no model");
+        pt_buf_putz(&a->tmp, model ? model + 1 : a->model.name[0] ? a->model.name : "no model");
         effort_label(a, eff, sizeof eff);
         n = snprintf(line, sizeof line, " · %s", eff);
-        if (a->ctx_window) { /* the context used, of the model's window */
+        if (a->model.ctx_window) { /* the context used, of the model's window */
             char used[16], all[16];
-            tokens_short(used, sizeof used, a->ctx_used);
-            tokens_short(all, sizeof all, a->ctx_window);
+            tokens_short(used, sizeof used, a->model.ctx_used);
+            tokens_short(all, sizeof all, a->model.ctx_window);
             n += snprintf(line + n, sizeof line - (size_t)n, " · %s/%s", used, all);
         }
-        if (a->nbg)
-            snprintf(line + n, sizeof line - (size_t)n, " · %u in background (/ps)", a->nbg);
+        if (a->run.nbg)
+            snprintf(line + n, sizeof line - (size_t)n, " · %u in background (/ps)", a->run.nbg);
         pt_buf_putz(&a->tmp, line);
     }
     row(a, pt_buf_str(&a->tmp));
@@ -1682,21 +1738,21 @@ static void status_row(app *a, int64_t now, int total, int sel)
 static void activity_row(app *a, int64_t now)
 {
     char what[120], el[32];
-    if (a->asked)
+    if (a->ask.shown)
         snprintf(what, sizeof what, "waiting for you");
     else if (a->open && pt_rt_materials_waiting(a->s.rt))
         snprintf(what, sizeof what, "starting MCP servers");
-    else if (a->phase == PH_RETRY) {
-        int64_t left = (a->retry_until - now + 999) / 1000;
+    else if (a->run.phase == PH_RETRY) {
+        int64_t left = (a->run.retry_until - now + 999) / 1000;
         snprintf(what, sizeof what, "retrying in %llds", (long long)(left > 0 ? left : 0));
-    } else if (a->phase == PH_TOOL && a->nruns == 1)
-        snprintf(what, sizeof what, "running %s", a->runs[0].name);
-    else if (a->phase == PH_TOOL && a->nruns)
-        snprintf(what, sizeof what, "running %d calls", a->nruns);
+    } else if (a->run.phase == PH_TOOL && a->run.ncalls == 1)
+        snprintf(what, sizeof what, "running %s", a->run.calls[0].name);
+    else if (a->run.phase == PH_TOOL && a->run.ncalls)
+        snprintf(what, sizeof what, "running %d calls", a->run.ncalls);
     else
-        snprintf(what, sizeof what, "%s", a->phase == PH_THINK     ? "thinking"
-                                          : a->phase == PH_WRITE   ? "writing"
-                                          : a->phase == PH_COMPACT ? "compacting"
+        snprintf(what, sizeof what, "%s", a->run.phase == PH_THINK     ? "thinking"
+                                          : a->run.phase == PH_WRITE   ? "writing"
+                                          : a->run.phase == PH_COMPACT ? "compacting"
                                                                    : "working");
     secs_short(el, sizeof el, run_clock(a, now));
     pt_buf_reset(&a->tmp);
@@ -1725,9 +1781,9 @@ static void pick(app *a, bool on)
 
 static void menu_row(app *a, int i)
 {
-    bool on = i == a->sel;
+    bool on = i == a->menu.sel;
     pick(a, on);
-    if (a->menu == MENU_SETTINGS) {
+    if (a->menu.kind == MENU_SETTINGS) {
         int k = settings[i].k;
         char v[600];
         snprintf(v, sizeof v, "%-14s", settings[i].name);
@@ -1741,15 +1797,15 @@ static void menu_row(app *a, int i)
         }
     } else {
         int col = 0;
-        if (a->menu == MENU_CMD)
+        if (a->menu.kind == MENU_CMD)
             pt_buf_putc(&a->tmp, '/');
         tui_clean(&a->tmp, item_label(a, i), &col);
-        if (a->items[i].dn) {
-            int pad = a->label_w - tui_width(item_label(a, i), true);
+        if (a->menu.items[i].dn) {
+            int pad = a->menu.label_w - tui_width(item_label(a, i), true);
             tui_style(&a->tmp, TUI_DIM);
             for (pad = pad > 0 ? pad + 2 : 2; pad > 0; pad--)
                 pt_buf_putc(&a->tmp, ' ');
-            tui_clean(&a->tmp, (pt_str){a->items_buf.p + a->items[i].dat, a->items[i].dn}, &col);
+            tui_clean(&a->tmp, (pt_str){a->menu.buf.p + a->menu.items[i].dat, a->menu.items[i].dn}, &col);
         }
     }
     row(a, pt_buf_str(&a->tmp));
@@ -1758,24 +1814,24 @@ static void menu_row(app *a, int i)
 /* The first tool call waiting for approval, if any. */
 static bool asking(app *a)
 {
-    if (!a->open || a->opening || !pt_asks(a->s.a, &a->ask, 1))
+    if (!a->open || a->sess.opening || !pt_asks(a->s.a, &a->ask.view, 1))
         return false;
-    if (a->ask.task != a->ask_task) { /* a new question */
-        pt_str g = call_gist(a, a->ask.args);
+    if (a->ask.view.task != a->ask.task) { /* a new question */
+        pt_str g = call_gist(a, a->ask.view.args);
         size_t n = 0;
-        a->ask_task = a->ask.task;
-        a->ask_sel = 0;
+        a->ask.task = a->ask.view.task;
+        a->ask.sel = 0;
         /* bash: allow commands with the same first word; web_fetch: the
          * same host; others: the tool */
-        if (pt_str_eqz(a->ask.name, "bash"))
-            while (n < g.n && n + 1 < sizeof a->ask_prefix && !strchr(" \t\n;&|<>()`$", g.p[n]))
+        if (pt_str_eqz(a->ask.view.name, "bash"))
+            while (n < g.n && n + 1 < sizeof a->ask.prefix && !strchr(" \t\n;&|<>()`$", g.p[n]))
                 n++;
-        if (pt_str_eqz(a->ask.name, "web_fetch")) {
+        if (pt_str_eqz(a->ask.view.name, "web_fetch")) {
             g = pt_rt_url_host(g);
-            n = g.n < sizeof a->ask_prefix ? g.n : 0;
+            n = g.n < sizeof a->ask.prefix ? g.n : 0;
         }
-        memcpy(a->ask_prefix, g.p, n);
-        a->ask_prefix[n] = 0;
+        memcpy(a->ask.prefix, g.p, n);
+        a->ask.prefix[n] = 0;
     }
     return true;
 }
@@ -1783,14 +1839,14 @@ static bool asking(app *a)
 static void ask_row(app *a, int i)
 {
     char line[300];
-    pick(a, i == a->ask_sel);
+    pick(a, i == a->ask.sel);
     if (i == 0)
         snprintf(line, sizeof line, "1  yes");
-    else if (i == 1 && a->ask_prefix[0])
-        snprintf(line, sizeof line, "2  yes, and allow %.*s \"%s\" this session", (int)a->ask.name.n,
-                 a->ask.name.p, a->ask_prefix);
+    else if (i == 1 && a->ask.prefix[0])
+        snprintf(line, sizeof line, "2  yes, and allow %.*s \"%s\" this session", (int)a->ask.view.name.n,
+                 a->ask.view.name.p, a->ask.prefix);
     else if (i == 1)
-        snprintf(line, sizeof line, "2  yes, and allow %.*s this session", (int)a->ask.name.n, a->ask.name.p);
+        snprintf(line, sizeof line, "2  yes, and allow %.*s this session", (int)a->ask.view.name.n, a->ask.view.name.p);
     else
         snprintf(line, sizeof line, "3  no (esc)");
     pt_buf_putz(&a->tmp, line);
@@ -1812,18 +1868,18 @@ static void ask_rows(app *a, int n)
     pt_buf_putz(&a->tmp2, a->sy->ask);
     tui_style(&a->tmp2, 0);
     pt_buf_putc(&a->tmp2, ' ');
-    if (tool_of(a->ask.name) < 0 && a->ask.prompt.n) { /* another tool: its name and what it asks */
+    if (tool_of(a->ask.view.name) < 0 && a->ask.view.prompt.n) { /* another tool: its name and what it asks */
         size_t at = a->tmp2.n;
         tui_style(&a->tmp2, TUI_DIM);
-        pt_buf_put(&a->tmp2, a->ask.name.p, a->ask.name.n > 60 ? 60 : a->ask.name.n);
+        pt_buf_put(&a->tmp2, a->ask.view.name.p, a->ask.view.name.n > 60 ? 60 : a->ask.view.name.n);
         tui_style(&a->tmp2, 0);
         pt_buf_putc(&a->tmp2, ' ');
-        tui_clean(&a->tmp2, a->ask.prompt, &col);
+        tui_clean(&a->tmp2, a->ask.view.prompt, &col);
         for (k = at; k < a->tmp2.n; k++)
             if (a->tmp2.p[k] == '\n')
                 a->tmp2.p[k] = ' ';
     } else {
-        phrase(a, &a->tmp2, a->ask.name, a->ask.args);
+        phrase(a, &a->tmp2, a->ask.view.name, a->ask.view.args);
     }
     k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
     a->tmp2.n = k;
@@ -1837,8 +1893,8 @@ static void build_frame(app *a, int64_t now)
 {
     int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, st, gap, act, i, first, top, nask;
     size_t secret = secret_at(pt_buf_str(&a->in.text));
-    int total = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->nitems;
-    int sel = a->menu == MENU_SETTINGS ? a->set_sel : a->sel;
+    int total = a->menu.kind == MENU_SETTINGS ? (int)NSETTINGS : a->menu.n;
+    int sel = a->menu.kind == MENU_SETTINGS ? a->menu.set_sel : a->menu.sel;
     bool tiny = a->cols < 20 || a->rows < 4;
     pt_buf *live_rows = &a->live_rows;
     tui_frame_reset(&a->frame);
@@ -1846,32 +1902,32 @@ static void build_frame(app *a, int64_t now)
         avail = 1;
     /* the pieces */
     pt_buf_reset(live_rows);
-    if (a->ngrows || a->nruns) { /* the open group */
+    if (a->group.n || a->run.ncalls) { /* the open group */
         pt_buf_putc(live_rows, '\n');
         group_render(a, live_rows, true);
     }
-    if (a->live_kind != LIVE_NONE && a->live.n) {
-        tui_md copy = a->md;
-        if (!a->started) /* where the message's blank line will be */
+    if (a->view.kind != LIVE_NONE && a->view.live.n) {
+        tui_md copy = a->view.md;
+        if (!a->view.started) /* where the message's blank line will be */
             pt_buf_putc(live_rows, '\n');
-        tui_md_line(&copy, pt_buf_str(&a->live), a->cols, a->live_kind == LIVE_THINK ? TUI_DIM : 0, true,
+        tui_md_line(&copy, pt_buf_str(&a->view.live), a->cols, a->view.kind == LIVE_THINK ? TUI_DIM : 0, true,
                     live_rows);
     }
     for (i = 0; (size_t)i < live_rows->n; i++)
         live_n += live_rows->p[i] == '\n';
-    a->asked = asking(a);
-    if (a->running && a->asked && !a->wait_at) /* the clock stands still while the user decides */
-        a->wait_at = now;
-    else if (a->wait_at && !a->asked) {
-        a->run_at += now - a->wait_at;
-        a->wait_at = 0;
+    a->ask.shown = asking(a);
+    if (a->run.active && a->ask.shown && !a->run.wait_at) /* the clock stands still while the user decides */
+        a->run.wait_at = now;
+    else if (a->run.wait_at && !a->ask.shown) {
+        a->run.at += now - a->run.wait_at;
+        a->run.wait_at = 0;
     }
-    nask = a->asked ? 5 : 0;
-    act = a->running ? 1 : 0;
-    nq = a->running || (a->nq && a->queue[0].xid && a->queue[0].got < a->queue[0].want)
-             ? (int)(a->nq > 3 ? 4 : a->nq)
+    nask = a->ask.shown ? 5 : 0;
+    act = a->run.active ? 1 : 0;
+    nq = a->run.active || (a->queue.n && a->queue.items[0].xid && a->queue.items[0].got < a->queue.items[0].want)
+             ? (int)(a->queue.n > 3 ? 4 : a->queue.n)
              : 0;
-    nmenu = a->menu == MENU_SETTINGS ? (int)NSETTINGS : a->menu != MENU_NONE ? a->nitems : 0;
+    nmenu = a->menu.kind == MENU_SETTINGS ? (int)NSETTINGS : a->menu.kind != MENU_NONE ? a->menu.n : 0;
     if (nmenu > 8)
         nmenu = 8;
     if (nask)
@@ -1936,14 +1992,14 @@ static void build_frame(app *a, int64_t now)
         char more[48];
         pt_buf_reset(&a->tmp);
         tui_style(&a->tmp, TUI_DIM);
-        if (i == nq - 1 && (uint32_t)nq < a->nq) {
-            snprintf(more, sizeof more, "  +%u more queued", a->nq - (uint32_t)i);
+        if (i == nq - 1 && (uint32_t)nq < a->queue.n) {
+            snprintf(more, sizeof more, "  +%u more queued", a->queue.n - (uint32_t)i);
             pt_buf_putz(&a->tmp, more);
         } else {
             int col = 0;
-            pt_str q = pt_buf_str(&a->queue[i].text);
+            pt_str q = pt_buf_str(&a->queue.items[i].text);
             long nl = pt_str_find(q, '\n');
-            pt_buf_putz(&a->tmp, a->queue[i].xid && a->queue[i].got < a->queue[i].want ? "  fetching · "
+            pt_buf_putz(&a->tmp, a->queue.items[i].xid && a->queue.items[i].got < a->queue.items[i].want ? "  fetching · "
                                                                                        : "  queued · ");
             if (nl >= 0)
                 q.n = (size_t)nl;
@@ -1993,23 +2049,23 @@ static void build_frame(app *a, int64_t now)
     }
     /* the menu: a window around the selection */
     if (nmenu) {
-        int start, save = a->sel;
-        if (sel < a->menu_top)
-            a->menu_top = sel;
-        if (sel >= a->menu_top + nmenu)
-            a->menu_top = sel - nmenu + 1;
-        if (a->menu_top > total - nmenu)
-            a->menu_top = total - nmenu > 0 ? total - nmenu : 0;
-        start = a->menu_top;
-        a->sel = sel;
-        a->label_w = 0;
-        for (i = start; a->menu != MENU_SETTINGS && i < start + nmenu && i < total; i++) {
+        int start, save = a->menu.sel;
+        if (sel < a->menu.top)
+            a->menu.top = sel;
+        if (sel >= a->menu.top + nmenu)
+            a->menu.top = sel - nmenu + 1;
+        if (a->menu.top > total - nmenu)
+            a->menu.top = total - nmenu > 0 ? total - nmenu : 0;
+        start = a->menu.top;
+        a->menu.sel = sel;
+        a->menu.label_w = 0;
+        for (i = start; a->menu.kind != MENU_SETTINGS && i < start + nmenu && i < total; i++) {
             int lw = tui_width(item_label(a, i), true);
-            a->label_w = lw > a->label_w ? (lw > 40 ? 40 : lw) : a->label_w;
+            a->menu.label_w = lw > a->menu.label_w ? (lw > 40 ? 40 : lw) : a->menu.label_w;
         }
         for (i = start; i < start + nmenu && i < total; i++)
             menu_row(a, i);
-        a->sel = save;
+        a->menu.sel = save;
     }
     if (st)
         status_row(a, now, total, sel);
@@ -2020,10 +2076,10 @@ static void flush_out(app *a)
     int ms = tui_term_write(a->t, pt_buf_str(&a->band.out));
     pt_buf_reset(&a->band.out);
     /* writes that block (a slow link) slow the stream down */
-    if (ms > 50 && a->interval < 500)
-        a->interval *= 2;
-    else if (ms < 10 && a->interval > 33)
-        a->interval /= 2;
+    if (ms > 50 && a->pace.interval < 500)
+        a->pace.interval *= 2;
+    else if (ms < 10 && a->pace.interval > 33)
+        a->pace.interval /= 2;
 }
 
 static void paint(app *a)
@@ -2031,7 +2087,7 @@ static void paint(app *a)
     int64_t now = pt_sys_now_ms();
     build_frame(a, now);
     if (a->in.text.oom || a->in.kill.oom || a->in.saved.oom || a->frame.rows.oom || a->lines.oom ||
-        a->live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->items_buf.oom || a->grp.oom ||
+        a->view.live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->menu.buf.oom || a->group.buf.oom ||
         runs_oom(a) || a->live_rows.oom || a->diff.oom) {
         if (!a->quit)
             fprintf(stderr, "pytte: out of memory drawing the terminal\n");
@@ -2051,8 +2107,8 @@ static void paint(app *a)
     }
     pt_buf_reset(&a->lines);
     flush_out(a);
-    a->dirty = a->urgent = false;
-    a->last_paint = now;
+    a->pace.dirty = a->pace.urgent = false;
+    a->pace.last_paint = now;
 }
 
 /* ---- settings, model, sessions ---- */
@@ -2076,7 +2132,7 @@ static void apply_symbols(app *a)
     else
         a->ascii = !term || !utf8 || strncmp(term, "linux", 5) == 0 || strncmp(term, "vt", 2) == 0;
     a->sy = a->ascii ? &asc : &uni;
-    a->md.ascii = a->ascii;
+    a->view.md.ascii = a->ascii;
 }
 
 static void apply_thinking(app *a)
@@ -2128,7 +2184,7 @@ static void finish_setting(app *a)
                      job->value[0] ? job->value : "(none)");
             out_z(a, TUI_DIM, msg);
         }
-        a->urgent = true;
+        a->pace.urgent = true;
     }
     start_setting(a);
 }
@@ -2203,25 +2259,25 @@ static void update_model(app *a)
     pt_entry_view v;
     pt_ai_target t;
     const char *why;
-    a->model[0] = 0;
+    a->model.name[0] = 0;
     if (a->o.model)
-        snprintf(a->model, sizeof a->model, "%s", a->o.model);
+        snprintf(a->model.name, sizeof a->model.name, "%s", a->o.model);
     while (n-- > 0 && pt_entry_at(a->s.a, n, &v))
         if (strcmp(v.kind, "assistant") == 0 && v.msg->model.n) {
-            if (!a->model[0])
-                snprintf(a->model, sizeof a->model, "%.*s/%.*s", (int)v.msg->provider.n, v.msg->provider.p,
+            if (!a->model.name[0])
+                snprintf(a->model.name, sizeof a->model.name, "%.*s/%.*s", (int)v.msg->provider.n, v.msg->provider.p,
                          (int)v.msg->model.n, v.msg->model.p);
             break;
         }
-    a->ctx_used = a->open ? pt_context_tokens(a->s.a) : 0;
-    a->ctx_window = 0;
-    a->efforts = 0;
-    a->reasons = false;
+    a->model.ctx_used = a->open ? pt_context_tokens(a->s.a) : 0;
+    a->model.ctx_window = 0;
+    a->model.efforts = 0;
+    a->model.reasons = false;
     pt_arena_reset(&a->ar);
-    if (a->model[0] && pt_ai_resolve(cli_catalog(), pt_strz(a->model), &t, &a->ar, &why)) {
-        a->ctx_window = t.model.context_window;
-        a->efforts = t.efforts;
-        a->reasons = t.model.reasoning;
+    if (a->model.name[0] && pt_ai_resolve(cli_catalog(), pt_strz(a->model.name), &t, &a->ar, &why)) {
+        a->model.ctx_window = t.model.context_window;
+        a->model.efforts = t.efforts;
+        a->model.reasons = t.model.reasoning;
     }
 }
 
@@ -2257,8 +2313,8 @@ static void save_draft(app *a)
         pt_sys_write_file(p, a->in.text.p, a->in.text.n);
     else
         unlink(p);
-    a->draft_dirty = false;
-    a->draft_at = pt_sys_now_ms();
+    a->draft.dirty = false;
+    a->draft.at = pt_sys_now_ms();
 }
 
 /* The transcript from the third-newest user entry on (16.2.5). */
@@ -2281,32 +2337,32 @@ static void out_tail(app *a)
     }
     for (i = from; i < n && pt_entry_at(a->s.a, i, &v); i++)
         show_entry(a, &v);
-    a->seen = n;
+    a->view.seen = n;
     if (n && pt_entry_at(a->s.a, 0, &v)) /* else the next commit looks like a new epoch */
-        a->shown_epoch = v.epoch;
+        a->view.epoch = v.epoch;
 }
 
 static void reset_display(app *a)
 {
     uint32_t i;
     group_close(a); /* the old session's, to the scrollback */
-    pt_buf_reset(&a->live);
-    a->live_kind = LIVE_NONE;
-    a->streamed = a->started = a->printed = a->running = false;
-    a->ctx_used = 0;
-    for (i = 0; i < a->nq; i++)
-        pt_buf_reset(&a->queue[i].text);
-    a->nq = 0;
+    pt_buf_reset(&a->view.live);
+    a->view.kind = LIVE_NONE;
+    a->view.streamed = a->view.started = a->view.printed = a->run.active = false;
+    a->model.ctx_used = 0;
+    for (i = 0; i < a->queue.n; i++)
+        pt_buf_reset(&a->queue.items[i].text);
+    a->queue.n = 0;
 }
 
 static bool session_empty(app *a)
 {
     uint32_t i, n;
     pt_entry_view v;
-    if (!a->created || a->in.text.n)
+    if (!a->sess.created || a->in.text.n)
         return false;
-    for (i = 0; i < a->nq; i++)
-        if (!a->queue[i].command)
+    for (i = 0; i < a->queue.n; i++)
+        if (!a->queue.items[i].command)
             return false;
     n = pt_entry_count(a->s.a);
     for (i = 0; i < n && pt_entry_at(a->s.a, i, &v); i++)
@@ -2317,21 +2373,21 @@ static bool session_empty(app *a)
 
 static bool open_session(app *a, const char *id)
 {
-    a->opening = cli_session_begin(&a->s, &a->o, id, !a->history_ready,
+    a->sess.opening = cli_session_begin(&a->s, &a->o, id, !a->hist.ready,
                                     a->open && !secret_at(pt_buf_str(&a->in.text)) ? pt_buf_str(&a->in.text)
                                                                                    : PT_STR_NULL,
                                     a->open && session_empty(a),
-                                    on_event, a, a->err, sizeof a->err);
-    if (!a->opening) {
+                                    on_event, a, a->sess.err, sizeof a->sess.err);
+    if (!a->sess.opening) {
         group_close(a);
-        out_note(a, &a->lines, TUI_RED, pt_strz(a->err));
+        out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
         a->code = 1;
         return false;
     }
     a->open = false;
-    a->created = id == NULL && !a->o.continue_current;
-    a->discarded = false;
-    a->drop_restored_draft = false;
+    a->sess.created = id == NULL && !a->o.continue_current;
+    a->sess.discarded = false;
+    a->draft.drop_restored = false;
     reset_display(a);
     update_model(a);
     return true;
@@ -2344,24 +2400,24 @@ static void finish_session(app *a);
 static void close_session(app *a)
 {
     bool empty;
-    while (a->opening) {
+    while (a->sess.opening) {
         pt_waitfd fd;
-        fd.fd = cli_session_job_fd(a->opening);
+        fd.fd = cli_session_job_fd(a->sess.opening);
         pt_sys_wait(&fd, 1, -1);
         finish_session(a);
     }
     if (!a->open)
         return;
-    while (a->xs) /* the runtime goes: their answers never come */
-        xreq_drop(a, a->xs);
-    empty = !a->keep_on_quit && session_empty(a);
+    while (a->queue.xs) /* the runtime goes: their answers never come */
+        xreq_drop(a, a->queue.xs);
+    empty = !a->sess.keep_on_quit && session_empty(a);
     save_draft(a);
     if (pt_fatal(a->s.a) == PT_FATAL_STORAGE)
         cli_session_free(&a->s);
     else
         cli_session_close(&a->s);
-    a->discarded = empty && !a->in.text.n;
-    if (a->discarded) /* nothing was ever said: leave no session behind */
+    a->sess.discarded = empty && !a->in.text.n;
+    if (a->sess.discarded) /* nothing was ever said: leave no session behind */
         cli_session_discard(a->s.dir);
     a->open = false;
 }
@@ -2373,16 +2429,16 @@ static void switch_session(app *a, const char *id)
     char back[64];
     snprintf(back, sizeof back, "%s", a->s.id);
     a->o.continue_current = false;
-    snprintf(a->fallback, sizeof a->fallback, "%s", back);
-    a->fallback_created = a->created;
+    snprintf(a->sess.fallback, sizeof a->sess.fallback, "%s", back);
+    a->sess.fallback_created = a->sess.created;
     if (!open_session(a, id)) {
-        a->fallback[0] = 0;
+        a->sess.fallback[0] = 0;
         a->code = 0; /* allocation failed before the old session was handed off */
         return;
     }
     pt_buf_reset(&a->lines); /* the old session's last lines: cleared anyway */
     tui_band_clear(&a->band);
-    a->urgent = true;
+    a->pace.urgent = true;
     tui_input_set(&a->in, PT_STR_NULL);
     a->code = 0;
 }
@@ -2402,7 +2458,7 @@ static void resume(app *a)
     tui_term_size(a->t, &a->rows, &a->cols);
     a->band.rows = a->rows;
     a->band.cols = a->cols;
-    a->urgent = true;
+    a->pace.urgent = true;
 }
 
 static void pager(app *a)
@@ -2480,17 +2536,17 @@ static void cmd_status(app *a)
     snprintf(line, sizeof line, "directory %.*s", (int)(cwd.n < 4096 ? cwd.n : 4096), cwd.p ? cwd.p : "");
     out_z(a, TUI_DIM, line);
     effort_label(a, eff, sizeof eff);
-    snprintf(line, sizeof line, "model %s · effort %s", a->model[0] ? a->model : "(none)", eff);
+    snprintf(line, sizeof line, "model %s · effort %s", a->model.name[0] ? a->model.name : "(none)", eff);
     out_z(a, TUI_DIM, line);
-    if (a->ctx_window)
-        snprintf(line, sizeof line, "context %llu of %u tokens (%u%%)", (unsigned long long)a->ctx_used, a->ctx_window,
-                 (unsigned)(a->ctx_used * 100 / a->ctx_window));
+    if (a->model.ctx_window)
+        snprintf(line, sizeof line, "context %llu of %u tokens (%u%%)", (unsigned long long)a->model.ctx_used, a->model.ctx_window,
+                 (unsigned)(a->model.ctx_used * 100 / a->model.ctx_window));
     else
-        snprintf(line, sizeof line, "context %llu tokens", (unsigned long long)a->ctx_used);
+        snprintf(line, sizeof line, "context %llu tokens", (unsigned long long)a->model.ctx_used);
     out_z(a, TUI_DIM, line);
     snprintf(line, sizeof line, "terminal %dx%d · %s · %s · kitty keys %s · %s · %s symbols", a->cols, a->rows,
              getenv("TERM") ? getenv("TERM") : "(no TERM)", a->band.reflow ? "reflows" : "does not reflow",
-             a->kitty ? "on" : "off", a->answered ? "answers queries" : "no query replies",
+             a->caps.kitty ? "on" : "off", a->caps.answered ? "answers queries" : "no query replies",
              a->ascii ? "ascii" : "unicode");
     out_z(a, TUI_DIM, line);
 }
@@ -2643,7 +2699,7 @@ static void show_notes(app *a)
         at = e + 1;
     }
     pt_buf_reset(&a->mcp_notes);
-    a->urgent = true;
+    a->pace.urgent = true;
 }
 
 static const char *mcp_state_name(pt_mcp_state st)
@@ -2808,12 +2864,12 @@ static void run_command(app *a, pt_str line)
                 out_z(a, TUI_RED, msg);
                 return;
             }
-            snprintf(a->model_ref, sizeof a->model_ref, "%.255s", v);
-            a->o.model = a->model_ref;
+            snprintf(a->model.ref, sizeof a->model.ref, "%.255s", v);
+            a->o.model = a->model.ref;
             set_config(a);
         }
         snprintf(msg, sizeof msg, "%smodel: %s", arg.n ? "switched " : "",
-                 a->model[0] ? a->model : "(the session's last)");
+                 a->model.name[0] ? a->model.name : "(the session's last)");
         out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "effort")) {
         if (arg.n) {
@@ -2837,7 +2893,7 @@ static void run_command(app *a, pt_str line)
     } else if (pt_str_eqz(cmd, "resume")) {
         if (!arg.n) {
             tui_input_set(&a->in, PT_S("/resume "));
-            a->menu_closed = false;
+            a->menu.closed = false;
             menu_update(a);
             return;
         }
@@ -2847,13 +2903,13 @@ static void run_command(app *a, pt_str line)
             out_z(a, TUI_RED, "no session to fork");
         else if (session_empty(a))
             out_z(a, TUI_DIM, "nothing to fork yet");
-        else if (a->running)
+        else if (a->run.active)
             out_z(a, TUI_RED, "/fork waits for the run to end (esc esc stops it)");
         else {
             a->o.fork = true;
             switch_session(a, NULL);
             a->o.fork = false;
-            a->created = false; /* a copy: never discarded as empty */
+            a->sess.created = false; /* a copy: never discarded as empty */
         }
     } else if (pt_str_eqz(cmd, "worktree") || pt_str_eqz(cmd, "wt")) {
         if (arg.n && !cli_worktree_name_ok(v)) {
@@ -2894,8 +2950,8 @@ static void run_command(app *a, pt_str line)
         long sp2 = pt_str_find(arg, ' ');
         int s;
         if (!arg.n) {
-            a->menu = MENU_SETTINGS;
-            a->set_sel = a->menu_top = 0;
+            a->menu.kind = MENU_SETTINGS;
+            a->menu.set_sel = a->menu.top = 0;
             return;
         }
         s = find_setting((pt_str){arg.p, sp2 >= 0 ? (size_t)sp2 : arg.n});
@@ -2933,7 +2989,7 @@ static void run_command(app *a, pt_str line)
     } else if (pt_str_eqz(cmd, "help")) {
         cmd_help(a);
     } else if (pt_str_eqz(cmd, "quit") || pt_str_eqz(cmd, "exit")) {
-        a->keep_on_quit = true;
+        a->sess.keep_on_quit = true;
         a->quit = true;
     } else {
         snprintf(msg, sizeof msg, "unknown command /%.*s; /help lists them", (int)(cmd.n > 100 ? 100 : cmd.n), cmd.p);
@@ -2946,20 +3002,20 @@ static void run_command(app *a, pt_str line)
 static void history_append(app *a, pt_str text)
 {
     int fd;
-    if (!a->hist_path[0])
+    if (!a->hist.path[0])
         return;
-    pt_buf_reset(&a->pending_history);
-    tui_hist_line(&a->pending_history, text);
-    if (a->pending_history.oom)
+    pt_buf_reset(&a->hist.pending);
+    tui_hist_line(&a->hist.pending, text);
+    if (a->hist.pending.oom)
         return; /* best effort; never append a truncated JSON string */
-    fd = open(a->hist_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    fd = open(a->hist.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd >= 0) {
-        if (write(fd, a->pending_history.p, a->pending_history.n) != (ssize_t)a->pending_history.n) {
+        if (write(fd, a->hist.pending.p, a->hist.pending.n) != (ssize_t)a->hist.pending.n) {
             /* best effort */
         }
         close(fd);
     }
-    pt_buf_reset(&a->pending_history);
+    pt_buf_reset(&a->hist.pending);
 }
 
 static void history_load(app *a)
@@ -2968,21 +3024,21 @@ static void history_load(app *a)
     cli_sessions_dir(root, sizeof root);
     if ((slash = strrchr(root, '/')))
         *slash = 0;
-    snprintf(a->hist_path, sizeof a->hist_path, "%s/history", root);
+    snprintf(a->hist.path, sizeof a->hist.path, "%s/history", root);
 }
 
 static bool queue_text(app *a, pt_str text, bool command)
 {
     queued_input *q;
-    if (a->nq == a->qcap) {
-        uint32_t cap = a->qcap ? a->qcap * 2 : 8, i;
+    if (a->queue.n == a->queue.cap) {
+        uint32_t cap = a->queue.cap ? a->queue.cap * 2 : 8, i;
         queued_input *next;
-        if (cap < a->qcap || SIZE_MAX / (size_t)cap < sizeof *next)
+        if (cap < a->queue.cap || SIZE_MAX / (size_t)cap < sizeof *next)
             return false;
-        next = (queued_input *)realloc(a->queue, (size_t)cap * sizeof *next);
+        next = (queued_input *)realloc(a->queue.items, (size_t)cap * sizeof *next);
         if (!next)
             return false;
-        for (i = a->qcap; i < cap; i++) {
+        for (i = a->queue.cap; i < cap; i++) {
             int k;
             memset(&next[i], 0, sizeof next[i]);
             pt_buf_init(&next[i].text, pt_sys_allocator());
@@ -2990,10 +3046,10 @@ static bool queue_text(app *a, pt_str text, bool command)
             for (k = 0; k < XPARTS; k++)
                 pt_buf_init(&next[i].parts[k], pt_sys_allocator());
         }
-        a->queue = next;
-        a->qcap = cap;
+        a->queue.items = next;
+        a->queue.cap = cap;
     }
-    q = &a->queue[a->nq];
+    q = &a->queue.items[a->queue.n];
     pt_buf_reset(&q->text);
     pt_buf_puts(&q->text, text);
     if (q->text.oom)
@@ -3010,16 +3066,16 @@ static bool queue_text(app *a, pt_str text, bool command)
         for (k = 0; k < XPARTS; k++)
             pt_buf_reset(&q->parts[k]);
     }
-    a->nq++;
+    a->queue.n++;
     return true;
 }
 
 static void queued_remove(app *a, uint32_t at)
 {
-    queued_input kept = a->queue[at];
-    memmove(a->queue + at, a->queue + at + 1, (a->nq - at - 1) * sizeof *a->queue);
-    a->queue[--a->nq] = kept;
-    pt_buf_reset(&a->queue[a->nq].text);
+    queued_input kept = a->queue.items[at];
+    memmove(a->queue.items + at, a->queue.items + at + 1, (a->queue.n - at - 1) * sizeof *a->queue.items);
+    a->queue.items[--a->queue.n] = kept;
+    pt_buf_reset(&a->queue.items[a->queue.n].text);
 }
 
 /* ---- MCP: prompts and @-mentions in what is sent ---- */
@@ -3029,13 +3085,13 @@ static void x_done(void *ud, const char *error, pt_str text)
     xreq *x = (xreq *)ud, **pp;
     app *a = x->a;
     uint32_t i;
-    for (pp = &a->xs; *pp; pp = &(*pp)->next)
+    for (pp = &a->queue.xs; *pp; pp = &(*pp)->next)
         if (*pp == x) {
             *pp = x->next;
             break;
         }
-    for (i = 0; i < a->nq; i++) {
-        queued_input *q = &a->queue[i];
+    for (i = 0; i < a->queue.n; i++) {
+        queued_input *q = &a->queue.items[i];
         if (q->xid != x->id)
             continue;
         if (error && !q->failed) {
@@ -3046,7 +3102,7 @@ static void x_done(void *ud, const char *error, pt_str text)
             pt_buf_puts(&q->parts[x->k], text);
         }
         if (++q->got >= q->want)
-            a->expanded = true;
+            a->queue.expanded = true;
         break;
     }
     free(x);
@@ -3060,15 +3116,15 @@ static xreq *xreq_new(app *a, queued_input *q, uint32_t k)
     x->a = a;
     x->id = q->xid;
     x->k = k;
-    x->next = a->xs;
-    a->xs = x;
+    x->next = a->queue.xs;
+    a->queue.xs = x;
     return x;
 }
 
 static void xreq_drop(app *a, xreq *x)
 {
     xreq **pp;
-    for (pp = &a->xs; *pp; pp = &(*pp)->next)
+    for (pp = &a->queue.xs; *pp; pp = &(*pp)->next)
         if (*pp == x) {
             *pp = x->next;
             break;
@@ -3193,7 +3249,7 @@ static int expand_start(app *a, queued_input *q)
     pt_rt_mcp_info in[CLI_MCP_MAX];
     uint32_t ns = a->open && a->mcp ? pt_rt_mcp_servers(a->s.rt, in, CLI_MCP_MAX) : 0, i;
     size_t at;
-    q->xid = ++a->next_xid;
+    q->xid = ++a->queue.next_xid;
     q->want = q->got = 0;
     if (ns > CLI_MCP_MAX)
         ns = CLI_MCP_MAX;
@@ -3313,8 +3369,8 @@ static void expand_text(queued_input *q, pt_str base, pt_buf *out)
 static void queued_submit(app *a)
 {
     uint32_t i = 0;
-    while (a->open && i < a->nq) {
-        queued_input *q = &a->queue[i];
+    while (a->open && i < a->queue.n) {
+        queued_input *q = &a->queue.items[i];
         if (q->submitted || (a->quit && q->command)) {
             i++;
         } else if (q->command) {
@@ -3371,9 +3427,9 @@ static void queued_submit(app *a)
                 out_z(a, TUI_RED, pt_error(a->s.a));
                 return;
             }
-            if (!a->named) { /* the first prompt names the session */
+            if (!a->sess.named) { /* the first prompt names the session */
                 cli_session_name_set(a->s.dir, pt_buf_str(&q->text));
-                a->named = true;
+                a->sess.named = true;
             }
             q->submitted = true;
             i++;
@@ -3386,19 +3442,19 @@ static void finish_session(app *a)
     int rc;
     char *text;
     size_t n;
-    if (!a->opening || !cli_session_finish(a->opening, &rc, a->err, sizeof a->err))
+    if (!a->sess.opening || !cli_session_finish(a->sess.opening, &rc, a->sess.err, sizeof a->sess.err))
         return;
-    a->opening = NULL;
+    a->sess.opening = NULL;
     if (rc) {
         group_close(a);
-        out_note(a, &a->lines, TUI_RED, pt_strz(a->err));
-        a->urgent = true;
-        if (a->fallback[0]) {
+        out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
+        a->pace.urgent = true;
+        if (a->sess.fallback[0]) {
             char back[64];
-            snprintf(back, sizeof back, "%s", a->fallback);
-            a->fallback[0] = 0;
+            snprintf(back, sizeof back, "%s", a->sess.fallback);
+            a->sess.fallback[0] = 0;
             if (open_session(a, back)) {
-                a->created = a->fallback_created; /* still discarded if nothing is said */
+                a->sess.created = a->sess.fallback_created; /* still discarded if nothing is said */
                 return;
             }
         }
@@ -3407,7 +3463,7 @@ static void finish_session(app *a)
         return;
     }
     a->open = true;
-    a->fallback[0] = 0;
+    a->sess.fallback[0] = 0;
     {
         char name[CLI_NAME_MAX + 1], dir[4096];
         pt_str cwd = pt_session_cwd(a->s.a);
@@ -3415,9 +3471,9 @@ static void finish_session(app *a)
         pt_entry_view v;
         /* a session from before names, or whose prompts are compacted away,
          * is not named after a later one */
-        a->named = cli_session_name(a->s.dir, name, sizeof name);
-        for (i = 0; i < ne && !a->named && pt_entry_at(a->s.a, i, &v); i++)
-            a->named = strcmp(v.kind, "user") == 0 || (strcmp(v.kind, "epoch") == 0 && v.epoch > 1);
+        a->sess.named = cli_session_name(a->s.dir, name, sizeof name);
+        for (i = 0; i < ne && !a->sess.named && pt_entry_at(a->s.a, i, &v); i++)
+            a->sess.named = strcmp(v.kind, "user") == 0 || (strcmp(v.kind, "epoch") == 0 && v.epoch > 1);
         /* new sessions start here: in the session's directory */
         if (cwd.n && cwd.n < sizeof dir) {
             memcpy(dir, cwd.p, cwd.n);
@@ -3425,25 +3481,25 @@ static void finish_session(app *a)
             (void)!chdir(dir);
         }
     }
-    if (!a->history_ready) {
+    if (!a->hist.ready) {
         text = cli_session_take_history(&a->s, &n);
         if (text && !tui_hist_load(&a->in, (pt_str){text, n}, 1000))
             out_z(a, TUI_RED, "out of memory loading input history");
         free(text);
-        if (!tui_hist_load(&a->in, pt_buf_str(&a->pending_history), UINT32_MAX))
+        if (!tui_hist_load(&a->in, pt_buf_str(&a->hist.pending), UINT32_MAX))
             out_z(a, TUI_RED, "out of memory loading input history");
-        if (a->pending_history.n) {
-            int fd = open(a->hist_path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+        if (a->hist.pending.n) {
+            int fd = open(a->hist.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
             if (fd >= 0) {
-                (void)!write(fd, a->pending_history.p, a->pending_history.n);
+                (void)!write(fd, a->hist.pending.p, a->hist.pending.n);
                 close(fd);
             }
         }
-        pt_buf_reset(&a->pending_history);
-        a->history_ready = true;
+        pt_buf_reset(&a->hist.pending);
+        a->hist.ready = true;
     }
     text = cli_session_take_draft(&a->s, &n);
-    if (text && !a->drop_restored_draft) {
+    if (text && !a->draft.drop_restored) {
         size_t cur = a->in.cur, prefix;
         int col = 0;
         pt_buf_reset(&a->wrap);
@@ -3466,7 +3522,7 @@ static void finish_session(app *a)
         a->pager_pending = false;
         pager(a);
     }
-    a->urgent = true;
+    a->pace.urgent = true;
 }
 
 static void submit(app *a)
@@ -3477,16 +3533,16 @@ static void submit(app *a)
         return;
     if (secret_at(text)) {
         /* the key stays out of the history */
-    } else if (a->history_ready) {
+    } else if (a->hist.ready) {
         if (!tui_hist_add(&a->in, text))
             out_z(a, TUI_RED, "out of memory adding to input history");
         history_append(a, text);
     } else {
-        tui_hist_line(&a->pending_history, text);
+        tui_hist_line(&a->hist.pending, text);
     }
     command = text.p[0] == '/' && pt_str_find(text, '\n') < 0 && !pt_str_starts(text, PT_S("/skill:")) &&
               !names_prompt(a, text);
-    if (command && (!a->opening || secret_at(text))) { /* a key is never queued */
+    if (command && (!a->sess.opening || secret_at(text))) { /* a key is never queued */
         pt_buf_reset(&a->command);
         pt_buf_puts(&a->command, text);
         if (a->command.oom) {
@@ -3494,14 +3550,14 @@ static void submit(app *a)
             return;
         }
         tui_input_set(&a->in, PT_STR_NULL);
-        a->menu = MENU_NONE;
-        a->menu_closed = false;
+        a->menu.kind = MENU_NONE;
+        a->menu.closed = false;
         run_command(a, pt_buf_str(&a->command));
         menu_update(a);
-        a->draft_dirty = true;
+        a->draft.dirty = true;
         return;
     }
-    if (!a->open && !a->opening) {
+    if (!a->open && !a->sess.opening) {
         out_z(a, TUI_RED, "no session");
         return;
     }
@@ -3511,7 +3567,7 @@ static void submit(app *a)
     }
     tui_input_set(&a->in, PT_STR_NULL);
     queued_submit(a);
-    a->draft_dirty = true;
+    a->draft.dirty = true;
 }
 
 /* Tab: complete the selected menu item. Returns true when it changed
@@ -3521,11 +3577,11 @@ static bool complete(app *a)
     pt_str d = pt_buf_str(&a->in.text), label;
     pt_buf nd;
     bool changed;
-    if (a->menu == MENU_NONE || a->menu == MENU_SETTINGS || !a->nitems)
+    if (a->menu.kind == MENU_NONE || a->menu.kind == MENU_SETTINGS || !a->menu.n)
         return false;
-    label = item_label(a, a->sel);
+    label = item_label(a, a->menu.sel);
     pt_buf_init(&nd, pt_sys_allocator());
-    if (a->menu == MENU_CMD) {
+    if (a->menu.kind == MENU_CMD) {
         size_t i;
         pt_buf_putc(&nd, '/');
         pt_buf_puts(&nd, label);
@@ -3536,7 +3592,7 @@ static bool complete(app *a)
             pt_buf_putc(&nd, ' ');
         else if (find_prompt(a, label) && find_prompt(a, label)->nargs) /* then its arguments */
             pt_buf_putc(&nd, ' ');
-    } else if (a->sessions_menu) { /* the whole argument: names have spaces */
+    } else if (a->menu.of_sessions) { /* the whole argument: names have spaces */
         pt_buf_puts(&nd, PT_S("/resume "));
         pt_buf_puts(&nd, label);
     } else { /* replace the last word */
@@ -3564,8 +3620,8 @@ static void enter(app *a)
         tui_input_insert(&a->in, PT_S("\n"));
         return;
     }
-    if (a->menu == MENU_CMD && a->nitems) {
-        pt_str label = item_label(a, a->sel);
+    if (a->menu.kind == MENU_CMD && a->menu.n) {
+        pt_str label = item_label(a, a->menu.sel);
         const pt_rt_mcp_prompt *p = find_prompt(a, label);
         uint32_t k;
         bool needs = false;
@@ -3578,9 +3634,9 @@ static void enter(app *a)
         } else {
             complete(a);
         }
-    } else if (a->menu == MENU_ARG && a->nitems) {
-        bool skill = a->skills_menu || a->mention_menu;
-        pt_str label = item_label(a, a->sel);
+    } else if (a->menu.kind == MENU_ARG && a->menu.n) {
+        bool skill = a->menu.of_skills || a->menu.of_mentions;
+        pt_str label = item_label(a, a->menu.sel);
         bool sub = pt_str_starts(d, PT_S("/mcp ")) && (pt_str_eqz(label, "login") || pt_str_eqz(label, "logout") ||
                                                       pt_str_eqz(label, "restart"));
         complete(a);
@@ -3592,16 +3648,16 @@ static void enter(app *a)
 
 static void settings_key(app *a, const tui_ev *ev)
 {
-    int k = settings[a->set_sel].k, i, dir = ev->key == TK_LEFT ? -1 : 1;
-    const char *const *vals = settings[a->set_sel].vals;
-    int nv = settings[a->set_sel].nv;
+    int k = settings[a->menu.set_sel].k, i, dir = ev->key == TK_LEFT ? -1 : 1;
+    const char *const *vals = settings[a->menu.set_sel].vals;
+    int nv = settings[a->menu.set_sel].nv;
     char d[600];
     if (ev->key == TK_UP || ev->key == TK_DOWN) {
-        a->set_sel = (a->set_sel + (ev->key == TK_UP ? -1 : 1) + (int)NSETTINGS) % (int)NSETTINGS;
+        a->menu.set_sel = (a->menu.set_sel + (ev->key == TK_UP ? -1 : 1) + (int)NSETTINGS) % (int)NSETTINGS;
         return;
     }
     if (ev->key == TK_ESC || (ev->key == 'c' && ev->mods == TM_CTRL)) {
-        a->menu = MENU_NONE;
+        a->menu.kind = MENU_NONE;
         return;
     }
     if (ev->key != TK_LEFT && ev->key != TK_RIGHT && ev->key != TK_ENTER)
@@ -3611,9 +3667,9 @@ static void settings_key(app *a, const tui_ev *ev)
             ;
         save_setting(a, k, vals[((i < nv ? i : 0) + dir + nv) % nv]);
     } else { /* model, pager, compact-model: edit as a command */
-        snprintf(d, sizeof d, "/settings %s %s", settings[a->set_sel].name, k == CFG_PAGER ? a->cfg->val[k] : "");
-        a->menu = MENU_NONE;
-        a->menu_closed = false;
+        snprintf(d, sizeof d, "/settings %s %s", settings[a->menu.set_sel].name, k == CFG_PAGER ? a->cfg->val[k] : "");
+        a->menu.kind = MENU_NONE;
+        a->menu.closed = false;
         tui_input_set(&a->in, pt_strz(d));
         menu_update(a);
     }
@@ -3622,17 +3678,17 @@ static void settings_key(app *a, const tui_ev *ev)
 static void interrupt(app *a)
 {
     if (a->open && pt_abort(a->s.a))
-        a->esc_at = 0;
+        a->pace.esc_at = 0;
 }
 
 /* Answer the question: 0 yes, 1 yes and allow alike, 2 no. */
 static void answer(app *a, int choice)
 {
-    if (choice == 1 && !pt_rt_allow(a->s.rt, a->ask.name, pt_strz(a->ask_prefix)))
+    if (choice == 1 && !pt_rt_allow(a->s.rt, a->ask.view.name, pt_strz(a->ask.prefix)))
         out_z(a, TUI_RED, "out of memory: allowed this once only");
-    if (!pt_approve(a->s.a, a->ask.task, choice != 2, PT_STR_NULL))
+    if (!pt_approve(a->s.a, a->ask.view.task, choice != 2, PT_STR_NULL))
         out_z(a, TUI_RED, pt_error(a->s.a));
-    a->ask_task = 0;
+    a->ask.task = 0;
     set_dirty(a);
 }
 
@@ -3649,9 +3705,9 @@ static bool ask_key(app *a, const tui_ev *ev)
     if (ev->kind != TE_KEY || (ev->mods && ev->key != TK_ENTER))
         return false;
     if (ev->key == TK_UP || ev->key == TK_DOWN)
-        a->ask_sel = (a->ask_sel + (ev->key == TK_UP ? 2 : 1)) % 3;
+        a->ask.sel = (a->ask.sel + (ev->key == TK_UP ? 2 : 1)) % 3;
     else if (ev->key == TK_ENTER)
-        answer(a, a->ask_sel);
+        answer(a, a->ask.sel);
     else if (ev->key == TK_ESC)
         answer(a, 2);
     else
@@ -3666,21 +3722,21 @@ static void on_key(app *a, const tui_ev *ev)
     bool ctrl = ev->mods == TM_CTRL;
     tui_input_result r;
     size_t before = a->in.text.n;
-    a->urgent = true;
+    a->pace.urgent = true;
     if (ask_key(a, ev))
         return;
     if (ev->kind == TE_TEXT || ev->kind == TE_PASTE) {
-        if (a->menu == MENU_SETTINGS)
-            a->menu = MENU_NONE;
+        if (a->menu.kind == MENU_SETTINGS)
+            a->menu.kind = MENU_NONE;
         tui_input_insert(&a->in, ev->text);
-        a->menu_closed = false;
-        a->draft_dirty = true;
+        a->menu.closed = false;
+        a->draft.dirty = true;
         menu_update(a);
         return;
     }
     if (ev->kind != TE_KEY)
         return;
-    if (a->menu == MENU_SETTINGS) {
+    if (a->menu.kind == MENU_SETTINGS) {
         settings_key(a, ev);
         return;
     }
@@ -3693,30 +3749,30 @@ static void on_key(app *a, const tui_ev *ev)
         return;
     }
     if (k == TK_ESC) {
-        if (a->menu != MENU_NONE) {
-            a->menu_closed = true;
+        if (a->menu.kind != MENU_NONE) {
+            a->menu.closed = true;
             menu_update(a);
-        } else if (a->running) {
-            if (now - a->esc_at < DOUBLE_MS)
+        } else if (a->run.active) {
+            if (now - a->pace.esc_at < DOUBLE_MS)
                 interrupt(a);
             else
-                a->esc_at = now;
+                a->pace.esc_at = now;
         }
         return;
     }
     if (ctrl && k == 'c') {
-        if (a->opening)
-            a->drop_restored_draft = true;
+        if (a->sess.opening)
+            a->draft.drop_restored = true;
         if (a->in.text.n) {
             tui_input_set(&a->in, PT_STR_NULL);
-            a->draft_dirty = true;
+            a->draft.dirty = true;
             menu_update(a);
-        } else if (a->running) {
+        } else if (a->run.active) {
             interrupt(a);
-        } else if (now - a->ctrlc_at < DOUBLE_MS) {
+        } else if (now - a->pace.ctrlc_at < DOUBLE_MS) {
             a->quit = true;
         } else {
-            a->ctrlc_at = now;
+            a->pace.ctrlc_at = now;
         }
         return;
     }
@@ -3739,27 +3795,27 @@ static void on_key(app *a, const tui_ev *ev)
         return;
     }
     if (ctrl && k == 'o') {
-        if (a->opening)
+        if (a->sess.opening)
             a->pager_pending = true;
         else
             pager(a);
         return;
     }
-    if ((k == TK_UP || k == TK_DOWN) && !ev->mods && a->menu != MENU_NONE && a->nitems) {
-        a->sel = (a->sel + (k == TK_UP ? -1 : 1) + a->nitems) % a->nitems;
+    if ((k == TK_UP || k == TK_DOWN) && !ev->mods && a->menu.kind != MENU_NONE && a->menu.n) {
+        a->menu.sel = (a->menu.sel + (k == TK_UP ? -1 : 1) + a->menu.n) % a->menu.n;
         return;
     }
     r = tui_input_key(&a->in, ev, width(a) > 3 ? width(a) - 2 : 1);
     if (r == TI_TOP || r == TI_BOTTOM) {
         if (tui_hist_move(&a->in, r == TI_TOP ? -1 : 1)) {
-            a->menu_closed = true; /* a recalled command does not open the menu */
+            a->menu.closed = true; /* a recalled command does not open the menu */
             menu_update(a);
         }
         return;
     }
     if (r == TI_EDITED || a->in.text.n != before) {
-        a->menu_closed = false;
-        a->draft_dirty = true;
+        a->menu.closed = false;
+        a->draft.dirty = true;
         menu_update(a);
     }
 }
@@ -3783,14 +3839,14 @@ static bool reflows(void)
 static void on_reply(app *a, const tui_ev *ev)
 {
     if (ev->reply == TR_DA1) {
-        a->answered = true;
+        a->caps.answered = true;
         a->keys.want_cpr = false;
-    } else if (ev->reply == TR_KITTY && !a->kitty) {
-        a->kitty = true;
+    } else if (ev->reply == TR_KITTY && !a->caps.kitty) {
+        a->caps.kitty = true;
         tui_term_kitty(a->t, true);
     } else if (ev->reply == TR_CPR) {
-        a->cpr = true;
-        a->start_col = ev->b;
+        a->caps.cpr = true;
+        a->caps.start_col = ev->b;
     }
 }
 
@@ -3805,24 +3861,24 @@ static int timeout_ms(app *a, int64_t now)
         if (t < 0 || d_ < t)                      \
             t = d_;                               \
     } while (0)
-    if (a->urgent)
+    if (a->pace.urgent)
         AT(now);
-    if (a->dirty)
-        AT(a->last_paint + a->interval);
+    if (a->pace.dirty)
+        AT(a->pace.last_paint + a->pace.interval);
     if (tui_keys_pending(&a->keys))
-        AT(a->keys_at + 30);
-    if (a->running && !a->wait_at) { /* the clock's next half second */
+        AT(a->pace.keys_at + 30);
+    if (a->run.active && !a->run.wait_at) { /* the clock's next half second */
         due = now + BLINK_MS - run_clock(a, now) % BLINK_MS;
         AT(due);
     }
-    if (now - a->esc_at < DOUBLE_MS)
-        AT(a->esc_at + DOUBLE_MS);
-    if (now - a->ctrlc_at < DOUBLE_MS)
-        AT(a->ctrlc_at + DOUBLE_MS);
-    if (a->winch_at)
-        AT(a->winch_at);
-    if (a->draft_dirty)
-        AT(a->draft_at + 1000);
+    if (now - a->pace.esc_at < DOUBLE_MS)
+        AT(a->pace.esc_at + DOUBLE_MS);
+    if (now - a->pace.ctrlc_at < DOUBLE_MS)
+        AT(a->pace.ctrlc_at + DOUBLE_MS);
+    if (a->pace.winch_at)
+        AT(a->pace.winch_at);
+    if (a->draft.dirty)
+        AT(a->draft.at + 1000);
 #undef AT
     return t > 60000 ? 60000 : (int)t;
 }
@@ -3856,332 +3912,332 @@ static void startup_free(app *a)
     pt_buf_free(&a->tmp2);
     pt_buf_free(&a->wrap);
     pt_buf_free(&a->live_rows);
-    pt_buf_free(&a->live);
-    pt_buf_free(&a->retry_err);
+    pt_buf_free(&a->view.live);
+    pt_buf_free(&a->run.retry_err);
     for (i = 0; i < RUN_MAX; i++) {
-        pt_buf_free(&a->runs[i].id);
-        pt_buf_free(&a->runs[i].head);
-        pt_buf_free(&a->runs[i].out);
+        pt_buf_free(&a->run.calls[i].id);
+        pt_buf_free(&a->run.calls[i].head);
+        pt_buf_free(&a->run.calls[i].out);
     }
     pt_buf_free(&a->diff);
-    pt_buf_free(&a->grp);
-    pt_buf_free(&a->items_buf);
-    pt_buf_free(&a->pending_history);
+    pt_buf_free(&a->group.buf);
+    pt_buf_free(&a->menu.buf);
+    pt_buf_free(&a->hist.pending);
     pt_buf_free(&a->command);
     pt_arena_free(&a->ar);
 }
 
 int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, const char *prompt)
 {
-    app a;
+    app st, *a = &st;
     const char *term = getenv("TERM"), *amb = getenv("PYTTE_AMBIGUOUS");
     int sig = 0, slot;
     char picked[64] = "", kept[64];
-    memset(&a, 0, sizeof a);
-    a.o = *o;
-    a.cfg = cfg;
-    a.mcp = mcp;
-    pt_buf_init(&a.mcp_notes, pt_sys_allocator());
+    memset(a, 0, sizeof *a);
+    a->o = *o;
+    a->cfg = cfg;
+    a->mcp = mcp;
+    pt_buf_init(&a->mcp_notes, pt_sys_allocator());
     if (mcp)
-        cli_mcp_host(&a.o.mcp_host, mcp_note, &a);
-    a.interval = 33;
-    a.esc_at = a.ctrlc_at = -DOUBLE_MS;
+        cli_mcp_host(&a->o.mcp_host, mcp_note, a);
+    a->pace.interval = 33;
+    a->pace.esc_at = a->pace.ctrlc_at = -DOUBLE_MS;
     /* the watchdog first: before the store is opened */
-    if (!(a.t = tui_term_new())) {
+    if (!(a->t = tui_term_new())) {
         fprintf(stderr, "pytte: not a terminal\n");
         return 1;
     }
     if (o->model)
-        snprintf(a.model_ref, sizeof a.model_ref, "%s", o->model);
-    a.o.model = o->model ? a.model_ref : NULL;
+        snprintf(a->model.ref, sizeof a->model.ref, "%s", o->model);
+    a->o.model = o->model ? a->model.ref : NULL;
     tui_set_ambiguous_wide(amb && strcmp(amb, "wide") == 0);
-    a.color = !getenv("NO_COLOR") || !*getenv("NO_COLOR");
-    apply_symbols(&a);
-    apply_thinking(&a);
-    tui_keys_init(&a.keys);
-    a.keys.want_cpr = true;
-    tui_input_init(&a.in, pt_sys_allocator());
-    tui_frame_init(&a.frame, pt_sys_allocator());
-    pt_buf_init(&a.lines, pt_sys_allocator());
-    pt_buf_init(&a.tmp, pt_sys_allocator());
-    pt_buf_init(&a.tmp2, pt_sys_allocator());
-    pt_buf_init(&a.wrap, pt_sys_allocator());
-    pt_buf_init(&a.live_rows, pt_sys_allocator());
-    pt_buf_init(&a.live, pt_sys_allocator());
-    pt_buf_init(&a.retry_err, pt_sys_allocator());
+    a->color = !getenv("NO_COLOR") || !*getenv("NO_COLOR");
+    apply_symbols(a);
+    apply_thinking(a);
+    tui_keys_init(&a->keys);
+    a->keys.want_cpr = true;
+    tui_input_init(&a->in, pt_sys_allocator());
+    tui_frame_init(&a->frame, pt_sys_allocator());
+    pt_buf_init(&a->lines, pt_sys_allocator());
+    pt_buf_init(&a->tmp, pt_sys_allocator());
+    pt_buf_init(&a->tmp2, pt_sys_allocator());
+    pt_buf_init(&a->wrap, pt_sys_allocator());
+    pt_buf_init(&a->live_rows, pt_sys_allocator());
+    pt_buf_init(&a->view.live, pt_sys_allocator());
+    pt_buf_init(&a->run.retry_err, pt_sys_allocator());
     for (slot = 0; slot < RUN_MAX; slot++) {
-        pt_buf_init(&a.runs[slot].id, pt_sys_allocator());
-        pt_buf_init(&a.runs[slot].head, pt_sys_allocator());
-        pt_buf_init(&a.runs[slot].out, pt_sys_allocator());
+        pt_buf_init(&a->run.calls[slot].id, pt_sys_allocator());
+        pt_buf_init(&a->run.calls[slot].head, pt_sys_allocator());
+        pt_buf_init(&a->run.calls[slot].out, pt_sys_allocator());
     }
-    pt_buf_init(&a.diff, pt_sys_allocator());
-    pt_buf_init(&a.grp, pt_sys_allocator());
-    pt_buf_init(&a.items_buf, pt_sys_allocator());
-    pt_buf_init(&a.pending_history, pt_sys_allocator());
-    pt_buf_init(&a.command, pt_sys_allocator());
-    pt_arena_init(&a.ar, pt_sys_allocator(), 0);
-    if (!tui_term_start(a.t, !term || (strncmp(term, "linux", 5) != 0 && strncmp(term, "vt", 2) != 0))) {
-        startup_free(&a);
+    pt_buf_init(&a->diff, pt_sys_allocator());
+    pt_buf_init(&a->group.buf, pt_sys_allocator());
+    pt_buf_init(&a->menu.buf, pt_sys_allocator());
+    pt_buf_init(&a->hist.pending, pt_sys_allocator());
+    pt_buf_init(&a->command, pt_sys_allocator());
+    pt_arena_init(&a->ar, pt_sys_allocator(), 0);
+    if (!tui_term_start(a->t, !term || (strncmp(term, "linux", 5) != 0 && strncmp(term, "vt", 2) != 0))) {
+        startup_free(a);
         fprintf(stderr, "pytte: cannot set up the terminal\n");
         return 1;
     }
-    tui_term_size(a.t, &a.rows, &a.cols);
-    history_load(&a);
-    if (!getcwd(a.start_dir, sizeof a.start_dir))
-        a.start_dir[0] = 0;
+    tui_term_size(a->t, &a->rows, &a->cols);
+    history_load(a);
+    if (!getcwd(a->sess.start_dir, sizeof a->sess.start_dir))
+        a->sess.start_dir[0] = 0;
     if (id)
         snprintf(picked, sizeof picked, "%s", id);
-    if (!open_session(&a, id ? picked : NULL)) {
-        startup_free(&a);
-        fprintf(stderr, "pytte: %s\n", a.err);
-        return a.code ? a.code : 1;
+    if (!open_session(a, id ? picked : NULL)) {
+        startup_free(a);
+        fprintf(stderr, "pytte: %s\n", a->sess.err);
+        return a->code ? a->code : 1;
     }
-    a.o.worktree = NULL; /* -w: this open only; copied by it */
-    set_config(&a);
-    tui_band_init(&a.band, a.rows, a.cols, pt_sys_allocator());
-    a.band.reflow = reflows();
-    a.band.color = a.color;
+    a->o.worktree = NULL; /* -w: this open only; copied by it */
+    set_config(a);
+    tui_band_init(&a->band, a->rows, a->cols, pt_sys_allocator());
+    a->band.reflow = reflows();
+    a->band.color = a->color;
     {
         pt_waitfd fd;
         char buf[4096];
         long n;
-        fd.fd = tui_term_in(a.t);
+        fd.fd = tui_term_in(a->t);
         if (pt_sys_wait(&fd, 1, 0) > 0 && fd.ready &&
-            (n = tui_term_read(a.t, buf, sizeof buf)) > 0) {
-            tui_keys_feed(&a.keys, buf, (size_t)n);
-            read_keys(&a, false);
+            (n = tui_term_read(a->t, buf, sizeof buf)) > 0) {
+            tui_keys_feed(&a->keys, buf, (size_t)n);
+            read_keys(a, false);
         }
         /* Without an immediate CPR, conservatively preserve a preceding
          * partial line. Its eventual reply cannot move the painted band. */
-        if (a.start_col != 1)
-            tui_term_write(a.t, PT_S("\r\n"));
+        if (a->caps.start_col != 1)
+            tui_term_write(a->t, PT_S("\r\n"));
     }
     {
         char head[100];
         pt_buf first;
         pt_buf_init(&first, pt_sys_allocator());
         snprintf(head, sizeof head, " %s · /help for commands", PT_VERSION);
-        out_text(&a, &first, TUI_DIM, "pytte", ACCENT | TUI_BOLD, pt_strz(head), 0);
-        pt_buf_puts(&first, pt_buf_str(&a.lines));
-        pt_buf_reset(&a.lines);
-        pt_buf_puts(&a.lines, pt_buf_str(&first));
+        out_text(a, &first, TUI_DIM, "pytte", ACCENT | TUI_BOLD, pt_strz(head), 0);
+        pt_buf_puts(&first, pt_buf_str(&a->lines));
+        pt_buf_reset(&a->lines);
+        pt_buf_puts(&a->lines, pt_buf_str(&first));
         pt_buf_free(&first);
     }
-    if (a.mcp && a.mcp->warn[0])
-        out_z(&a, TUI_RED, a.mcp->warn);
-    if (a.mcp && a.mcp->nuntrusted) { /* the trust flow: say what would run */
+    if (a->mcp && a->mcp->warn[0])
+        out_z(a, TUI_RED, a->mcp->warn);
+    if (a->mcp && a->mcp->nuntrusted) { /* the trust flow: say what would run */
         char names[400] = "", line[700];
         uint32_t i;
         size_t k = 0;
-        for (i = 0; i < a.mcp->nall; i++)
-            if (!a.mcp->info[i].runs && k < sizeof names - 40)
+        for (i = 0; i < a->mcp->nall; i++)
+            if (!a->mcp->info[i].runs && k < sizeof names - 40)
                 k += (size_t)snprintf(names + k, sizeof names - k, "%s%s (%s: %s)", k ? ", " : "",
-                                      a.mcp->all[i].name, a.mcp->info[i].source,
-                                      a.mcp->all[i].url ? a.mcp->all[i].url : a.mcp->all[i].command);
+                                      a->mcp->all[i].name, a->mcp->info[i].source,
+                                      a->mcp->all[i].url ? a->mcp->all[i].url : a->mcp->all[i].command);
         snprintf(line, sizeof line,
                  "this project has MCP servers that are not trusted, so they do not run: %s. "
                  "/mcp trust runs them (programs on this machine: trust only what you know)",
                  names);
-        out_z(&a, TUI_DIM, line);
+        out_z(a, TUI_DIM, line);
     }
     if (prompt && *prompt) {
-        a.drop_restored_draft = true;
-        tui_input_set(&a.in, pt_strz(prompt));
-        submit(&a);
+        a->draft.drop_restored = true;
+        tui_input_set(&a->in, pt_strz(prompt));
+        submit(a);
     }
-    menu_update(&a);
-    paint(&a);
-    while (!a.quit) {
+    menu_update(a);
+    paint(a);
+    while (!a->quit) {
         pt_waitfd fds[5];
         int64_t now = pt_sys_now_ms();
         int bits;
-        bool was = a.running;
-        fds[0].fd = tui_term_in(a.t);
-        fds[1].fd = tui_term_sigfd(a.t);
-        fds[2].fd = a.opening ? cli_session_job_fd(a.opening) : -1;
-        fds[3].fd = a.sessions && a.sessions->pending ? pt_worker_fd(a.sessions->worker) : -1;
-        fds[4].fd = a.saving && a.saving->active ? pt_worker_fd(a.saving->worker) : -1;
-        if (a.opening) {
-            pt_sys_wait(fds, 5, timeout_ms(&a, now));
-            finish_session(&a);
-        } else if (a.open)
-            pt_rt_step(a.s.rt, timeout_ms(&a, now), fds, 5);
+        bool was = a->run.active;
+        fds[0].fd = tui_term_in(a->t);
+        fds[1].fd = tui_term_sigfd(a->t);
+        fds[2].fd = a->sess.opening ? cli_session_job_fd(a->sess.opening) : -1;
+        fds[3].fd = a->menu.sessions && a->menu.sessions->pending ? pt_worker_fd(a->menu.sessions->worker) : -1;
+        fds[4].fd = a->saving && a->saving->active ? pt_worker_fd(a->saving->worker) : -1;
+        if (a->sess.opening) {
+            pt_sys_wait(fds, 5, timeout_ms(a, now));
+            finish_session(a);
+        } else if (a->open)
+            pt_rt_step(a->s.rt, timeout_ms(a, now), fds, 5);
         else
-            pt_sys_wait(fds, 5, timeout_ms(&a, now));
-        finish_setting(&a);
-        show_notes(&a);
-        if (a.expanded) {
-            a.expanded = false;
-            queued_submit(&a);
-            set_dirty(&a);
+            pt_sys_wait(fds, 5, timeout_ms(a, now));
+        finish_setting(a);
+        show_notes(a);
+        if (a->queue.expanded) {
+            a->queue.expanded = false;
+            queued_submit(a);
+            set_dirty(a);
         }
-        if (a.sessions && a.sessions->pending && pt_worker_finish(a.sessions->worker)) {
-            a.sessions->pending = false;
-            a.sessions->ready = true;
-            menu_update(&a);
-            a.urgent = true;
+        if (a->menu.sessions && a->menu.sessions->pending && pt_worker_finish(a->menu.sessions->worker)) {
+            a->menu.sessions->pending = false;
+            a->menu.sessions->ready = true;
+            menu_update(a);
+            a->pace.urgent = true;
         }
         now = pt_sys_now_ms();
         {
-            uint32_t bg = bg_running(&a);
-            if (bg != a.nbg) {
-                a.nbg = bg;
-                set_dirty(&a);
+            uint32_t bg = bg_running(a);
+            if (bg != a->run.nbg) {
+                a->run.nbg = bg;
+                set_dirty(a);
             }
         }
-        a.running = a.open && !pt_idle(a.s.a) && !pt_fatal(a.s.a);
-        if (a.running != was) {
-            set_dirty(&a);
-            if (a.running) {
-                a.run_at = now;
-                a.wait_at = 0;
-                a.phase = PH_WAIT;
+        a->run.active = a->open && !pt_idle(a->s.a) && !pt_fatal(a->s.a);
+        if (a->run.active != was) {
+            set_dirty(a);
+            if (a->run.active) {
+                a->run.at = now;
+                a->run.wait_at = 0;
+                a->run.phase = PH_WAIT;
             }
         }
         if (fds[1].ready) {
-            bits = tui_term_signals(a.t, &sig);
+            bits = tui_term_signals(a->t, &sig);
             if (bits & TS_HUP) {
-                tui_term_gone(a.t);
-                a.code = 129;
+                tui_term_gone(a->t);
+                a->code = 129;
                 break;
             }
             if (bits & TS_QUIT) {
-                a.code = quit_code(sig);
+                a->code = quit_code(sig);
                 break;
             }
             if (bits & TS_TSTP) {
-                suspend(&a);
+                suspend(a);
                 tui_term_stop_self();
-                resume(&a);
+                resume(a);
             } else if (bits & TS_CONT) {
-                resume(&a); /* stopped by someone else; the shell may have reset the modes */
-                tui_band_redraw(&a.band);
+                resume(a); /* stopped by someone else; the shell may have reset the modes */
+                tui_band_redraw(&a->band);
             }
             if (bits & TS_WINCH)
-                a.winch_at = now ? now : 1;
+                a->pace.winch_at = now ? now : 1;
         }
         if (fds[0].ready) {
             char buf[4096];
-            long n = tui_term_read(a.t, buf, sizeof buf);
+            long n = tui_term_read(a->t, buf, sizeof buf);
             if (n == 0) { /* the terminal is gone */
-                tui_term_gone(a.t);
-                a.code = 129;
+                tui_term_gone(a->t);
+                a->code = 129;
                 break;
             }
             if (n > 0) {
-                tui_keys_feed(&a.keys, buf, (size_t)n);
-                a.keys_at = now;
-                read_keys(&a, false);
+                tui_keys_feed(&a->keys, buf, (size_t)n);
+                a->pace.keys_at = now;
+                read_keys(a, false);
             }
         }
-        if (tui_keys_pending(&a.keys) && now - a.keys_at >= 30)
-            read_keys(&a, true);
-        if (a.winch_at && now >= a.winch_at) {
+        if (tui_keys_pending(&a->keys) && now - a->pace.keys_at >= 30)
+            read_keys(a, true);
+        if (a->pace.winch_at && now >= a->pace.winch_at) {
             int r, c;
-            a.winch_at = 0;
-            tui_term_size(a.t, &r, &c);
-            if (r != a.rows || c != a.cols) {
-                tui_band_resize(&a.band, r, c);
-                a.rows = r;
-                a.cols = c;
-                a.urgent = true;
+            a->pace.winch_at = 0;
+            tui_term_size(a->t, &r, &c);
+            if (r != a->rows || c != a->cols) {
+                tui_band_resize(&a->band, r, c);
+                a->rows = r;
+                a->cols = c;
+                a->pace.urgent = true;
             }
         }
-        if (a.running && !a.wait_at && run_clock(&a, now) / BLINK_MS != a.tick) {
-            a.tick = run_clock(&a, now) / BLINK_MS;
-            set_dirty(&a);
+        if (a->run.active && !a->run.wait_at && run_clock(a, now) / BLINK_MS != a->run.tick) {
+            a->run.tick = run_clock(a, now) / BLINK_MS;
+            set_dirty(a);
         }
-        if (now - a.esc_at < DOUBLE_MS + 50 || now - a.ctrlc_at < DOUBLE_MS + 50)
-            set_dirty(&a);
-        if (a.draft_dirty && now - a.draft_at >= 1000)
-            save_draft(&a);
-        if (a.quit)
+        if (now - a->pace.esc_at < DOUBLE_MS + 50 || now - a->pace.ctrlc_at < DOUBLE_MS + 50)
+            set_dirty(a);
+        if (a->draft.dirty && now - a->draft.at >= 1000)
+            save_draft(a);
+        if (a->quit)
             break;
-        if (a.urgent || (a.dirty && now - a.last_paint >= a.interval))
-            paint(&a);
+        if (a->pace.urgent || (a->pace.dirty && now - a->pace.last_paint >= a->pace.interval))
+            paint(a);
     }
     /* quit: the close claim, then the terminal. What was shown of an
      * unfinished answer stays (pytte -c picks the run up again). */
-    if (a.code != 129 && ((a.live_kind != LIVE_NONE && a.live.n) || a.ngrows)) {
-        if (a.live_kind != LIVE_NONE && a.live.n) {
-            live_end(&a);
-            out_z(&a, TUI_DIM, "(detached)");
+    if (a->code != 129 && ((a->view.kind != LIVE_NONE && a->view.live.n) || a->group.n)) {
+        if (a->view.kind != LIVE_NONE && a->view.live.n) {
+            live_end(a);
+            out_z(a, TUI_DIM, "(detached)");
         }
-        group_close(&a); /* the band is erased next */
-        a.menu = MENU_NONE;
-        paint(&a);
+        group_close(a); /* the band is erased next */
+        a->menu.kind = MENU_NONE;
+        paint(a);
     }
-    a.quit = true;
-    while (a.opening) {
+    a->quit = true;
+    while (a->sess.opening) {
         pt_waitfd fd;
-        fd.fd = cli_session_job_fd(a.opening);
+        fd.fd = cli_session_job_fd(a->sess.opening);
         pt_sys_wait(&fd, 1, -1);
-        finish_session(&a);
+        finish_session(a);
     }
-    snprintf(kept, sizeof kept, "%s", a.open ? a.s.id : "");
-    close_session(&a);
-    while (a.saving && (a.saving->active || a.saving->pending)) {
+    snprintf(kept, sizeof kept, "%.63s", a->open ? a->s.id : "");
+    close_session(a);
+    while (a->saving && (a->saving->active || a->saving->pending)) {
         pt_waitfd fd;
-        finish_setting(&a);
-        if (!a.saving->active)
+        finish_setting(a);
+        if (!a->saving->active)
             continue;
-        fd.fd = pt_worker_fd(a.saving->worker);
+        fd.fd = pt_worker_fd(a->saving->worker);
         pt_sys_wait(&fd, 1, -1);
     }
-    if (a.saving) {
-        pt_worker_free(a.saving->worker);
-        free(a.saving);
+    if (a->saving) {
+        pt_worker_free(a->saving->worker);
+        free(a->saving);
     }
-    if (a.sessions) {
-        pt_worker_free(a.sessions->worker);
-        free(a.sessions);
+    if (a->menu.sessions) {
+        pt_worker_free(a->menu.sessions->worker);
+        free(a->menu.sessions);
     }
-    tui_band_erase(&a.band);
-    flush_out(&a);
-    if (a.code != 129 && kept[0] && !a.discarded) { /* how to come back to it */
+    tui_band_erase(&a->band);
+    flush_out(a);
+    if (a->code != 129 && kept[0] && !a->sess.discarded) { /* how to come back to it */
         char last[200];
-        pt_buf_reset(&a.lines);
-        out_blank(&a.lines);
+        pt_buf_reset(&a->lines);
+        out_blank(&a->lines);
         snprintf(last, sizeof last, "to continue this session: pytte -r %s", kept);
-        out_z(&a, TUI_DIM, last);
-        pt_buf_reset(&a.tmp);
-        tui_sgr(&a.tmp, pt_buf_str(&a.lines), a.color);
-        tui_term_write(a.t, pt_buf_str(&a.tmp)); /* OPOST makes \n a new line */
+        out_z(a, TUI_DIM, last);
+        pt_buf_reset(&a->tmp);
+        tui_sgr(&a->tmp, pt_buf_str(&a->lines), a->color);
+        tui_term_write(a->t, pt_buf_str(&a->tmp)); /* OPOST makes \n a new line */
     }
-    tui_term_free(a.t);
-    tui_keys_free(&a.keys);
-    tui_input_free(&a.in);
-    tui_frame_free(&a.frame);
-    tui_band_free(&a.band);
-    pt_buf_free(&a.lines);
-    pt_buf_free(&a.tmp);
-    pt_buf_free(&a.tmp2);
-    pt_buf_free(&a.live_rows);
-    pt_buf_free(&a.wrap);
-    pt_buf_free(&a.live);
-    pt_buf_free(&a.retry_err);
+    tui_term_free(a->t);
+    tui_keys_free(&a->keys);
+    tui_input_free(&a->in);
+    tui_frame_free(&a->frame);
+    tui_band_free(&a->band);
+    pt_buf_free(&a->lines);
+    pt_buf_free(&a->tmp);
+    pt_buf_free(&a->tmp2);
+    pt_buf_free(&a->live_rows);
+    pt_buf_free(&a->wrap);
+    pt_buf_free(&a->view.live);
+    pt_buf_free(&a->run.retry_err);
     for (slot = 0; slot < RUN_MAX; slot++) {
-        pt_buf_free(&a.runs[slot].id);
-        pt_buf_free(&a.runs[slot].head);
-        pt_buf_free(&a.runs[slot].out);
+        pt_buf_free(&a->run.calls[slot].id);
+        pt_buf_free(&a->run.calls[slot].head);
+        pt_buf_free(&a->run.calls[slot].out);
     }
-    pt_buf_free(&a.diff);
-    pt_buf_free(&a.grp);
-    pt_buf_free(&a.items_buf);
-    pt_buf_free(&a.pending_history);
-    pt_buf_free(&a.command);
+    pt_buf_free(&a->diff);
+    pt_buf_free(&a->group.buf);
+    pt_buf_free(&a->menu.buf);
+    pt_buf_free(&a->hist.pending);
+    pt_buf_free(&a->command);
     {
         uint32_t i;
-        for (i = 0; i < a.qcap; i++) {
+        for (i = 0; i < a->queue.cap; i++) {
             int k;
-            pt_buf_free(&a.queue[i].text);
-            pt_buf_free(&a.queue[i].names);
+            pt_buf_free(&a->queue.items[i].text);
+            pt_buf_free(&a->queue.items[i].names);
             for (k = 0; k < XPARTS; k++)
-                pt_buf_free(&a.queue[i].parts[k]);
+                pt_buf_free(&a->queue.items[i].parts[k]);
         }
-        free(a.queue);
-        pt_buf_free(&a.mcp_notes);
+        free(a->queue.items);
+        pt_buf_free(&a->mcp_notes);
     }
-    pt_arena_free(&a.ar);
-    return a.code;
+    pt_arena_free(&a->ar);
+    return a->code;
 }
