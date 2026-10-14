@@ -464,7 +464,7 @@ void app_paint(app *a)
     build_frame(a, now);
     if (a->in.text.oom || a->in.kill.oom || a->in.saved.oom || a->frame.rows.oom || a->lines.oom ||
         a->view.live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->menu.buf.oom || a->group.buf.oom ||
-        app_runs_oom(a) || a->live_rows.oom || a->diff.oom) {
+        app_runs_oom(a) || a->live_rows.oom) {
         if (!a->quit)
             fprintf(stderr, "pytte: out of memory drawing the terminal\n");
         a->code = 1;
