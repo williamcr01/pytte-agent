@@ -795,8 +795,11 @@ uint32_t app_tools_on(app *a, uint32_t *all)
 
 void app_tools_open(app *a)
 {
-    if (!a->open) {
-        app_out_z(a, TUI_DIM, "the session is still opening: its tools are not known yet");
+    if (!a->open) { /* its runtime lists the tools: open with it */
+        a->menu.tools_pending = a->sess.opening != NULL;
+        a->menu.kind = MENU_NONE;
+        if (!a->sess.opening)
+            app_out_z(a, TUI_RED, "no session: no tools to list");
         return;
     }
     a->menu.kind = MENU_TOOLS;
@@ -832,7 +835,7 @@ void app_tool_set(app *a, pt_str name, bool on)
         job->ntq++; /* room: one per tool, and cli_tool_set took a slot */
     snprintf(job->tq[i].name, sizeof job->tq[i].name, "%.*s", (int)name.n, name.p);
     job->tq[i].on = on;
-    job->tq[i].now = a->open && app_session_empty(a);
+    job->tq[i].now = a->open && pt_epoch_provisional(a->s.a); /* before the first request */
     job->tq[i].wins = wins;
     start_setting(a);
 }

@@ -1136,6 +1136,32 @@ static void test_commands(void)
     pty_free(&p);
 }
 
+/* The tools the first request of the session p shows had, as its log's
+ * settled materials record them: whether tool is among them. */
+static bool first_request_has(pty *p, const char *tool)
+{
+    char dir[4300], *log, *line, *end, want[160];
+    const char *at;
+    size_t n;
+    bool found;
+    keys(p, "/status\r");
+    if (!wait_for(p, "\n  store /", 1000) || !(at = strstr(p->scratch.p, "\n  store /")))
+        return false;
+    sscanf(at + strlen("\n  store "), "%4095s", dir);
+    strcat(dir, "/log.jsonl");
+    if (!(log = pt_sys_read_file(dir, &n)))
+        return false;
+    snprintf(want, sizeof want, "\"name\":\"%s\"", tool);
+    line = strstr(log, "\"t\":\"materials\"");
+    end = line ? strchr(line, '\n') : NULL;
+    if (end)
+        *end = 0;
+    found = line && strstr(line, want);
+    CHECK(line != NULL); /* settled at the first request */
+    free(log);
+    return found;
+}
+
 /* /tools: a menu of the tools, on or off; web_fetch starts off, bash_poll
  * goes with bash. */
 static void test_tools(void)
@@ -1163,9 +1189,18 @@ static void test_tools(void)
     keys(&p, "\x1b");
     pump(&p, 100);
     CHECK(!has(&p, "space turns on or off"));
+    keys(&p, "/tools bash off\r"); /* the command, before the first prompt too */
+    CHECK(wait_for(&p, "\n· saved bash: off\n", DURABLE_MS));
     keys(&p, "hi\r");
     CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
     CHECK(wait_idle(&p, 5000));
+    /* what the first request had: web_fetch, and no bash nor bash_poll */
+    CHECK(first_request_has(&p, "web_fetch"));
+    CHECK(first_request_has(&p, "read"));
+    CHECK(!first_request_has(&p, "bash"));
+    CHECK(!first_request_has(&p, "bash_poll"));
+    keys(&p, "/tools bash on\r"); /* after it: from the next session */
+    CHECK(wait_for(&p, "saved bash: on (the model gets it at the next session or /compact)", DURABLE_MS));
     keys(&p, "/tools web_fetch off\r");
     CHECK(wait_for(&p, "saved web_fetch: off (refused now; the model forgets it at the next session or /compact)",
                    DURABLE_MS));
@@ -1189,6 +1224,35 @@ static void test_tools(void)
     keys(&p, "\x1b"); /* alone: before ctrl-d, it would read as alt */
     pump(&p, 100);
     CHECK(!has(&p, "space turns on or off"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+
+    /* A session kept empty and resumed has sent nothing either: a tool
+     * turned on there, even by a command typed while it opens, reaches its
+     * first request. */
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "/quit\r");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    {
+        const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
+        pty_start(&p, 30, 100, again);
+    }
+    CHECK(wait_for(&p, "/help for commands", 3000)); /* the terminal is raw: Enter is Enter */
+    keys(&p, "/tools web_fetch on\r"); /* queued if the session still opens */
+    CHECK(wait_for(&p, "\n· saved web_fetch: on\n", DURABLE_MS));
+    keys(&p, "/settings\r\x1b[A\r"); /* and the menu from /settings */
+    CHECK(wait_for(&p, "space turns on or off · esc close · 8 of 8 on", 1000));
+    keys(&p, "\x1b");
+    pump(&p, 100);
+    keys(&p, "hi\r");
+    CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
+    CHECK(wait_idle(&p, 5000));
+    CHECK(first_request_has(&p, "web_fetch"));
+    CHECK(first_request_has(&p, "bash"));
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);

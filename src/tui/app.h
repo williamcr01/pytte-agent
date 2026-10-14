@@ -263,6 +263,7 @@ typedef struct app_menu {
     bool of_mentions;    /* it lists @-mentions */
     bool of_sessions;    /* ...sessions (/resume) */
     bool of_skills;      /* ...skills (read when it opens) */
+    bool tools_pending;  /* the tools menu opens once the session has */
     session_list *sessions;
 } app_menu;
 

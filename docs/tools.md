@@ -40,7 +40,10 @@ no effect.
 - **When a change applies.** A change is saved at once (`saved web_fetch:
   on`).
   - **Before your first message,** the session's first request uses the
-    new state.
+    new state. That includes a resumed session that has no messages yet,
+    a `/tools` command typed while the session is still opening, and the
+    list opened from `/settings` at that point (it opens once the session
+    is ready).
   - **Later in a session,** a tool you turn off is refused from the next
     call. The model keeps seeing it in its list until the next session or
     `/compact`. A tool you turn on reaches the model at the next session or

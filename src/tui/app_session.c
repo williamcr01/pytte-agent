@@ -279,6 +279,10 @@ void app_finish_session(app *a)
     if (cli_session_note(&a->s)[0])
         app_out_z(a, TUI_DIM, cli_session_note(&a->s));
     app_queued_submit(a);
+    if (a->menu.tools_pending && !a->quit && a->open) {
+        a->menu.tools_pending = false;
+        app_tools_open(a);
+    }
     if (a->pager_pending && !a->quit && a->open) {
         a->pager_pending = false;
         app_pager(a);
