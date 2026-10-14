@@ -299,7 +299,7 @@ bool starts(pt_str s, const char *z)
     return s.n >= n && memcmp(s.p, z, n) == 0;
 }
 
-/* The lines of s into grp, each after a prefix, while *left > 0; *left
+/* The lines of s into group.buf, each after a prefix, while *left > 0; *left
  * counts down past 0 for the lines left out. */
 static void put_lines(app *a, pt_str s, const char *prefix, int *left)
 {

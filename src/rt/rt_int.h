@@ -1,5 +1,6 @@
 /* Inside the runtime: shared by rt.c (the loop), tools.c (the registry,
- * calls and the gate) and tools_builtin.c. */
+ * calls and the gate), prompt.c, mcp*.c and the builtin tools
+ * (tools_builtin.c, tools_bash.c, tools_search.c, tools_web.c). */
 #ifndef PT_RT_INT_H
 #define PT_RT_INT_H
 

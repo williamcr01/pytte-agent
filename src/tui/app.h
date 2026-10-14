@@ -82,7 +82,7 @@ enum { CAT_COMMAND, CAT_READ, CAT_WRITE, CAT_EDIT, CAT_OTHER, NCAT };
 enum { G_OK, G_FAILED, G_TIMEOUT, G_DENIED, G_CANCELLED, G_INTERRUPTED, NBAD };
 
 typedef struct grow {
-    uint32_t at, n;   /* the row, styled, in grp */
+    uint32_t at, n;   /* the row, styled, in group.buf */
     uint32_t dat, dn; /* its details, raw lines: a failure's last lines */
     uint8_t cat, bad;
 } grow;

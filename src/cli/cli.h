@@ -1,5 +1,6 @@
-/* Shared by the pytte CLI (main.c) and the TUI (src/tui/app.c): settings
- * from config files, the environment and flags, and opening sessions. */
+/* Shared by the pytte CLI (main.c, print.c, commands.c) and the TUI
+ * (src/tui/app*.c): settings from config files, the environment and
+ * flags, and opening sessions. */
 #ifndef PT_CLI_H
 #define PT_CLI_H
 
