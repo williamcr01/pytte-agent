@@ -72,8 +72,9 @@ build/pytte -m faux/faux --script tests/faux/slow.json   # offline
 ```
 
 In the TUI: Enter sends (queued while a run is active), Shift+Enter or
-Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft (twice
-on an empty one quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
+Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft, else
+interrupts the run (twice with nothing to clear or interrupt quits),
+Ctrl-D quits, Ctrl-T cycles how thinking is shown,
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
 `/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. Settings are saved to

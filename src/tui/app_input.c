@@ -510,10 +510,14 @@ static void settings_key(app *a, const tui_ev *ev)
     }
 }
 
-static void interrupt(app *a)
+/* Stop the run or compaction going on; false when there is none (the
+ * agent may be busy with bookkeeping only, such as a claim's commit). */
+static bool interrupt(app *a)
 {
-    if (a->open && pt_abort(a->s.a))
-        a->pace.esc_at = 0;
+    if (!a->open || !pt_abort(a->s.a))
+        return false;
+    a->pace.esc_at = 0;
+    return true;
 }
 
 /* Answer the question: 0 yes, 1 yes and allow alike, 2 no. */
@@ -602,8 +606,8 @@ void app_on_key(app *a, const tui_ev *ev)
             tui_input_set(&a->in, PT_STR_NULL);
             a->draft.dirty = true;
             app_menu_update(a);
-        } else if (a->run.active) {
-            interrupt(a);
+        } else if (a->run.active && interrupt(a)) {
+            /* stopped: no step toward quitting */
         } else if (now - a->pace.ctrlc_at < DOUBLE_MS) {
             a->quit = true;
         } else {
