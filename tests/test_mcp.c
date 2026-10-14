@@ -93,7 +93,12 @@ static int server(const char *mode)
         } else if (pt_str_eqz(method, "notifications/cancelled")) {
             cancelled++;
         } else if (pt_str_eqz(method, "tools/list")) {
-            if (!strcmp(mode, "fill"))
+            if (!strcmp(mode, "list_error")) {
+                pt_buf_putz(&b, "{\"jsonrpc\":\"2.0\",\"id\":");
+                pt_buf_puts(&b, id);
+                pt_buf_putz(&b, ",\"error\":{\"code\":-32000,\"message\":\"rate limited\"}}");
+                put(&b);
+            } else if (!strcmp(mode, "fill"))
                 result(&b, id,
                        "{\"tools\":[{\"name\":\"show\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{"
                        "\"type\":\"string\"},\"model_name\":{\"type\":\"string\"},\"session_id\":{\"type\":\"string\"}},"
@@ -581,6 +586,21 @@ static void test_startup_failures(void)
     CHECK(tool_result(&s, "Unknown tool: mcp__h__echo", &err, NULL) && err);
     CHECK(info(&s, 0).state == PT_MCP_STARTING && info(&s, 1).state == PT_MCP_FAILED);
     CHECK(!strcmp(info(&s, 1).error, "exited with status 2: cannot start: no config"));
+    close_sess(&s);
+}
+
+/* A server that will not list its tools runs with none, and says why. */
+static void test_list_error(void)
+{
+    sess s;
+    pt_rt_mcp_server c;
+    srv_cfg(&c, "e", "list_error");
+    open_sess(&s, "{\"turns\":[" DONE "]}", &c, 1, PT_PERM_AUTO);
+    say(&s, "hello");
+    CHECK(!has(epoch_raw(&s), "mcp__e__"));
+    CHECK(has(pt_strz(notes), "[e] listing tools: rate limited (MCP error -32000)"));
+    CHECK(info(&s, 0).state == PT_MCP_READY);
+    CHECK(!strcmp(info(&s, 0).error, "listing tools: rate limited (MCP error -32000)"));
     close_sess(&s);
 }
 
@@ -1137,6 +1157,7 @@ int main(int argc, char **argv)
     RUN(test_proto);
     RUN(test_tools);
     RUN(test_fill);
+    RUN(test_list_error);
     RUN(test_ask);
     RUN(test_timeout);
     RUN(test_crash);

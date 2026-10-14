@@ -1125,8 +1125,12 @@ static void response(srv *s, const mcp_msg *msg)
                  msg->err_message.p, (long long)msg->err_code);
         if (p.kind == P_INIT)
             srv_fail(s, "initialize: %s", why);
-        else if (p.kind == P_TOOLS) /* no tools, then */
-            tools_apply(s), ready(s);
+        else if (p.kind == P_TOOLS) { /* no tools, then; and why, so it is not a silent 0 */
+            tools_apply(s);
+            ready(s);
+            snprintf(s->error, sizeof s->error, "listing tools: %s", why);
+            mcp_notify_user(s, "%s", s->error);
+        }
         else
             pend_fail(&p, why);
         return;

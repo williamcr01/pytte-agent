@@ -89,7 +89,9 @@ them, by the server's tool name, or `*` for every tool of the server:
 Servers start with the session, in the background. A new session's first
 request waits for them to list their tools (up to `startup_timeout`), so a
 prompt sent at once shows as sent and goes a moment later. Their tools are
-named `mcp__<server>__<tool>`. A server that dies starts again at the next
+named `mcp__<server>__<tool>`. A server that answers the tool listing with
+an error (a rate limit, say) runs with no tools, and the error is shown with
+it and in `/mcp`. A server that dies starts again at the next
 call of its tools; one whose tool list changes is listed again, and the
 new tools are offered from the next epoch.
 
