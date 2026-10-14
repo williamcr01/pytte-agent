@@ -29,8 +29,11 @@ const app_cmd_def app_cmds[] = {
 };
 const size_t app_ncmds = sizeof app_cmds / sizeof app_cmds[0];
 
-const char *const app_levels[NLEVELS] = {"off", "minimal", "low", "medium", "high", "xhigh", "max"};
-const char *const app_th_names[3] = {"collapsed", "full", "hidden"};
+const char *const app_levels[] = {"off", "minimal", "low", "medium", "high", "xhigh", "max"};
+const size_t app_nlevels = sizeof app_levels / sizeof app_levels[0];
+const char *const app_th_names[] = {"collapsed", "full", "hidden"};
+/* one name for each TH_*: a missing or extra one does not build */
+typedef char app_th_names_cover_th[sizeof app_th_names / sizeof app_th_names[0] == NTH ? 1 : -1];
 static const char *const sym_names[] = {"auto", "unicode", "ascii"};
 static const char *const perm_names[] = {"ask", "auto", "read-only"};
 static const char *const on_off[] = {"on", "off"};
@@ -90,7 +93,7 @@ void apply_thinking(app *a)
 {
     int i;
     a->thinking = TH_COLLAPSED;
-    for (i = 0; i < 3; i++)
+    for (i = 0; i < NTH; i++)
         if (strcmp(a->cfg->val[CFG_THINKING], app_th_names[i]) == 0)
             a->thinking = i;
 }

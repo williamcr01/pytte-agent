@@ -53,9 +53,11 @@ extern const app_cmd_def app_cmds[];
 extern const size_t app_ncmds;
 #define NCMDS app_ncmds
 
-#define NLEVELS 7
-extern const char *const app_levels[NLEVELS]; /* reasoning efforts, by PT_EFF_* bit */
-extern const char *const app_th_names[3];     /* TH_*, as configured */
+extern const char *const app_levels[]; /* reasoning efforts, by PT_EFF_* bit */
+extern const size_t app_nlevels;
+#define NLEVELS app_nlevels
+#define NTH (TH_HIDDEN + 1)
+extern const char *const app_th_names[]; /* by TH_*, as configured: NTH of them */
 
 /* The settings menu: config index, short name, and the values to cycle
  * through (none: edited as a command). */

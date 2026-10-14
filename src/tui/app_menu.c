@@ -285,7 +285,7 @@ void menu_update(app *a)
                 if ((!a->model.reasons || !a->model.efforts || a->model.efforts & 1u << i) && pt_str_starts(pt_strz(app_levels[i]), arg))
                     add_item(a, app_levels[i], strlen(app_levels[i]), NULL);
         } else if (pt_str_eqz(cmd, "thinking")) {
-            add_list(a, app_th_names, 3, arg);
+            add_list(a, app_th_names, NTH, arg);
         } else if (pt_str_eqz(cmd, "login") && pt_str_find(arg, ' ') < 0) {
             const pt_ai_catalog *cat = cli_catalog();
             uint32_t i;

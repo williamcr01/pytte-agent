@@ -626,7 +626,7 @@ void on_key(app *a, const tui_ev *ev)
         return;
     }
     if (ctrl && k == 't') {
-        save_setting(a, CFG_THINKING, app_th_names[(a->thinking + 1) % 3]);
+        save_setting(a, CFG_THINKING, app_th_names[(a->thinking + 1) % NTH]);
         return;
     }
     if (ctrl && k == 'o') {
