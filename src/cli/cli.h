@@ -44,8 +44,8 @@ bool cli_config_write(const char *path, int k, const char *v, char *err, size_t 
  * keeping every other member; out is indented by two spaces. False with err when the text is not a JSON
  * object, or the path is not made of objects. */
 bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *err, size_t cap);
-/* Replace a file atomically (temporary file, fsync, rename), keeping the
- * old file's mode, or 0600 for a new one. */
+/* Replace a file atomically (temporary file, fsync, rename, fsync of the
+ * directory), keeping the old file's mode, or 0600 for a new one. */
 bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap);
 
 /* ---- config.c: API keys ----

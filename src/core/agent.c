@@ -1015,6 +1015,7 @@ bool pt_open(pt_agent *a, const pt_identity *me, bool force)
         return false;
     }
     a->claims.takeover = PT_STR_NULL;
+    a->claims.quit = c->id && pt_str_eqz(c->event, "close");
     if (c->id && pt_str_eqz(c->event, "open") && !pt_str_eq(c->host, me->host)) {
         if (!force) {
             pt_buf b;

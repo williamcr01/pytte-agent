@@ -169,6 +169,7 @@ typedef struct claims {
     pt_identity me;  /* strings in req.ar */
     pt_str token, takeover;
     int64_t opened;
+    bool quit; /* the owner before us closed the session: it did not crash */
 } claims;
 
 /* The next epoch's materials (PT_FX_EPOCH_MATERIALS), for the compact

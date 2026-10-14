@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE /* F_FULLFSYNC */
 #include "drv/drv.h"
 
 #include <errno.h>
@@ -192,6 +193,45 @@ bool pt_sys_write_file(const char *path, const void *p, size_t n)
     ok = fwrite(p, 1, n, f) == n;
     ok = fclose(f) == 0 && ok;
     return ok;
+}
+
+int pt_sys_sync_fd(int fd, bool data_only)
+{
+#ifdef __APPLE__
+    (void)data_only;
+    if (fcntl(fd, F_FULLFSYNC) == 0)
+        return 0;
+    return fsync(fd); /* a file system without it */
+#else
+    return data_only ? fdatasync(fd) : fsync(fd);
+#endif
+}
+
+int pt_sys_sync_parent(const char *path)
+{
+    char dir[4096];
+    const char *slash = strrchr(path, '/');
+    size_t n = slash ? (size_t)(slash - path) : 0;
+    int fd, r, error;
+    if (n >= sizeof dir) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if (!slash)
+        memcpy(dir, ".", 2);
+    else if (!n)
+        memcpy(dir, "/", 2);
+    else {
+        memcpy(dir, path, n);
+        dir[n] = 0;
+    }
+    if ((fd = open(dir, O_RDONLY | O_CLOEXEC | O_DIRECTORY)) < 0)
+        return -1;
+    r = pt_sys_sync_fd(fd, false);
+    error = errno;
+    close(fd);
+    errno = error;
+    return r;
 }
 
 void pt_sys_random(void *ud, void *out, size_t n)

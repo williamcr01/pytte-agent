@@ -437,6 +437,8 @@ void cli_session_discard(const char *dir)
     }
     snprintf(p, sizeof p, "%s/live", dir);
     rmdir(p);
+    snprintf(p, sizeof p, "%s/procs", dir);
+    rmdir(p);
     rmdir(dir);
 }
 
@@ -576,7 +578,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
 static bool sync_dir(const char *dir)
 {
     int fd = open(dir, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    bool ok = fd >= 0 && fsync(fd) == 0;
+    bool ok = fd >= 0 && pt_sys_sync_fd(fd, false) == 0;
     if (fd >= 0)
         close(fd);
     return ok;
@@ -611,7 +613,7 @@ static bool copy_file(const char *from, const char *to, bool must)
                 at += w;
         }
     }
-    ok = ok && fsync(out) == 0;
+    ok = ok && pt_sys_sync_fd(out, false) == 0;
     ok = close(out) == 0 && ok;
     close(in);
     return ok;

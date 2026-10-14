@@ -3,7 +3,8 @@
  *   <dir>/LOCK        flock'd by the owner; says who holds it
  *   <dir>/log.jsonl   the log, appended with O_APPEND, fdatasync per commit
  *   <dir>/live/       t<task>.json snapshots, replaced with rename
- *   <dir>/blobs/      ab/cdef... (SHA-256), written to blobs/tmp first */
+ *   <dir>/blobs/      ab/cdef... (SHA-256), written to blobs/tmp first
+ *   <dir>/procs/      g<id>: process groups the owner started that still run */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE /* flock */
 #include "drv/drv.h"
@@ -43,11 +44,7 @@ static void live_path(const posix_store *s, char *out, size_t cap, uint32_t task
 
 static int sync_fd(int fd)
 {
-#ifdef __APPLE__
-    return fsync(fd);
-#else
-    return fdatasync(fd);
-#endif
+    return pt_sys_sync_fd(fd, true);
 }
 
 static int sync_dir(const char *dir)
@@ -67,7 +64,7 @@ static int sync_dir(const char *dir)
         errno = ENOTDIR;
         return -1;
     }
-    r = fsync(fd);
+    r = pt_sys_sync_fd(fd, false);
     error = errno;
     if (close(fd) != 0 && r == 0) {
         r = -1;
@@ -538,7 +535,8 @@ static int p_truncate(pt_store *vs, uint64_t off)
 {
     posix_store *s = (posix_store *)vs;
     off_t pos;
-    if (!checked_offset(off, &pos) || ftruncate(s->log_fd, pos) != 0 || fsync(s->log_fd) != 0)
+    if (!checked_offset(off, &pos) || ftruncate(s->log_fd, pos) != 0 ||
+        pt_sys_sync_fd(s->log_fd, false) != 0)
         return fail(vs, "cannot truncate", "log.jsonl");
     return 0;
 }
@@ -639,6 +637,91 @@ static int p_live_list(pt_store *vs, void (*fn)(void *ud, uint32_t task, pt_str 
     return 0;
 }
 
+/* Blobs a dead owner was still writing: never committed, so never named. */
+static void clear_blob_tmp(const posix_store *s)
+{
+    char dir[4200];
+    DIR *d;
+    struct dirent *e;
+    path(s, dir, sizeof dir, "blobs/tmp");
+    if (!(d = opendir(dir)))
+        return;
+    while ((e = readdir(d)))
+        if (e->d_name[0] != '.')
+            unlinkat(dirfd(d), e->d_name, 0);
+    closedir(d);
+}
+
+/* ---- process groups ---- */
+
+static void proc_path(const posix_store *s, char *out, size_t cap, int64_t id)
+{
+    snprintf(out, cap, "%s/procs/g%lld", s->dir, (long long)id);
+}
+
+static int p_proc_put(pt_store *vs, int64_t id, const void *p, size_t n)
+{
+    posix_store *s = (posix_store *)vs;
+    char dir[4200], file[4200];
+    int fd, r;
+    path(s, dir, sizeof dir, "procs");
+    if (ensure_directory(dir) < 0)
+        return fail(vs, "cannot create", dir);
+    proc_path(s, file, sizeof file, id);
+    fd = open(file, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
+    if (fd < 0)
+        return fail(vs, "cannot write", file);
+    r = require_regular_file(fd) == 0 && write_all(fd, p, n) == 0 ? 0 : -1;
+    if (close(fd) != 0)
+        r = -1;
+    if (r != 0) {
+        int error = errno;
+        unlink(file);
+        errno = error;
+        return fail(vs, "cannot write", file);
+    }
+    return 0;
+}
+
+static int p_proc_del(pt_store *vs, int64_t id)
+{
+    posix_store *s = (posix_store *)vs;
+    char file[4200];
+    proc_path(s, file, sizeof file, id);
+    if (unlink(file) != 0 && errno != ENOENT)
+        return fail(vs, "cannot delete", file);
+    return 0;
+}
+
+static int p_proc_list(pt_store *vs, void (*fn)(void *ud, int64_t id, pt_str bytes), void *ud)
+{
+    posix_store *s = (posix_store *)vs;
+    char dir[4200];
+    DIR *d;
+    struct dirent *e;
+    path(s, dir, sizeof dir, "procs");
+    if (!(d = opendir(dir)))
+        return errno == ENOENT ? 0 : fail(vs, "cannot list", dir);
+    while ((e = readdir(d))) {
+        char *end, *data;
+        long long id;
+        size_t n;
+        if (e->d_name[0] != 'g' || e->d_name[1] < '1' || e->d_name[1] > '9')
+            continue;
+        errno = 0;
+        id = strtoll(e->d_name + 1, &end, 10);
+        if (*end || errno)
+            continue;
+        data = read_live_file_at(dirfd(d), e->d_name, &n);
+        if (data) {
+            fn(ud, (int64_t)id, (pt_str){data, n});
+            free(data);
+        }
+    }
+    closedir(d);
+    return 0;
+}
+
 static void p_close(pt_store *vs)
 {
     posix_store *s = (posix_store *)vs;
@@ -721,6 +804,7 @@ pt_store *pt_store_posix_open(const char *dir, bool create, char *err, size_t ca
              pwrite(s->lock_fd, who, (size_t)n, 0) == (ssize_t)n;
         (void)ok; /* only used in messages */
     }
+    clear_blob_tmp(s); /* ours alone now */
     path(s, p, sizeof p, "log.jsonl");
     s->log_fd = open(p, O_RDWR | O_APPEND | O_CREAT | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0600);
     if (s->log_fd < 0) {
@@ -748,6 +832,9 @@ pt_store *pt_store_posix_open(const char *dir, bool create, char *err, size_t ca
     s->vt.live_put = p_live_put;
     s->vt.live_del = p_live_del;
     s->vt.live_list = p_live_list;
+    s->vt.proc_put = p_proc_put;
+    s->vt.proc_del = p_proc_del;
+    s->vt.proc_list = p_proc_list;
     s->vt.close = p_close;
     return &s->vt;
 fail:

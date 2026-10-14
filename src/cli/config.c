@@ -311,7 +311,7 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
             break;
         done += (size_t)w;
     }
-    if (done < bytes.n || fchmod(fd, mode) != 0 || fsync(fd) != 0) {
+    if (done < bytes.n || fchmod(fd, mode) != 0 || pt_sys_sync_fd(fd, false) != 0) {
         snprintf(err, cap, "%s: %s", tmp, strerror(errno));
         close(fd);
         unlink(tmp);
@@ -321,6 +321,10 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
     if (rename(tmp, path) != 0) {
         snprintf(err, cap, "%s: %s", path, strerror(errno));
         unlink(tmp);
+        return false;
+    }
+    if (pt_sys_sync_parent(path) != 0) { /* else a power loss may undo the rename */
+        snprintf(err, cap, "%s: %s", path, strerror(errno));
         return false;
     }
     return true;

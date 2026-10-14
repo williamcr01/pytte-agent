@@ -58,7 +58,10 @@ There are no config keys. The model sets these per call:
   running, `-p` waits until the server ends. Ctrl-C detaches, and
   `pytte -r ID` continues the session.
 - **Sessions live in this process.** They are stopped when pytte exits,
-  and session numbers are never reused after a restart.
+  and session numbers are never reused after a restart. If pytte is
+  killed (`kill -9`, the OOM killer) its commands go on running until
+  the session is opened again (`pytte -c`, `-r`), which stops whatever
+  they left, before any new call runs. See [sessions.md](sessions.md).
 - **TUI.** The footer counts running sessions. `/ps` lists them and
   `/stop` stops them all.
 

@@ -368,6 +368,7 @@ int pytte_print(opts *o, const char *id, cli_config *cfg)
         fprintf(stderr, "%ssession %s%s\n", u.tty_err ? "\x1b[2m" : "", s.id, u.tty_err ? "\x1b[0m" : "");
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGHUP, on_signal); /* the terminal or ssh connection went away */
     signal(SIGPIPE, SIG_IGN); /* a closed stdout is an EPIPE out_flush sees */
     switch (pt_rt_run(s.rt)) {
     case PT_RT_IDLE:

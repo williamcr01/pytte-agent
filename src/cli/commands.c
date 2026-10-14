@@ -398,6 +398,20 @@ done:
     return rc;
 }
 
+/* A session whose log is empty died before its first commit (an owner
+ * that is still starting holds its lock): nothing to resume, so it goes. */
+static bool discard_unborn(const char *root, const char *id)
+{
+    char dir[4200], err[600];
+    pt_store *st;
+    snprintf(dir, sizeof dir, "%s/%s", root, id);
+    if (!(st = pt_store_posix_open(dir, false, err, sizeof err)))
+        return false; /* in use, or not ours to judge */
+    st->close(st);
+    cli_session_discard(dir);
+    return true;
+}
+
 int pytte_ls(void)
 {
     char root[4096], path[4200], status[300], name[CLI_NAME_MAX + 1], *peek;
@@ -425,6 +439,10 @@ int pytte_ls(void)
         if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0 || fstat(fd, &st) != 0) {
             if (fd >= 0)
                 close(fd);
+            continue;
+        }
+        if (st.st_size == 0 && discard_unborn(root, ids[i])) {
+            close(fd);
             continue;
         }
         pt_arena_reset(&r.ar);

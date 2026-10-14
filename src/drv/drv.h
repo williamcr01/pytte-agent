@@ -17,6 +17,13 @@ char *pt_sys_read_file(const char *path, size_t *n);
 /* Like pt_sys_read_file, but rejects non-regular files without blocking. */
 char *pt_sys_read_regular_file(const char *path, size_t *n);
 bool pt_sys_write_file(const char *path, const void *p, size_t n);
+/* Make fd's writes durable: past a power loss, not only a crash. On macOS
+ * that is F_FULLFSYNC (fsync leaves them in the drive's cache); data_only
+ * may skip metadata a read does not need (fdatasync). 0, or -1 (errno). */
+int pt_sys_sync_fd(int fd, bool data_only);
+/* Make the entries of the directory holding path durable (after a rename
+ * or a create in it). 0, or -1 (errno). */
+int pt_sys_sync_parent(const char *path);
 /* Extra file descriptors to wake on while waiting (stdin, a signal pipe):
  * ready is set when fd can be read without blocking. */
 typedef struct pt_waitfd {
@@ -80,6 +87,15 @@ bool pt_proc_reap(pt_proc *p, bool wait, int *status);
 void pt_proc_stop(pt_proc *p, bool hard);
 /* Kills the group if it still runs, reaps it, closes the pipe. */
 void pt_proc_free(pt_proc *p);
+/* The group's ID, and a record that tells it apart from a later group
+ * with the same ID (its leader's boot and start time), into out: its
+ * length, or 0 where the platform cannot say. */
+int64_t pt_proc_group(const pt_proc *p);
+size_t pt_proc_mark(const pt_proc *p, char *out, size_t cap);
+/* SIGKILL the group a mark describes, if it still runs and is the same
+ * group, from another process (after its owner died). True when one was
+ * stopped. */
+bool pt_proc_stop_marked(pt_str mark);
 
 /* ---- HTTP ----
  * A driver runs requests in the background of pump(). Callbacks happen
@@ -150,6 +166,14 @@ struct pt_store {
     /* The committed blob's file, for tools to read: 0 with out set, or -1.
      * NULL: blobs are not files. */
     int (*blob_path)(pt_store *s, const char *hex, char *out, size_t cap);
+    /* Process groups the owner started and that must not outlive it: a
+     * small record each (pt_proc_mark), by group ID, kept while it runs.
+     * The next owner stops what an owner that died left (pt_rt_recover).
+     * Best effort, not synced: a power loss ends the processes too. NULL
+     * proc_put: the store keeps none. */
+    int (*proc_put)(pt_store *s, int64_t id, const void *p, size_t n);
+    int (*proc_del)(pt_store *s, int64_t id);
+    int (*proc_list)(pt_store *s, void (*fn)(void *ud, int64_t id, pt_str bytes), void *ud);
     void (*close)(pt_store *s);
     char err[512];
 };

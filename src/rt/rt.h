@@ -40,7 +40,8 @@ pt_http_driver *pt_rt_http(const pt_rt *rt);
 void pt_rt_use_worker(pt_rt *rt, pt_worker *worker);
 
 /* Recovery (section 6.4): read the log into the agent, cut a torn tail,
- * hand over live files. False with err when the log is corrupt. */
+ * hand over live files, and stop the process groups a dead owner left
+ * running. False with err when the log is corrupt. */
 bool pt_rt_recover(pt_rt *rt, char *err, size_t cap);
 
 /* ---- tools (section 13) ----
@@ -121,6 +122,12 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r);
 /* Store n bytes as a blob: true with ref set ("sha256:<hex>", NUL
  * terminated). False when the store keeps no blobs or writing failed. */
 bool pt_rt_put_blob(pt_rt *rt, const void *p, size_t n, char ref[72]);
+/* A process group a tool started, which must not outlive this process:
+ * noted in the store while it runs, so that if this process dies first
+ * the next owner stops it (pt_rt_recover). Ended: once it was reaped or
+ * killed. */
+void pt_rt_proc_started(pt_rt *rt, const pt_proc *p);
+void pt_rt_proc_ended(pt_rt *rt, int64_t group);
 /* The agent the runtime drives (for a tool's lookups: pt_doc, the cwd). */
 pt_agent *pt_rt_agent(pt_rt *rt);
 /* pt_opts.blob for a store (blob_ud: the pt_store). */

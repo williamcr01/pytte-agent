@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE /* sysctl */
 #include "drv/drv.h"
 
 #include <errno.h>
@@ -18,7 +19,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #ifdef __linux__
+#include <dirent.h>
 #include <sys/syscall.h>
+#endif
+#ifdef __APPLE__
+#include <sys/sysctl.h>
 #endif
 
 extern char **environ;
@@ -294,4 +299,172 @@ void pt_proc_free(pt_proc *p)
         close(p->err);
     pt_proc_close_in(p);
     free(p);
+}
+
+/* ---- what outlives a crash ----
+ * A mark is "<pid> <boot> <start>": the group's ID, which is its leader's
+ * pid (setsid), and when that leader started, so that a later process
+ * that gets the same pid is never taken for it. */
+
+#ifdef __linux__
+/* From /proc/<pid>/stat, after the command: the group, the session and
+ * the start time (clock ticks since boot). */
+static bool linux_stat(long pid, long *pgrp, long *sid, unsigned long long *start)
+{
+    char path[64], buf[1024], *p;
+    ssize_t n;
+    int fd, field;
+    snprintf(path, sizeof path, "/proc/%ld/stat", pid);
+    if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0)
+        return false;
+    do
+        n = read(fd, buf, sizeof buf - 1);
+    while (n < 0 && errno == EINTR);
+    close(fd);
+    if (n <= 0)
+        return false;
+    buf[n] = 0;
+    if (!(p = (strrchr)(buf, ')'))) /* the function: glibc's macro is C11 */
+        return false;
+    p++;
+    for (field = 0; field <= 19; field++) { /* state, ppid, pgrp, session, ... starttime */
+        unsigned long long v;
+        char *end;
+        while (*p == ' ')
+            p++;
+        if (!*p)
+            return false;
+        if (field == 0) {
+            while (*p && *p != ' ')
+                p++;
+            continue;
+        }
+        v = strtoull(p, &end, 10);
+        if (end == p)
+            return false;
+        p = end;
+        if (field == 2)
+            *pgrp = (long)v;
+        else if (field == 3)
+            *sid = (long)v;
+        else if (field == 19)
+            *start = v;
+    }
+    return true;
+}
+
+static bool start_of(long pid, char *out, size_t cap)
+{
+    long pgrp, sid;
+    unsigned long long start;
+    if (!linux_stat(pid, &pgrp, &sid, &start))
+        return false;
+    snprintf(out, cap, "%llu", start);
+    return true;
+}
+
+/* The leader is gone but its group may not be: a member of its session
+ * that started no earlier than it did. The kernel does not hand out a pid
+ * while a group or session still uses it as its ID. */
+static bool group_lives(long pid, const char *start)
+{
+    unsigned long long since = strtoull(start, NULL, 10);
+    DIR *d = opendir("/proc");
+    struct dirent *e;
+    bool found = false;
+    if (!d)
+        return false;
+    while (!found && (e = readdir(d))) {
+        long pgrp, sid, member;
+        unsigned long long at;
+        char *end;
+        if (e->d_name[0] < '1' || e->d_name[0] > '9')
+            continue;
+        member = strtol(e->d_name, &end, 10);
+        if (*end || !linux_stat(member, &pgrp, &sid, &at))
+            continue;
+        found = pgrp == pid && sid == pid && at >= since;
+    }
+    closedir(d);
+    return found;
+}
+#elif defined(__APPLE__)
+static bool start_of(long pid, char *out, size_t cap)
+{
+    struct kinfo_proc kp;
+    size_t len = sizeof kp;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid};
+    if (sysctl(mib, 4, &kp, &len, NULL, 0) != 0 || len == 0)
+        return false;
+    snprintf(out, cap, "%ld.%06ld", (long)kp.kp_proc.p_starttime.tv_sec, (long)kp.kp_proc.p_starttime.tv_usec);
+    return true;
+}
+
+static bool group_lives(long pid, const char *start)
+{
+    (void)pid;
+    (void)start;
+    return false; /* only a leader that still runs is known for sure */
+}
+#else
+static bool start_of(long pid, char *out, size_t cap)
+{
+    (void)pid;
+    (void)out;
+    (void)cap;
+    return false;
+}
+
+static bool group_lives(long pid, const char *start)
+{
+    (void)pid;
+    (void)start;
+    return false;
+}
+#endif
+
+/* The boot ID, or "-" where there is none (the start time is absolute). */
+static void boot_of(char *out, size_t cap)
+{
+    pt_sys_identity(NULL, 0, out, cap, NULL);
+    if (!out[0])
+        snprintf(out, cap, "-");
+}
+
+int64_t pt_proc_group(const pt_proc *p)
+{
+    return (int64_t)p->pid;
+}
+
+size_t pt_proc_mark(const pt_proc *p, char *out, size_t cap)
+{
+    char boot[64], start[32];
+    int n;
+    if (p->reaped || !start_of((long)p->pid, start, sizeof start))
+        return 0;
+    boot_of(boot, sizeof boot);
+    n = snprintf(out, cap, "%ld %s %s", (long)p->pid, boot, start);
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+}
+
+bool pt_proc_stop_marked(pt_str mark)
+{
+    char text[160], boot[64], start[32], now[64], cur[32];
+    long pid;
+    if (!mark.n || mark.n >= sizeof text)
+        return false;
+    memcpy(text, mark.p, mark.n);
+    text[mark.n] = 0;
+    if (sscanf(text, "%ld %63s %31s", &pid, boot, start) != 3 || pid <= 1 || (long)(pid_t)pid != pid)
+        return false;
+    boot_of(now, sizeof now);
+    if (strcmp(boot, now) != 0)
+        return false; /* rebooted since: nothing of it runs */
+    if (start_of(pid, cur, sizeof cur)) {
+        if (strcmp(cur, start) != 0)
+            return false; /* the pid is another process's now */
+    } else if (!group_lives(pid, start)) {
+        return false;
+    }
+    return kill(-(pid_t)pid, SIGKILL) == 0;
 }

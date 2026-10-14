@@ -7,7 +7,8 @@
  * new process). When it ends, the model is told: in the next tool result
  * while it works, else in a note that starts a turn, so it need not poll.
  * bash_poll reads what it printed since, at once, or stops it.
- * Background processes die with this process. */
+ * Background processes die with this process; when it dies first (kill
+ * -9), the next process to open the session stops them. */
 #define _POSIX_C_SOURCE 200809L
 #include "rt/rt_int.h"
 
@@ -107,13 +108,15 @@ static void unwatch(job *j)
 static void job_free(job *j)
 {
     job **pp;
+    int64_t group = pt_proc_group(j->p);
     for (pp = &j->b->jobs; *pp != j; pp = &(*pp)->next)
         ;
     *pp = j->next;
     unwatch(j);
     if (j->yield)
         pt_rt_timer_cancel(j->b->k->rt, j->yield);
-    pt_proc_free(j->p);
+    pt_proc_free(j->p); /* kills what still runs */
+    pt_rt_proc_ended(j->b->k->rt, group);
     pt_buf_free(&j->held);
     free(j->command);
     free(j);
@@ -314,6 +317,7 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
         pt_rt_kit_done(rt, fx->id, pt_strz(err), true);
         return;
     }
+    pt_rt_proc_started(rt, j->p);
     j->b = b;
     j->fx = fx->id;
     j->session = fx->task;
