@@ -58,6 +58,53 @@ typedef struct rt_rule {
     char *tool, *prefix;
 } rt_rule;
 
+/* The effect being stored: on the worker, or inline without one. */
+typedef struct rt_io {
+    pt_worker *worker; /* borrowed; NULL keeps the blocking host behavior */
+    pt_fx fx;          /* borrowed effect bytes until the worker finishes */
+    bool pending, ok;
+    char error[512];
+    char blob[72]; /* a stored BLOB's ref: "sha256:<hex>" */
+} rt_io;
+
+/* prompt.c: the prompt settings, kept. */
+typedef struct rt_prompt {
+    pt_rt_prompt v;
+    bool have;
+    pt_arena ar; /* the strings of v */
+} rt_prompt;
+
+/* prompt.c: the skills found by the last scan. */
+typedef struct rt_skills {
+    pt_rt_skill *v;
+    uint32_t n, cap;
+    pt_arena ar; /* their strings, until the next scan */
+} rt_skills;
+
+/* EPOCH_MATERIALS waits while held (pt_rt_materials_hold). */
+typedef struct rt_mat {
+    uint32_t holds;
+    uint32_t fx; /* the held effect; 0: none */
+    pt_buf cur;  /* ...and its epoch's system prompt */
+} rt_mat;
+
+/* tools_builtin.c's state. */
+typedef struct rt_builtin {
+    void *ud;
+    void (*free)(void *ud);
+    /* The agent is idle: true when it submitted something (a note that
+     * background commands ended), so there is work again. */
+    bool (*idle)(void *ud);
+} rt_builtin;
+
+/* mcp.c's state. */
+typedef struct rt_mcp {
+    void *ud;
+    void (*free)(void *ud);
+    void (*start)(void *ud); /* on the host thread, at the first step */
+    bool started;
+} rt_mcp;
+
 struct pt_rt {
     pt_rt_cfg c;
     pt_agent *a;
@@ -66,11 +113,7 @@ struct pt_rt {
     uint32_t nreqs, rcap;
     rt_sleeper *sleeps;
     uint32_t nsleeps, scap;
-    pt_worker *worker; /* borrowed; NULL keeps the blocking host behavior */
-    pt_fx io;          /* borrowed effect bytes until the worker finishes */
-    bool io_pending, io_ok;
-    char io_error[512];
-    char io_blob[72]; /* a stored BLOB's ref: "sha256:<hex>" */
+    rt_io io;
     char session[64]; /* c.session's copy */
     /* tools */
     pt_rt_tool *tools;
@@ -88,29 +131,14 @@ struct pt_rt {
     rt_rule *rules;
     uint32_t nrules, rucap;
     bool closing, free_waiting;
-    void *builtin; /* tools_builtin.c's state */
-    void (*builtin_free)(void *ud);
-    /* The agent is idle: true when it submitted something (a note that
-     * background commands ended), so there is work again. */
-    bool (*builtin_idle)(void *ud);
-    /* prompt.c */
-    pt_rt_prompt prompt;
-    bool have_prompt;
-    pt_arena prompt_ar; /* the strings of prompt, kept */
-    pt_rt_skill *skills;
-    uint32_t nskills, skcap;
-    pt_arena skills_ar; /* their strings, until the next scan */
+    rt_builtin builtin;
+    rt_prompt prompt;
+    rt_skills skills;
     pt_buf scratch; /* tool results, reused */
     pt_arena ar;    /* one gate or result at a time */
     uint32_t nhttp; /* requests of tools and MCP (pt_rt_http_start) in flight */
-    /* EPOCH_MATERIALS waits while held (pt_rt_materials_hold) */
-    uint32_t mat_holds;
-    uint32_t mat_fx; /* the held effect; 0: none */
-    pt_buf mat_cur;  /* ...and its epoch's system prompt */
-    void *mcp; /* mcp.c's state */
-    void (*mcp_free)(void *ud);
-    void (*mcp_start)(void *ud); /* on the host thread, at the first step */
-    bool mcp_started;
+    rt_mat mat;
+    rt_mcp mcp;
 };
 
 /* tools.c */

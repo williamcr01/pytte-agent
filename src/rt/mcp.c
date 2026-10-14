@@ -1601,7 +1601,7 @@ static void add_srvs(mcp *m, const pt_rt_mcp_server *servers, uint32_t n, bool *
             return;
         }
         m->srvs[m->nsrvs++] = s;
-        if (m->rt->mcp_started) /* added late: no epoch waits for it */
+        if (m->rt->mcp.started) /* added late: no epoch waits for it */
             srv_connect(s, false);
     }
 }
@@ -1609,7 +1609,7 @@ static void add_srvs(mcp *m, const pt_rt_mcp_server *servers, uint32_t n, bool *
 bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_server *servers, uint32_t n)
 {
     const pt_ai_catalog *cat = rt->c.catalog ? rt->c.catalog : pt_ai_builtin_catalog();
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i, k, nu = 0;
     bool ok = true;
     pt_rt_tool fb;
@@ -1640,9 +1640,9 @@ bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_serv
         mcp_free(m);
         return false;
     }
-    rt->mcp = m;
-    rt->mcp_free = mcp_free;
-    rt->mcp_start = mcp_start;
+    rt->mcp.ud = m;
+    rt->mcp.free = mcp_free;
+    rt->mcp.start = mcp_start;
     memset(&fb, 0, sizeof fb);
     fb.def.name = PT_S("mcp__");
     fb.run = t_run;
@@ -1654,7 +1654,7 @@ bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_serv
 
 static srv *find_srv(pt_rt *rt, pt_str name)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i;
     for (i = 0; m && i < m->nsrvs; i++)
         if (pt_str_eqz(name, m->srvs[i]->name))
@@ -1664,7 +1664,7 @@ static srv *find_srv(pt_rt *rt, pt_str name)
 
 uint32_t pt_rt_mcp_servers(pt_rt *rt, pt_rt_mcp_info *out, uint32_t max)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i;
     for (i = 0; m && i < m->nsrvs && i < max; i++) {
         srv *s = m->srvs[i];
@@ -1682,7 +1682,7 @@ uint32_t pt_rt_mcp_servers(pt_rt *rt, pt_rt_mcp_info *out, uint32_t max)
 
 const pt_rt_mcp_prompt *pt_rt_mcp_prompts(pt_rt *rt, uint32_t *n)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i, k = 0;
     *n = 0;
     for (i = 0; m && i < m->nsrvs; i++) {
@@ -1700,7 +1700,7 @@ const pt_rt_mcp_prompt *pt_rt_mcp_prompts(pt_rt *rt, uint32_t *n)
 
 const pt_rt_mcp_resource *pt_rt_mcp_resources(pt_rt *rt, uint32_t *n)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i, k = 0;
     *n = 0;
     for (i = 0; m && i < m->nsrvs; i++) {

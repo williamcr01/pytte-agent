@@ -36,8 +36,8 @@ static const struct {
 /* Root i under cwd, or false when its base is not set. */
 static bool root_dir(const pt_rt *rt, size_t i, pt_str cwd, char *out, size_t cap)
 {
-    const char *base = roots[i].base == R_HOME     ? rt->prompt.home
-                       : roots[i].base == R_CONFIG ? rt->prompt.config_dir
+    const char *base = roots[i].base == R_HOME     ? rt->prompt.v.home
+                       : roots[i].base == R_CONFIG ? rt->prompt.v.config_dir
                                                    : NULL;
     int n;
     if (roots[i].base == R_CWD)
@@ -56,25 +56,25 @@ static const char *dup_z(pt_arena *ar, const char *z)
 
 bool pt_rt_set_prompt(pt_rt *rt, const pt_rt_prompt *p)
 {
-    pt_arena_reset(&rt->prompt_ar);
-    rt->prompt.base = dup_z(&rt->prompt_ar, p->base);
-    rt->prompt.home = dup_z(&rt->prompt_ar, p->home);
-    rt->prompt.config_dir = dup_z(&rt->prompt_ar, p->config_dir);
-    rt->prompt.skills_auto = p->skills_auto;
-    rt->have_prompt = !rt->prompt_ar.oom;
-    return rt->have_prompt;
+    pt_arena_reset(&rt->prompt.ar);
+    rt->prompt.v.base = dup_z(&rt->prompt.ar, p->base);
+    rt->prompt.v.home = dup_z(&rt->prompt.ar, p->home);
+    rt->prompt.v.config_dir = dup_z(&rt->prompt.ar, p->config_dir);
+    rt->prompt.v.skills_auto = p->skills_auto;
+    rt->prompt.have = !rt->prompt.ar.oom;
+    return rt->prompt.have;
 }
 
 void pt_rt_skills_auto(pt_rt *rt, bool on)
 {
-    rt->prompt.skills_auto = on;
+    rt->prompt.v.skills_auto = on;
 }
 
 void pt_rt_prompt_free(pt_rt *rt)
 {
-    pt_arena_free(&rt->prompt_ar);
-    pt_arena_free(&rt->skills_ar);
-    free(rt->skills);
+    pt_arena_free(&rt->prompt.ar);
+    pt_arena_free(&rt->skills.ar);
+    free(rt->skills.v);
 }
 
 /* The file of the winning root that has it (malloc'd), or NULL. */
@@ -209,8 +209,8 @@ static bool valid_name(pt_str n)
 static int find_skill(const pt_rt *rt, pt_str name)
 {
     uint32_t i;
-    for (i = 0; i < rt->nskills; i++)
-        if (pt_str_eq(rt->skills[i].name, name))
+    for (i = 0; i < rt->skills.n; i++)
+        if (pt_str_eq(rt->skills.v[i].name, name))
             return (int)i;
     return -1;
 }
@@ -228,14 +228,14 @@ static void add_skill(pt_rt *rt, frontmatter *f, const char *dir, const char *en
     if (parse_skill((pt_str){text, n}, f) && f->description.n) {
         pt_str name = f->name.n ? pt_buf_str(&f->name) : pt_strz(entry);
         if (valid_name(name)) {
-            sk.name = pt_arena_dup(&rt->skills_ar, name);
-            sk.description = pt_arena_dup(&rt->skills_ar, pt_buf_str(&f->description));
-            sk.path = pt_arena_dup(&rt->skills_ar, pt_strz(path));
+            sk.name = pt_arena_dup(&rt->skills.ar, name);
+            sk.description = pt_arena_dup(&rt->skills.ar, pt_buf_str(&f->description));
+            sk.path = pt_arena_dup(&rt->skills.ar, pt_strz(path));
             sk.manual = f->manual;
             if ((at = find_skill(rt, sk.name)) >= 0)
-                rt->skills[at] = sk;
-            else if (pt_rt_grow((void **)&rt->skills, &rt->skcap, rt->nskills + 1, sizeof *rt->skills))
-                rt->skills[rt->nskills++] = sk;
+                rt->skills.v[at] = sk;
+            else if (pt_rt_grow((void **)&rt->skills.v, &rt->skills.cap, rt->skills.n + 1, sizeof *rt->skills.v))
+                rt->skills.v[rt->skills.n++] = sk;
         }
     }
     free(text);
@@ -254,8 +254,8 @@ static void scan_skills(pt_rt *rt, pt_str cwd)
     char dir[4200];
     frontmatter f;
     size_t i;
-    rt->nskills = 0;
-    pt_arena_reset(&rt->skills_ar);
+    rt->skills.n = 0;
+    pt_arena_reset(&rt->skills.ar);
     pt_buf_init(&f.name, pt_sys_allocator());
     pt_buf_init(&f.description, pt_sys_allocator());
     for (i = 0; i < NROOTS; i++) {
@@ -275,16 +275,16 @@ static void scan_skills(pt_rt *rt, pt_str cwd)
     }
     pt_buf_free(&f.name);
     pt_buf_free(&f.description);
-    if (rt->nskills)
-        qsort(rt->skills, rt->nskills, sizeof *rt->skills, by_name);
+    if (rt->skills.n)
+        qsort(rt->skills.v, rt->skills.n, sizeof *rt->skills.v, by_name);
 }
 
 const pt_rt_skill *pt_rt_skills(pt_rt *rt, bool rescan, uint32_t *n)
 {
-    if (rescan && rt->have_prompt)
+    if (rescan && rt->prompt.have)
         scan_skills(rt, pt_session_cwd(rt->a));
-    *n = rt->nskills;
-    return rt->skills;
+    *n = rt->skills.n;
+    return rt->skills.v;
 }
 
 /* ---- AGENTS.md ---- */
@@ -383,8 +383,8 @@ static void put_agents(pt_rt *rt, pt_str cwd, pt_buf *b)
     char dir[4096];
     if (!files)
         return;
-    if (rt->prompt.config_dir && *rt->prompt.config_dir) {
-        snprintf(dir, sizeof dir, "%s", rt->prompt.config_dir);
+    if (rt->prompt.v.config_dir && *rt->prompt.v.config_dir) {
+        snprintf(dir, sizeof dir, "%s", rt->prompt.v.config_dir);
         if (read_agents(&files[nf], dir, strlen(dir)))
             nf++;
     }
@@ -443,7 +443,7 @@ bool pt_rt_build_prompt(pt_rt *rt, pt_str cwd, pt_str prompt, pt_buf *system, pt
         put_part(system, (pt_str){file, n});
         free(file);
     } else {
-        put_part(system, pt_strz(rt->prompt.base ? rt->prompt.base : ""));
+        put_part(system, pt_strz(rt->prompt.v.base ? rt->prompt.v.base : ""));
     }
     if ((file = read_prompt_file(rt, cwd, "APPEND_SYSTEM.md", &n))) {
         put_part(system, (pt_str){file, n});
@@ -456,8 +456,8 @@ bool pt_rt_build_prompt(pt_rt *rt, pt_str cwd, pt_str prompt, pt_buf *system, pt
     scan_skills(rt, cwd);
     pt_jw_init(&w, skills);
     pt_jw_arr(&w);
-    for (i = 0; rt->prompt.skills_auto && i < rt->nskills; i++) {
-        const pt_rt_skill *sk = &rt->skills[i];
+    for (i = 0; rt->prompt.v.skills_auto && i < rt->skills.n; i++) {
+        const pt_rt_skill *sk = &rt->skills.v[i];
         if (sk->manual)
             continue;
         if (!listed++)
@@ -568,7 +568,7 @@ int pt_rt_expand_skills(pt_rt *rt, pt_str text, pt_buf *out, char *err, size_t c
     if (!np)
         return 0;
     for (k = 0; k < np; k++)
-        if (!put_block(out, &rt->skills[picked[k]], err, cap)) {
+        if (!put_block(out, &rt->skills.v[picked[k]], err, cap)) {
             out->n = start;
             return -1;
         }

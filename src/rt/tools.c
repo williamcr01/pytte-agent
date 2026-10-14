@@ -531,9 +531,9 @@ void pt_rt_tools_free(pt_rt *rt)
 {
     uint32_t i;
     pt_rt_tools_stop(rt);
-    if (rt->builtin_free)
-        rt->builtin_free(rt->builtin);
-    rt->builtin_free = NULL;
+    if (rt->builtin.free)
+        rt->builtin.free(rt->builtin.ud);
+    rt->builtin.free = NULL;
     for (i = 0; i < rt->cinit; i++) {
         pt_buf_free(&rt->calls[i].head);
         pt_buf_free(&rt->calls[i].tail);

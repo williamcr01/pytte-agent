@@ -1271,7 +1271,7 @@ static bool builtins_idle(void *ud)
 
 uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max)
 {
-    builtins *b = (builtins *)rt->builtin;
+    builtins *b = (builtins *)rt->builtin.ud;
     const job *j;
     uint32_t n = 0;
     for (j = b ? b->jobs : NULL; j; j = j->next) {
@@ -1291,7 +1291,7 @@ uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max)
 
 uint32_t pt_rt_backgrounds_stop(pt_rt *rt)
 {
-    builtins *b = (builtins *)rt->builtin;
+    builtins *b = (builtins *)rt->builtin.ud;
     job *j;
     uint32_t n = 0;
     for (j = b ? b->jobs : NULL; j; j = j->next)
@@ -1385,9 +1385,9 @@ bool pt_rt_add_builtins(pt_rt *rt)
     for (i = 0; i < cat->nproviders; i++)
         for (k = 0; k < 4 && cat->providers[i].key_env[k]; k++)
             b->unset[n++] = cat->providers[i].key_env[k];
-    rt->builtin = b;
-    rt->builtin_free = builtins_free;
-    rt->builtin_idle = builtins_idle;
+    rt->builtin.ud = b;
+    rt->builtin.free = builtins_free;
+    rt->builtin.idle = builtins_idle;
     memset(t, 0, sizeof t);
     for (i = 0; i < 5; i++) {
         t[i].def.source = PT_S("builtin");
