@@ -41,10 +41,10 @@ DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/dr
 RT_SRC   := src/rt/rt.c src/rt/tools.c src/rt/tools_builtin.c src/rt/tools_search.c src/rt/tools_web.c src/rt/prompt.c src/rt/mcp.c src/rt/mcp_proto.c src/rt/mcp_oauth.c
 SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
-# The TUI's parts; app.c (the loop) only goes into pytte.
-TUI_SRC  := $(filter-out src/tui/app.c,$(wildcard src/tui/*.c))
+# The TUI's parts; app*.c (the app and its loop) only go into pytte.
+TUI_SRC  := $(filter-out src/tui/app%,$(wildcard src/tui/*.c))
 CLI_SRC  := src/cli/config.c src/cli/providers.c src/cli/mcp_cfg.c
-APP_SRC  := src/tui/app.c src/cli/session.c src/cli/main.c
+APP_SRC  := $(wildcard src/tui/app*.c) src/cli/session.c src/cli/main.c
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
 LIB_OBJ  := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
@@ -136,7 +136,7 @@ $(BUILD)/replay: tests/replay.c tests/t.h tests/vt.c $(BASE_SRC) src/drv/sys_pos
 screen: $(BUILD)/test/test_screen
 	BAND_SEEDS=400 ./$(BUILD)/test/test_screen
 
-# The pty test against pytte built with ASan and UBSan: app.c and term.c
+# The pty test against pytte built with ASan and UBSan: app*.c and term.c
 # only run inside the real binary. A report fails the test (exit code).
 pty-asan: $(BUILD)/test/test_pty
 	$(MAKE) BUILD=$(BUILD)/asan CFLAGS='-O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer' $(BUILD)/asan/pytte

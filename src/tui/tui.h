@@ -7,7 +7,8 @@
  *   band.c   the frame model: repaint, commit, resize
  *   input.c  the input box
  *   term.c   raw mode, queries, signals, the watchdog
- *   app.c    the event loop, the display model, slash commands */
+ *   app*.c   the app: the event loop, the display model, slash commands
+ *            (only in pytte; app.h lists its files) */
 #ifndef PT_TUI_H
 #define PT_TUI_H
 

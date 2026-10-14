@@ -313,7 +313,8 @@ src/rt/                the runtime: the host loop over stores, HTTP, timers
 src/drv/               host drivers: libc, curl HTTP, faux HTTP, posix and
                        memory session stores, processes
 src/tui/               the TUI: terminal, keys, text and widths, Markdown,
-                       the band, the input box, the event loop (app.c)
+                       the band, the input box, the app and its event loop
+                       (app*.c, listed in app.h)
 src/ai/models.gen.inc  the model catalog, generated from models.dev and
                        OpenRouter by scripts/gen_models.py
 src/cli/               the pytte CLI: flags, print mode, sessions, config files
