@@ -13,6 +13,26 @@
 
 #include "cli/cli.h"
 #include "core/core.h"
+
+/* pt_agent's field paths. A baseline from before its state was grouped
+ * (main@f1d8c5c and older) builds with -DPT_BENCH_FLAT_AGENT, which
+ * PT_BENCH_LEGACY implies: that layout is older still. */
+#if defined(PT_BENCH_LEGACY) && !defined(PT_BENCH_FLAT_AGENT)
+#define PT_BENCH_FLAT_AGENT
+#endif
+#ifdef PT_BENCH_FLAT_AGENT
+#define AGENT_REQ_AR(a) ((a)->reqs)
+#define AGENT_SUBS_AR(a) ((a)->subs_a)
+#define AGENT_COMMIT_AR(a) ((a)->after_a)
+#define AGENT_COMMIT_BUF(a) ((a)->commit)
+#define AGENT_FXQ(a) ((a)->q)
+#else
+#define AGENT_REQ_AR(a) ((a)->req.ar)
+#define AGENT_SUBS_AR(a) ((a)->subs.ar)
+#define AGENT_COMMIT_AR(a) ((a)->commit.ar)
+#define AGENT_COMMIT_BUF(a) ((a)->commit.buf)
+#define AGENT_FXQ(a) ((a)->fxq.v)
+#endif
 #include "base/arena.c"
 
 typedef struct counters {
@@ -79,9 +99,9 @@ static void snapshot(const char *phase, unsigned turn, const counters *c, const 
         arena_usage(&a->epoch, &acap, &used);
         arena_usage(&a->scratch, &acap, &used);
         arena_usage(&a->objects, &acap, &used);
-        arena_usage(&a->req.ar, &acap, &used);
-        arena_usage(&a->subs.ar, &acap, &used);
-        arena_usage(&a->commit.ar, &acap, &used);
+        arena_usage(&AGENT_REQ_AR(a), &acap, &used);
+        arena_usage(&AGENT_SUBS_AR(a), &acap, &used);
+        arena_usage(&AGENT_COMMIT_AR(a), &acap, &used);
         for (i = 0; i < a->ntasks; i++) {
             arena_usage(&a->tasks[i]->a, &acap, &used);
             bcap += a->tasks[i]->rescued.cap + a->tasks[i]->gate_text.cap;
@@ -92,9 +112,9 @@ static void snapshot(const char *phase, unsigned turn, const counters *c, const 
         }
         for (i = 0; i < a->ninputs; i++)
             arena_usage(&a->inputs[i]->a, &acap, &used);
-        bcap += a->commit.buf.cap + a->live_out.cap;
+        bcap += AGENT_COMMIT_BUF(a).cap + a->live_out.cap;
         for (i = 0; i < PT_FXQ; i++)
-            bcap += a->fxq.v[i].bytes.cap;
+            bcap += AGENT_FXQ(a)[i].bytes.cap;
     }
     printf("{\"phase\":\"%s\",\"turn\":%u,\"elapsed_ms\":%.6f,\"first_text_ms\":%.6f,"
            "\"text_bytes\":%zu,\"core_allocations\":%zu,\"core_reallocations\":%zu,"
