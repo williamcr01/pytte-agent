@@ -1120,7 +1120,7 @@ static void response(srv *s, const mcp_msg *msg)
     if (!msg->numeric || !pend_take(s->m, s, msg->nid, &p) || p.gen != s->gen)
         return; /* not ours, or from before a restart */
     if (msg->is_error) {
-        char why[600];
+        char why[480]; /* 400 of the message and the code: "listing tools: " fits in s->error */
         snprintf(why, sizeof why, "%.*s (MCP error %lld)", (int)mcp_cut(msg->err_message, 400).n,
                  msg->err_message.p, (long long)msg->err_code);
         if (p.kind == P_INIT)
