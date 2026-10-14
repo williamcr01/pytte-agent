@@ -308,6 +308,10 @@ static bool has(pty *p, const char *text)
     return strstr(p->scratch.p, text) != NULL;
 }
 
+/* How long to wait for what follows a write that is synced to disk (a
+ * saved setting or key): quick when idle, seconds on a busy disk. */
+#define DURABLE_MS 10000
+
 static bool wait_for(pty *p, const char *text, int ms)
 {
     int64_t end = pt_sys_now_ms() + ms;
@@ -742,10 +746,13 @@ static void test_background(void)
     keys(&p, "go\r");
     CHECK(wait_for(&p, "· 1 in background (/ps)", 3000)); /* the footer */
     CHECK(wait_for(&p, "Done.", 20000));
+    /* the second poll ran for what was left of the 8.5 s: its time
+     * (" · 2s" when idle) depends on scheduling */
     CHECK(has(&p, "Starting it.\n\n"
                   "✓ bash  echo first; sleep 8.5; echo second; exit 3 · still running as session 8\n"
                   "✓ poll  session 8 · still running\n"
-                  "✗ poll  session 8 · exit 3 · 2s\n"
+                  "✗ poll  session 8 · exit 3"));
+    CHECK(has(&p, "s\n"
                   "        second\n"
                   "✗ poll  session 8 · failed\n"));
     CHECK(has(&p, "✓ bash  echo up; sleep 100 · still running as session 19\n"));
@@ -915,6 +922,7 @@ static void test_commands(void)
     keys(&p, "full\r");
     CHECK(wait_for(&p, "\n· switched thinking: full\n", 1000));
     CHECK(!has(&p, "› /thinking")); /* a command is not echoed, only what it did */
+    CHECK(wait_for(&p, "saved thinking: full", DURABLE_MS)); /* written by a worker */
     snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "\"tui\": {\n    \"thinking\": \"full\"\n  }"));
@@ -927,16 +935,16 @@ static void test_commands(void)
     keys(&p, "/settings reasoning default\r");
     CHECK(wait_for(&p, "not a value for reasoning: default", 1000));
     keys(&p, "/settings reasoning max\r");
-    CHECK(wait_for(&p, "saved reasoning: max", 1000));
+    CHECK(wait_for(&p, "saved reasoning: max", DURABLE_MS));
     CHECK(wait_for(&p, "faux · max", 1000));
     keys(&p, "/settings\r\x1b[B\x1b[B\x1b[B\x1b[C");
-    CHECK(wait_for(&p, "saved reasoning: off", 1000)); /* max wraps straight to off */
+    CHECK(wait_for(&p, "saved reasoning: off", DURABLE_MS)); /* max wraps straight to off */
     keys(&p, "\x1b[D");
     keys(&p, "\x1b");
     pump(&p, 100);
     CHECK(wait_for(&p, "faux · max", 1000)); /* off wraps straight to max */
     keys(&p, "/settings reasoning low\r");
-    CHECK(wait_for(&p, "saved reasoning: low", 1000));
+    CHECK(wait_for(&p, "saved reasoning: low", DURABLE_MS));
     CHECK(wait_for(&p, "faux · low", 1000));
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "faux · high", 1000));
@@ -973,7 +981,7 @@ static void test_commands(void)
     CHECK(wait_for(&p, "› /login anthropic ***********", 1000));
     CHECK(!has(&p, "sk-test"));
     keys(&p, "\r");
-    CHECK(wait_for(&p, "saved the Anthropic key to ", 1000));
+    CHECK(wait_for(&p, "saved the Anthropic key to ", DURABLE_MS));
     snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "{\n  \"anthropic\": {\n    \"key\": \"sk-test-123\"\n  }\n}\n"));
@@ -1117,7 +1125,7 @@ static void test_history_pager_draft(void)
     CHECK(wait_for(&p, "› first question", 1000));
     keys(&p, "\x03"); /* Ctrl-C clears it */
     keys(&p, "/settings pager cat\r");
-    CHECK(wait_for(&p, "saved pager: cat", 1000));
+    CHECK(wait_for(&p, "saved pager: cat", DURABLE_MS));
     keys(&p, "\x0f"); /* Ctrl-O: the thinking in full, through cat */
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 2000));
     CHECK(wait_for(&p, "› ", 1000));
@@ -1225,7 +1233,7 @@ static void test_blocked_settings(void)
         put(fd, original, sizeof original - 1);
         close(fd);
     }
-    CHECK(wait_for(&p, "saved thinking: hidden", 3000));
+    CHECK(wait_for(&p, "saved thinking: hidden", DURABLE_MS));
     keys(&p, "\x03\x14\x14\x04"); /* Rapid changes are flushed on quit. */
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
