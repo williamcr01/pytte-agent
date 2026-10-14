@@ -234,7 +234,7 @@ static void ask_rows(app *a, int n)
             if (a->tmp2.p[k] == '\n')
                 a->tmp2.p[k] = ' ';
     } else {
-        app_phrase(a, &a->tmp2, a->ask.view.name, a->ask.view.args);
+        app_phrase(a, &a->tmp2, a->ask.view.name, a->ask.view.args, NULL);
     }
     k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
     a->tmp2.n = k;

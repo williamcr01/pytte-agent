@@ -15,11 +15,7 @@
     },
     {
       "content": [
-        {"type": "tool_call", "name": "read", "args": {"path": "build/test/render.c"}}
-      ]
-    },
-    {
-      "content": [
+        {"type": "tool_call", "name": "read", "args": {"path": "build/test/render.c"}},
         {"type": "tool_call", "name": "edit", "args": {"path": "build/test/render.c", "edits": [{"old": "int up = cur;", "new": "int up = b->cur;"}]}}
       ]
     },

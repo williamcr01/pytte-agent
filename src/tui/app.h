@@ -33,6 +33,7 @@ enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
 typedef struct syms {
     const char *prompt, *think, *note, *ok, *fail, *ask, *sel, *bar, *more, *dot;
     const char *up, *down; /* tokens read and written */
+    const char *join;      /* between calls of one round on a row */
 } syms;
 
 
@@ -76,15 +77,19 @@ typedef struct item {
     size_t dat, dn;    /* description */
 } item;
 
-/* Tool calls in a row form a group (see group_add). */
-#define GROUP_MAX 128 /* rows of a group; a longer run of calls makes more groups */
+/* Tool calls in a row form a group (see group_add); the calls of one
+ * assistant message, a round, share a row. */
+#define GROUP_MAX 128 /* calls of a group; a longer run of calls makes more groups */
 #define GROUP_LIVE 8  /* rows of an open group shown in the band */
+#define NO_ROUND UINT32_MAX /* a call whose message was not found: a row of its own */
 enum { CAT_COMMAND, CAT_READ, CAT_WRITE, CAT_EDIT, CAT_OTHER, NCAT };
 enum { G_OK, G_FAILED, G_TIMEOUT, G_DENIED, G_CANCELLED, G_INTERRUPTED, NBAD };
 
 typedef struct grow {
-    uint32_t at, n;   /* the row, styled, in group.buf */
+    uint32_t at, n;   /* the call's part of its row, styled, in group.buf */
+    uint32_t name;    /* ...of which the tool's name, and the space after it */
     uint32_t dat, dn; /* its details, raw lines: a failure's last lines */
+    uint32_t round;   /* the entry of its message */
     uint8_t cat, bad;
 } grow;
 
@@ -93,6 +98,8 @@ typedef struct run_call {
     uint32_t task;
     char name[64];
     pt_buf id, head;
+    size_t gist;    /* where the gist starts in head: before it, the tool's name */
+    uint32_t round; /* as in grow */
     uint64_t lines; /* ended lines of output */
     bool open;      /* and one more is under way */
 } run_call;
@@ -319,7 +326,7 @@ void app_out_z(app *a, int style, const char *z);
 void app_out_blank(pt_buf *out);
 pt_str app_call_gist(app *a, pt_str args);
 int app_tool_of(pt_str name);
-void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args);
+void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist);
 void app_secs_short(char *out, size_t cap, int64_t ms);
 int64_t app_run_clock(const app *a, int64_t now);
 void app_run_restart(app *a, int64_t now);

@@ -175,14 +175,40 @@ int app_tool_of(pt_str name)
     return -1;
 }
 
+/* A path, short for a row: under the session's directory, from there
+ * ("src/a.c", "."); under the home directory, from "~". Else as it is. */
+static pt_str short_path(app *a, pt_str g)
+{
+    pt_str cwd = a->open ? pt_session_cwd(a->s.a) : PT_STR_NULL;
+    const char *home = getenv("HOME");
+    size_t h = home ? strlen(home) : 0;
+    char *p;
+    if (cwd.n > 1 && g.n >= cwd.n && memcmp(g.p, cwd.p, cwd.n) == 0) {
+        if (g.n == cwd.n)
+            return PT_S(".");
+        if (g.p[cwd.n] == '/')
+            return (pt_str){g.p + cwd.n + 1, g.n - cwd.n - 1};
+    }
+    if (h > 1 && g.n >= h && memcmp(g.p, home, h) == 0 && (g.n == h || g.p[h] == '/') &&
+        (p = (char *)pt_arena_alloc(&a->ar, g.n - h + 1))) {
+        p[0] = '~';
+        memcpy(p + 1, g.p + h, g.n - h);
+        return (pt_str){p, g.n - h + 1};
+    }
+    return g;
+}
+
 /* A call on one row: the tool's name, dim, in a column, then the gist of
- * its arguments; in a command, the programs stand out and the rest is dim. */
-void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args)
+ * its arguments; in a command, the programs stand out and the rest is dim.
+ * gist, if not NULL: where in out the gist starts. */
+void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist)
 {
     pt_str g = app_call_gist(a, args);
     bool cmd = pt_str_eqz(name, "bash"), at_cmd = true, in_word = false, prog = false;
     int col = 0, cur = -1, ti = app_tool_of(name), w;
     size_t k;
+    if (!cmd)
+        g = short_path(a, g);
     tui_style(out, TUI_DIM);
     if (ti >= 0)
         name = pt_strz(tools[ti].shown);
@@ -194,6 +220,8 @@ void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args)
         a->tmp.n--;
     for (w = w < NAME_W ? NAME_W - w : 1; a->tmp.n && w > 0; w--) /* to the column, or one space */
         pt_buf_putc(out, ' ');
+    if (gist)
+        *gist = out->n;
     for (k = 0; k < a->tmp.n; k++) {
         char c = a->tmp.p[k] == '\n' ? ' ' : a->tmp.p[k];
         int st;
@@ -265,16 +293,20 @@ const char *app_blink(const app *a, int64_t now)
     return a->run.wait_at || app_run_clock(a, now) / BLINK_MS % 2 == 0 ? a->sy->dot : " ";
 }
 
-/* The call a result answers: searched from the newest entry back. */
-static const pt_block *find_call(app *a, pt_str call_id)
+/* The call a result answers: searched from the newest entry back; round
+ * gets the entry it is in, or NO_ROUND. */
+static const pt_block *find_call(app *a, pt_str call_id, uint32_t *round)
 {
     uint32_t i = a->open ? pt_entry_count(a->s.a) : 0, k, looked = 0;
     pt_entry_view v;
     while (i-- && looked++ < 256)
         if (pt_entry_at(a->s.a, i, &v) && v.msg && strcmp(v.kind, "assistant") == 0)
             for (k = 0; k < v.msg->nblocks; k++)
-                if (v.msg->blocks[k].kind == PT_BLOCK_TOOL_CALL && pt_str_eq(v.msg->blocks[k].id, call_id))
+                if (v.msg->blocks[k].kind == PT_BLOCK_TOOL_CALL && pt_str_eq(v.msg->blocks[k].id, call_id)) {
+                    *round = i;
                     return &v.msg->blocks[k];
+                }
+    *round = NO_ROUND;
     return NULL;
 }
 
@@ -304,10 +336,12 @@ static pt_str last_lines(pt_str s, uint32_t n)
 }
 
 /* ---- tool calls: groups (section 16.2) ----
- * Calls in a row, with nothing shown between them, form a group: one row
- * each, its mark in the left column, then the tool's name and the gist
- * ("✓ bash  make test · 3s", "✗ bash  make · exit 2", "✓ edit  a.c +3 -1"),
- * with a failure's last lines under the gist.
+ * Calls in a row, with nothing shown between them, form a group: a row
+ * for each round of calls the model made at once, its mark in the left
+ * column (a failure if any call failed), then each call's tool name and
+ * gist ("✓ bash  make test · 3s", "✗ bash  make · exit 2", "✓ edit  a.c +3 -1"),
+ * the name left out after a call of the same tool ("✓ read  a.c, b.c ▪ grep foo"),
+ * with the failures' last lines under the row.
  * The open group is drawn in the band, and goes to the scrollback whole
  * once something else is shown. */
 
@@ -345,7 +379,8 @@ static void put_lines(app *a, pt_str s, const char *prefix, int *left)
 static void group_add(app *a, const pt_entry_view *v)
 {
     const pt_msg *m = v->msg;
-    const pt_block *call = find_call(a, m->call_id);
+    uint32_t round;
+    const pt_block *call = find_call(a, m->call_id, &round);
     const pt_json *data, *d, *j;
     pt_str text = m->text, args = call ? call->args : PT_S("");
     int64_t ms = -1, code = 0, session = 0;
@@ -359,6 +394,7 @@ static void group_add(app *a, const pt_entry_view *v)
     g = &a->group.rows[a->group.n];
     memset(g, 0, sizeof *g);
     g->cat = (uint8_t)(ti < 0 ? CAT_OTHER : tools[ti].cat);
+    g->round = round;
     pt_arena_reset(&a->ar);
     data = pt_json_get(pt_json_parse(v->raw, &a->ar, NULL), "data");
     d = pt_json_get(data, "details");
@@ -421,7 +457,11 @@ static void group_add(app *a, const pt_entry_view *v)
     }
     /* the row: the call, then what came of it */
     g->at = (uint32_t)a->group.buf.n;
-    app_phrase(a, &a->group.buf, m->name, args);
+    {
+        size_t gist;
+        app_phrase(a, &a->group.buf, m->name, args, &gist);
+        g->name = (uint32_t)(gist - g->at);
+    }
     if (stats) { /* "+3", "+3 -1" */
         snprintf(seg, sizeof seg, " +%u", add);
         tui_style(&a->group.buf, TUI_GREEN);
@@ -466,10 +506,40 @@ static void group_row(app *a, pt_buf *out, const char *mark, int mstyle, pt_str 
     pt_buf_putc(out, '\n');
 }
 
+/* A call's part of a row (seg, its first name bytes the tool's name) after
+ * the part before it (prev, the same; empty for the first): ", " and
+ * without the name after the same tool, else after the join mark. */
+static void join(app *a, pt_buf *out, pt_str prev, size_t prev_name, pt_str seg, size_t name)
+{
+    if (prev.n && prev_name == name && memcmp(prev.p, seg.p, name) == 0) {
+        tui_style(out, TUI_DIM);
+        pt_buf_putz(out, ", ");
+        seg.p += name;
+        seg.n -= name;
+    } else if (prev.n) { /* after the mark, one space after the name: no column */
+        size_t k = name;
+        tui_style(out, TUI_DIM);
+        pt_buf_putc(out, ' ');
+        pt_buf_putz(out, a->sy->join);
+        pt_buf_putc(out, ' ');
+        while (k > 1 && seg.p[k - 1] == ' ' && seg.p[k - 2] == ' ')
+            k--;
+        pt_buf_put(out, seg.p, k);
+        seg.p += name;
+        seg.n -= name;
+    }
+    pt_buf_puts(out, seg);
+}
+
+static pt_str grow_str(const app *a, const grow *g)
+{
+    return (pt_str){a->group.buf.p + g->at, g->n};
+}
+
 /* Under a row's gist: the column its details start at. */
 static const char detail_pad[] = "        "; /* MARGIN + NAME_W */
 
-/* A row's details, each line under the gist. */
+/* A call's details, each line under the gist. */
 static void group_details(app *a, pt_buf *out, const grow *g)
 {
     pt_str s = {a->group.buf.p + g->dat, g->dn};
@@ -495,6 +565,15 @@ static void group_details(app *a, pt_buf *out, const grow *g)
     }
 }
 
+/* The calls of one row: from i, while they are of the same round. */
+static int row_end(const app *a, int i)
+{
+    uint32_t r = a->group.rows[i].round;
+    while (++i < a->group.n && r != NO_ROUND && a->group.rows[i].round == r)
+        ;
+    return i;
+}
+
 /* A running call ended: its slot goes to the end, buffers and all. */
 static void run_done(app *a, pt_str call_id)
 {
@@ -517,54 +596,79 @@ bool app_runs_oom(const app *a)
     return false;
 }
 
+/* A running call's part of its row, in an equal share of it: the gist
+ * gives way so the count of lines stays in view. */
+static void run_seg(app *a, pt_buf *out, const run_call *prev, const run_call *r, int share)
+{
+    uint64_t lines = r->lines + r->open;
+    pt_str head = pt_buf_str(&r->head), seg;
+    char count[40] = "", n[16];
+    int room;
+    if (lines) {
+        app_tokens_short(n, sizeof n, lines);
+        snprintf(count, sizeof count, " · %s line%s", n, lines == 1 ? "" : "s");
+    }
+    room = share - tui_width(pt_strz(count), true);
+    pt_buf_reset(&a->tmp);
+    pt_buf_put(&a->tmp, head.p, tui_fit(head, room > 0 ? room : 0, false));
+    if (count[0]) {
+        tui_style(&a->tmp, TUI_DIM);
+        pt_buf_putz(&a->tmp, count);
+    }
+    tui_style(&a->tmp, 0);
+    seg = pt_buf_str(&a->tmp);
+    join(a, out, prev ? pt_buf_str(&prev->head) : PT_STR_NULL, prev ? prev->gist : 0, seg,
+         r->gist <= seg.n ? r->gist : seg.n);
+}
+
 /* The group: whole for the scrollback; live, for the band, with its
  * newest rows only, without details, and the running calls last, marked
- * by the blinking dot, each one row with how many lines it has printed.
- * Output is not shown there: rows that came and went would move the
- * input. */
+ * by the blinking dot, a row for each round with how many lines each
+ * call has printed. Output is not shown there: rows that came and went
+ * would move the input. */
 void app_group_render(app *a, pt_buf *out, bool live)
 {
     bool running = live && a->run.ncalls;
-    int i, first = 0;
+    int i, k, e, first = 0, rows = 0;
     const char *mark = app_blink(a, pt_sys_now_ms());
-    char more[48], n[16];
+    char more[48];
     if (!a->group.n && !running)
         return;
-    if (live && a->group.n > GROUP_LIVE) {
-        first = a->group.n - GROUP_LIVE;
+    for (i = 0; i < a->group.n; i = row_end(a, i))
+        if (live && ++rows > GROUP_LIVE)
+            first = row_end(a, first);
+    if (first) {
         snprintf(more, sizeof more, "%s %d more", a->sy->more, first);
         pt_buf_reset(&a->wrap);
         tui_style(&a->wrap, TUI_DIM);
         pt_buf_putz(&a->wrap, more);
         group_row(a, out, " ", 0, pt_buf_str(&a->wrap));
     }
-    for (i = first; i < a->group.n; i++) {
-        const grow *g = &a->group.rows[i];
-        if (g->at + g->n > a->group.buf.n || g->dat + g->dn > a->group.buf.n)
-            break; /* out of memory: app_paint() says so */
-        group_row(a, out, g->bad ? a->sy->fail : a->sy->ok, g->bad ? TUI_RED : TUI_GREEN | TUI_DIM,
-                  (pt_str){a->group.buf.p + g->at, g->n});
-        if (!live)
-            group_details(a, out, g);
-    }
-    for (i = 0; running && i < a->run.ncalls; i++) {
-        const run_call *r = &a->run.calls[i];
-        uint64_t lines = r->lines + r->open;
-        pt_str head = pt_buf_str(&r->head);
+    for (i = first; i < a->group.n; i = e) {
+        bool bad = false;
+        e = row_end(a, i);
         pt_buf_reset(&a->wrap);
-        if (lines) { /* the count stays in view: the gist gives way */
-            char count[40];
-            int room;
-            app_tokens_short(n, sizeof n, lines);
-            snprintf(count, sizeof count, " · %s line%s", n, lines == 1 ? "" : "s");
-            room = width(a) - 2 - tui_width(pt_strz(count), true);
-            pt_buf_put(&a->wrap, head.p, tui_fit(head, room > 0 ? room : 0, false));
-            tui_style(&a->wrap, TUI_DIM);
-            pt_buf_putz(&a->wrap, count);
-            tui_style(&a->wrap, 0);
-        } else {
-            pt_buf_puts(&a->wrap, head);
+        for (k = i; k < e; k++) {
+            const grow *g = &a->group.rows[k];
+            if (g->at + g->n > a->group.buf.n || g->dat + g->dn > a->group.buf.n)
+                return; /* out of memory: app_paint() says so */
+            bad = bad || g->bad;
+            join(a, &a->wrap, k > i ? grow_str(a, g - 1) : PT_STR_NULL, k > i ? g[-1].name : 0, grow_str(a, g),
+                 g->name);
         }
+        group_row(a, out, bad ? a->sy->fail : a->sy->ok, bad ? TUI_RED : TUI_GREEN | TUI_DIM, pt_buf_str(&a->wrap));
+        for (k = i; !live && k < e; k++)
+            group_details(a, out, &a->group.rows[k]);
+    }
+    for (i = 0; running && i < a->run.ncalls; i = e) {
+        int share;
+        uint32_t r = a->run.calls[i].round;
+        for (e = i + 1; e < a->run.ncalls && r != NO_ROUND && a->run.calls[e].round == r; e++)
+            ;
+        share = (width(a) - 2 - 3 * (e - i - 1)) / (e - i);
+        pt_buf_reset(&a->wrap);
+        for (k = i; k < e; k++)
+            run_seg(a, &a->wrap, k > i ? &a->run.calls[k - 1] : NULL, &a->run.calls[k], share);
         group_row(a, out, mark, ACCENT | TUI_BOLD, pt_buf_str(&a->wrap));
     }
 }
@@ -964,8 +1068,9 @@ void app_on_event(void *ud, const pt_event *ev)
             pt_buf_puts(&r->id, ev->call_id);
             r->lines = 0;
             r->open = false;
+            find_call(a, ev->call_id, &r->round);
             pt_buf_reset(&r->head);
-            app_phrase(a, &r->head, ev->name, ev->args);
+            app_phrase(a, &r->head, ev->name, ev->args, &r->gist);
         }
         break;
     case PT_E_TOOL_OUTPUT: {

@@ -720,37 +720,34 @@ static void test_steady_input(void)
     }
 }
 
-/* Calls in a row form a group (section 16.2): a header that counts them,
- * then a row each; a failure keeps its last lines, an edit shows its diff.
- * The open group, with the running calls one row each, is in the
- * band. */
+/* Calls in a row form a group (section 16.2): a row for each round of
+ * calls, those of one tool after its name once; a failure keeps its last
+ * lines, an edit shows its diff. The open group, with the running calls
+ * a row for each round, is in the band. */
 static void test_tool_rendering(void)
 {
     pty p;
     const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/render.json", "--permission-mode", "auto", NULL};
     const char *again[] = {"-m", "faux/faux", "--script", "tests/faux/render.json", "-c", NULL};
     remove("build/test/render.c");
-    pty_start(&p, 30, 100, args);
+    pty_start(&p, 30, 160, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
-    CHECK(wait_for(&p, /* the band: the commands run at once, and rows come as they end */
-                   "✓ bash  echo 31\n"
-                   "✗ bash  echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2 · exit 2\n",
+    CHECK(wait_for(&p, /* the band: the commands run at once, and join their row as they end */
+                   "✗ bash  echo 31, echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2 · exit 2\n",
                    3000));
     CHECK(wait_for(&p, /* the running call last, by the spinner, one row: how much it printed, not what */
                    " bash  echo started; sleep 1; echo finished · 1 line\n", 3000));
     CHECK(!has(&p, "        started"));
     CHECK(wait_for(&p, "Fixed.", 5000));
     CHECK(has(&p, "  Looking.\n\n"
-                  "✓ bash  echo 31\n"
-                  "✗ bash  echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2 · exit 2\n"
+                  "✗ bash  echo 31, echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2 · exit 2, "
+                  "echo started; sleep 1; echo finished · 1s\n"
                   "        two\n"
                   "        band.c:88: error\n"
                   "        make: Error 1\n"
-                  "✓ bash  echo started; sleep 1; echo finished · 1s\n"
                   "✓ write build/test/render.c +2\n"
-                  "✓ read  build/test/render.c · 2 lines\n"
-                  "✓ edit  build/test/render.c +1 -1\n"
+                  "✓ read  build/test/render.c · 2 lines ▪ edit build/test/render.c +1 -1\n"
                   "\n"
                   "  Fixed."));
     CHECK(!has(&p, "        one"));
@@ -761,8 +758,8 @@ static void test_tool_rendering(void)
     modes_restored(&p);
     pty_free(&p);
     /* resumed, the log gives the same group, once */
-    pty_start(&p, 30, 100, again);
-    CHECK(wait_for(&p, "✓ edit  build/test/render.c +1 -1\n", 3000));
+    pty_start(&p, 30, 160, again);
+    CHECK(wait_for(&p, "▪ edit build/test/render.c +1 -1\n", 3000));
     CHECK(wait_for(&p, "faux · ", 3000));
     pump(&p, 300);
     CHECK(!has(&p, "Fixed.\n\n› go"));
@@ -770,6 +767,43 @@ static void test_tool_rendering(void)
     CHECK(finish(&p, 3000) == 0);
     pty_free(&p);
     remove("build/test/render.c");
+}
+
+/* A row shows a path under the session's directory from there; a call
+ * after the join mark has one space after its name, not the column. */
+static void test_short_paths(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "paths.json", "--permission-mode", "auto", NULL};
+    char cwd[4096];
+    FILE *f;
+    CHECK(getcwd(cwd, sizeof cwd) != NULL);
+    f = fopen("paths.json", "w");
+    CHECK(f != NULL);
+    if (!f)
+        return;
+    fprintf(f, "{\"turns\": [{\"content\": ["
+               "{\"type\": \"tool_call\", \"name\": \"ls\", \"args\": {\"path\": \"%s\"}},"
+               "{\"type\": \"tool_call\", \"name\": \"bash\", \"args\": {\"command\": \"true\"}},"
+               "{\"type\": \"tool_call\", \"name\": \"ls\", \"args\": {\"path\": \"%s/tests\"}}"
+               "]}, {\"content\": [{\"type\": \"text\", \"text\": \"Listed.\"}]}]}\n",
+            cwd, cwd);
+    fclose(f);
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "go\r");
+    CHECK(wait_for(&p, "Listed.", 5000));
+    /* one round, which ends in any order */
+    CHECK(has(&p, "ls    .") || has(&p, "ls .") || has(&p, ", ."));
+    CHECK(has(&p, "ls    tests") || has(&p, "ls tests") || has(&p, ", tests"));
+    CHECK(has(&p, "▪ bash true") || has(&p, "▪ ls "));
+    CHECK(!has(&p, "▪ ls  ") && !has(&p, "▪ bash  "));
+    CHECK(!has(&p, cwd));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    remove("paths.json");
 }
 
 /* A background command that ends while the agent is idle: pytte tells
@@ -823,10 +857,10 @@ static void test_background(void)
                   "✓ bash  sleep 2.5"));
     CHECK(has(&p, "✗ poll  session 8 · exit 3\n"
                   "        second\n"
-                  "✗ poll  session 8 · failed\n"));
-    CHECK(has(&p, "✓ bash  echo up; sleep 100 · still running as session 22\n"));
-    CHECK(has(&p, "✓ poll  session 22 (stop)\n"));
-    CHECK(has(&p, "✓ bash  echo left; sleep 100 · still running as session 27\n"));
+                  "✗ poll  session 8 · failed ▪ bash echo up; sleep 100 · still running as session 22\n"));
+    /* one round, which ends in either order */
+    CHECK(has(&p, "✓ poll  session 22 (stop) ▪ bash echo left; sleep 100 · still running as session 27\n") ||
+          has(&p, "✓ bash  echo left; sleep 100 · still running as session 27 ▪ poll session 22 (stop)\n"));
     CHECK(!has(&p, "[still running"));
     CHECK(wait_idle(&p, 3000));
     /* one left running: the footer counts it, /ps lists it, /stop ends it */
@@ -1434,6 +1468,7 @@ int main(int argc, char **argv)
     RUN(test_steady_input);
     RUN(test_approval);
     RUN(test_tool_rendering);
+    RUN(test_short_paths);
     RUN(test_background);
     RUN(test_background_note);
     RUN(test_compaction);
