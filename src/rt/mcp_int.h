@@ -1,5 +1,6 @@
-/* Inside the MCP client: shared by mcp.c (servers, transports, tools) and
- * mcp_oauth.c (logging in to remote servers). */
+/* Inside the MCP client: shared by mcp.c (servers, protocol, tools),
+ * mcp_io.c (the transports) and mcp_oauth.c (logging in to remote
+ * servers). */
 #ifndef PT_RT_MCP_INT_H
 #define PT_RT_MCP_INT_H
 
@@ -118,6 +119,23 @@ struct mcp {
     uint32_t icap, apcap, arcap;
 };
 
+#define MCP_IO_CHUNK 65536 /* mcp.io: one read */
+
+/* ---- mcp.c: the protocol side, for the transports ---- */
+/* The server failed: it closes, and what waited on it fails. */
+void mcp_srv_fail(srv *s, const char *fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 2, 3)))
+#endif
+    ;
+/* Fail every request of s; calls not sent yet wait on, unless all. */
+void mcp_fail_all(srv *s, const char *why, bool all);
+/* One JSON-RPC message from the server. */
+void mcp_on_message(srv *s, pt_str json);
+/* The request id of s will not be answered: why, or no answer came. */
+void mcp_request_failed(srv *s, int64_t id, const char *why);
+void mcp_request_unanswered(srv *s, int64_t id);
+
 void mcp_notify_user(srv *s, const char *fmt, ...)
 #if defined(__GNUC__)
     __attribute__((format(printf, 2, 3)))
@@ -127,6 +145,14 @@ void mcp_notify_user(srv *s, const char *fmt, ...)
 void mcp_reconnect(srv *s);
 /* The server needs a login: say so, fail what waits. */
 void mcp_needs_login(srv *s, const char *why);
+
+/* ---- the transports (mcp_io.c) ---- */
+/* Spawn a stdio server and watch its pipes; false: it failed (said so). */
+bool mcp_stdio_start(srv *s);
+/* Send one message: written to stdin, or POSTed from a timer. */
+void mcp_send(srv *s, pt_str msg, int64_t id, bool init);
+/* Close the transport: the process, or the requests in flight. */
+void mcp_io_close(srv *s);
 
 /* ---- OAuth (mcp_oauth.c) ---- */
 void mcp_auth_load(srv *s);

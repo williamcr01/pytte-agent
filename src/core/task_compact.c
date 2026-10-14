@@ -102,7 +102,7 @@ uint32_t pt_compact_write(pt_agent *a, uint32_t owner, uint32_t cutoff)
     ct.attempt = 1;
     ct.cutoff = cutoff;
     ct.keep = choose_keep(a, cutoff);
-    pt_write_task(&a->cw, &ct);
+    pt_write_task(&a->commit.w, &ct);
     return ct.id;
 }
 
@@ -292,7 +292,7 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
                         ? target.model.max_tokens
                         : SUMMARY_TOKENS;
     pt_core_commit_begin(a, t->id);
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     ok = pt_core_commit_end(a);
     pt_buf_free(&ref);
     return ok;
@@ -305,15 +305,15 @@ typedef enum { MAT_READY, MAT_ASKED, MAT_WAITING } mat_state;
 static mat_state want_materials(pt_agent *a, task *t, uint32_t epoch)
 {
     pt_fx fx;
-    if (a->mat_task == t->id && a->mat_ready)
+    if (a->mat.task == t->id && a->mat.ready)
         return MAT_READY;
-    if (a->mat_task == t->id && a->mat_fx)
+    if (a->mat.task == t->id && a->mat.fx)
         return MAT_WAITING;
-    a->mat_task = t->id;
-    a->mat_ready = false;
+    a->mat.task = t->id;
+    a->mat.ready = false;
     memset(&fx, 0, sizeof fx);
     fx.kind = PT_FX_EPOCH_MATERIALS;
-    fx.id = a->mat_fx = pt_core_new_fx(a);
+    fx.id = a->mat.fx = pt_core_new_fx(a);
     fx.task = t->id;
     fx.epoch = epoch;
     fx.bytes = a->nentries ? a->entries[0].msg.text : PT_STR_NULL;
@@ -324,28 +324,28 @@ static mat_state want_materials(pt_agent *a, task *t, uint32_t epoch)
 void pt_fx_materials(pt_agent *a, uint32_t fx, const pt_materials *m)
 {
     pt_jw w;
-    if (!fx || fx != a->mat_fx)
+    if (!fx || fx != a->mat.fx)
         return; /* the compaction ended meanwhile */
-    a->mat_fx = 0;
-    a->mat_ready = true;
-    a->mat_keep = !m;
-    pt_buf_reset(&a->mat_system);
-    pt_buf_reset(&a->mat_tools);
-    pt_buf_reset(&a->mat_skills);
+    a->mat.fx = 0;
+    a->mat.ready = true;
+    a->mat.keep = !m;
+    pt_buf_reset(&a->mat.system);
+    pt_buf_reset(&a->mat.tools);
+    pt_buf_reset(&a->mat.skills);
     if (m) {
-        pt_buf_puts(&a->mat_system, m->system);
-        pt_jw_init(&w, &a->mat_tools);
+        pt_buf_puts(&a->mat.system, m->system);
+        pt_jw_init(&w, &a->mat.tools);
         pt_core_write_tool_defs(&w, m->tools, m->ntools);
-        pt_buf_puts(&a->mat_skills, m->skills.n && pt_core_raw_is(a, m->skills, PT_J_ARR) ? m->skills : PT_S("[]"));
-        if (a->mat_system.oom || a->mat_tools.oom || a->mat_skills.oom)
-            a->mat_keep = true; /* the current epoch's, then */
+        pt_buf_puts(&a->mat.skills, m->skills.n && pt_core_raw_is(a, m->skills, PT_J_ARR) ? m->skills : PT_S("[]"));
+        if (a->mat.system.oom || a->mat.tools.oom || a->mat.skills.oom)
+            a->mat.keep = true; /* the current epoch's, then */
     }
 }
 
 static void materials_done(pt_agent *a)
 {
-    a->mat_task = a->mat_fx = 0;
-    a->mat_ready = false;
+    a->mat.task = a->mat.fx = 0;
+    a->mat.ready = false;
 }
 
 /* An array of the current epoch ("tools", "skills"), as it was frozen. */
@@ -358,12 +358,12 @@ static pt_str epoch_array(pt_agent *a, const char *key)
 
 bool pt_compact_settle(pt_agent *a, task *t)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     mat_state ms = want_materials(a, t, a->cur_epoch);
     bool fresh;
     if (ms != MAT_READY)
         return ms == MAT_ASKED;
-    fresh = !a->mat_keep;
+    fresh = !a->mat.keep;
     pt_core_commit_begin(a, t->id);
     pt_jw_obj(w);
     pt_jw_key(w, "t");
@@ -377,11 +377,11 @@ bool pt_compact_settle(pt_agent *a, task *t)
     pt_jw_key(w, "n");
     pt_jw_uint(w, a->cur_epoch);
     pt_jw_key(w, "system");
-    pt_jw_str(w, fresh ? pt_buf_str(&a->mat_system) : a->entries[0].msg.text);
+    pt_jw_str(w, fresh ? pt_buf_str(&a->mat.system) : a->entries[0].msg.text);
     pt_jw_key(w, "tools");
-    pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_tools) : epoch_array(a, "tools"));
+    pt_jw_raw(w, fresh ? pt_buf_str(&a->mat.tools) : epoch_array(a, "tools"));
     pt_jw_key(w, "skills");
-    pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_skills) : epoch_array(a, "skills"));
+    pt_jw_raw(w, fresh ? pt_buf_str(&a->mat.skills) : epoch_array(a, "skills"));
     pt_jw_obj_end(w);
     pt_jw_obj_end(w);
     materials_done(a);
@@ -488,7 +488,7 @@ static bool keeps_user(pt_agent *a, const task *t)
  * data, and "kept" naming the original. */
 static bool write_kept(pt_agent *a, const task *t)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     uint32_t i;
     for (i = 0; t->keep && i < a->nentries && a->entries[i].id <= t->cutoff; i++) {
         const entry *e = &a->entries[i];
@@ -527,18 +527,18 @@ static void end_owner(pt_agent *a, task *run, bool ok, pt_str why)
         nt.status = ST_RUNNING;
         nt.phase = PH_PREPARE;
         nt.attempt = 1;
-        pt_write_task(&a->cw, &nt);
+        pt_write_task(&a->commit.w, &nt);
         return;
     }
     nt.status = ST_DONE;
     nt.outcome = PT_S("failed");
     nt.reason = why;
     nt.result = 0;
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     if ((in = pt_core_input(a, run->input))) {
         input nin = *in;
         nin.status = IN_FAILED;
-        pt_write_input(&a->cw, &nin);
+        pt_write_input(&a->commit.w, &nin);
     }
     pt_core_after(a, AFTER_RUN_DONE, "failed", why, 0);
 }
@@ -554,7 +554,7 @@ bool pt_compact_finish(pt_agent *a, task *t)
     task nt = *t;
     pt_buf summary, why;
     file_list *files;
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     uint32_t i;
     bool ok;
     pt_buf_init(&summary, a->al);
@@ -565,16 +565,16 @@ bool pt_compact_finish(pt_agent *a, task *t)
     pt_core_commit_begin(a, t->id);
     if ((m->stop == PT_STOP_STOP || m->stop == PT_STOP_LENGTH) && summary.n) {
         uint32_t id = pt_core_new_id(a);
-        bool fresh = a->mat_task == t->id && a->mat_ready && !a->mat_keep;
+        bool fresh = a->mat.task == t->id && a->mat.ready && !a->mat.keep;
         pt_core_entry_head(a, id, "epoch", a->cur_epoch + 1);
         pt_jw_key(w, "n");
         pt_jw_uint(w, a->cur_epoch + 1);
         pt_jw_key(w, "system");
-        pt_jw_str(w, fresh ? pt_buf_str(&a->mat_system) : a->nentries ? a->entries[0].msg.text : PT_STR_NULL);
+        pt_jw_str(w, fresh ? pt_buf_str(&a->mat.system) : a->nentries ? a->entries[0].msg.text : PT_STR_NULL);
         pt_jw_key(w, "tools");
-        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_tools) : epoch_array(a, "tools"));
+        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat.tools) : epoch_array(a, "tools"));
         pt_jw_key(w, "skills");
-        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat_skills) : epoch_array(a, "skills"));
+        pt_jw_raw(w, fresh ? pt_buf_str(&a->mat.skills) : epoch_array(a, "skills"));
         pt_jw_key(w, "summary");
         pt_jw_str(w, pt_buf_str(&summary));
         if ((files = collect_files(a, t)))
@@ -671,8 +671,8 @@ uint32_t pt_compact_abort(pt_agent *a, task *t)
     nt.outcome = PT_S("aborted");
     nt.reason = PT_S("interrupted by the user");
     nt.result = 0;
-    pt_write_task(&a->cw, &nt);
-    if (a->mat_task == t->id)
+    pt_write_task(&a->commit.w, &nt);
+    if (a->mat.task == t->id)
         materials_done(a);
     return fx;
 }

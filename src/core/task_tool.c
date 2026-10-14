@@ -114,7 +114,7 @@ static bool valid_json(pt_agent *a, pt_str s, bool object)
 /* One commit: the tool_result entry, an optional doc, the task done. */
 static bool finish(pt_agent *a, task *t, const pt_block *call, const ending *e)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     uint32_t id;
     task nt = *t;
     bool ok;
@@ -160,7 +160,7 @@ static bool finish(pt_agent *a, task *t, const pt_block *call, const ending *e)
     nt.result = id;
     pt_write_task(w, &nt);
     if (t->phase == PH_EXECUTE && ((t->tl && t->tl->wrote_live) || t->recovered))
-        a->after_live_del = t->id;
+        a->commit.live_del = t->id;
     ok = pt_core_commit_end(a);
     pt_buf_reset(&t->rescued);
     pt_tool_free_live(a, t);
@@ -287,7 +287,7 @@ static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_st
     if (consumed) {
         input in = *consumed;
         in.status = IN_DONE;
-        pt_write_input(&a->cw, &in);
+        pt_write_input(&a->commit.w, &in);
     }
     nt.phase = ph;
     nt.status = ph == PH_APPROVE ? ST_WAITING : ST_RUNNING;
@@ -299,7 +299,7 @@ static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_st
         k = call ? pt_core_find_tool(a, call->name) : -1;
         nt.replay = k >= 0 ? a->tool_meta[k].replay : PT_REPLAY_UNSAFE;
     }
-    pt_write_task(&a->cw, &nt);
+    pt_write_task(&a->commit.w, &nt);
     return pt_core_commit_end(a);
 }
 
@@ -417,10 +417,10 @@ bool pt_approve(pt_agent *a, uint32_t task_id, bool yes, pt_str reason)
     }
     if (answer_for(a, task_id))
         return true;
-    for (i = 0; i < a->nsubs; i++)
-        if (a->subs[i].kind == INK_APPROVE && a->subs[i].task == task_id)
+    for (i = 0; i < a->subs.n; i++)
+        if (a->subs.v[i].kind == INK_APPROVE && a->subs.v[i].task == task_id)
             return true;
-    if (!pt_core_grow(a, (void **)&a->subs, &a->scap, a->nsubs + 1, sizeof(sub)))
+    if (!pt_core_grow(a, (void **)&a->subs.v, &a->subs.cap, a->subs.n + 1, sizeof(sub)))
         return false;
     {
         sub pending;
@@ -428,12 +428,12 @@ bool pt_approve(pt_agent *a, uint32_t task_id, bool yes, pt_str reason)
         pending.kind = INK_APPROVE;
         pending.task = task_id;
         pending.yes = yes;
-        pending.text = pt_arena_dup(&a->subs_a, reason);
-        if (a->subs_a.oom) {
+        pending.text = pt_arena_dup(&a->subs.ar, reason);
+        if (a->subs.ar.oom) {
             pt_core_fail(a, PT_FATAL_OOM, "out of memory queueing approval", PT_STR_NULL);
             return false;
         }
-        a->subs[a->nsubs++] = pending;
+        a->subs.v[a->subs.n++] = pending;
     }
     a->idle_sent = false;
     return true;
@@ -692,7 +692,7 @@ uint32_t pt_tool_abort(pt_agent *a, task *t)
 {
     task nt = *t;
     const pt_block *call;
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     uint32_t id;
     if (t->tl) {
         nt.abort = true;

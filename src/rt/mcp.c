@@ -16,7 +16,10 @@
  * tool's output.
  *
  * Arguments the config fills in (pt_rt_mcp_server.arguments) leave a
- * tool's schema when it is listed, and are added to each call's. */
+ * tool's schema when it is listed, and are added to each call's.
+ *
+ * The transports are in mcp_io.c, OAuth in mcp_oauth.c, JSON-RPC framing
+ * in mcp_proto.c. */
 #define _POSIX_C_SOURCE 200809L
 #include "rt/mcp_int.h"
 
@@ -26,9 +29,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IO_CHUNK 65536
-#define LINE_MAX_BYTES (64u << 20) /* one message over stdio */
-#define BODY_MAX (64u << 20)       /* one HTTP response */
 #define DESC_MAX 2048              /* bytes of a tool's description kept */
 #define RESTART_GAP_MS 5000        /* a server that just failed is not started again sooner */
 
@@ -54,20 +54,6 @@ typedef struct mcall {
     char *args;
 } mcall;
 
-typedef struct qmsg { /* a message waiting to be POSTed */
-    struct qmsg *next;
-    int64_t id;
-    bool init;
-    size_t n;
-    char data[1];
-} qmsg;
-
-static void send_msg(srv *s, pt_str msg, int64_t id, bool init);
-static void srv_fail(srv *s, const char *fmt, ...)
-#if defined(__GNUC__)
-    __attribute__((format(printf, 2, 3)))
-#endif
-    ;
 static void srv_stop(srv *s, const char *why);
 static void srv_connect(srv *s, bool hold);
 static void tools_apply(srv *s);
@@ -204,7 +190,7 @@ static void pend_fail(pend *p, const char *why)
 }
 
 /* Fail every request of s; calls not sent yet wait on, unless all. */
-static void fail_all(srv *s, const char *why, bool all)
+void mcp_fail_all(srv *s, const char *why, bool all)
 {
     mcp *m = s->m;
     uint32_t i = 0;
@@ -225,6 +211,25 @@ static void fail_all(srv *s, const char *why, bool all)
     }
 }
 
+/* A request the transport could not deliver, or whose answer did not come. */
+void mcp_request_failed(srv *s, int64_t id, const char *why)
+{
+    pend p;
+    if (pend_take(s->m, s, id, &p))
+        pend_fail(&p, why);
+}
+
+void mcp_request_unanswered(srv *s, int64_t id)
+{
+    pend p;
+    if (!pend_take(s->m, s, id, &p))
+        return;
+    if (p.kind == P_INIT)
+        mcp_srv_fail(s, "%s did not answer initialize", s->url);
+    else
+        pend_fail(&p, "the server sent no answer");
+}
+
 /* ---- sending ---- */
 
 static int64_t request(srv *s, const char *method, pt_str params, pkind kind, pend **out)
@@ -243,7 +248,7 @@ static int64_t request(srv *s, const char *method, pt_str params, pkind kind, pe
         pt_buf_free(&b);
         return 0;
     }
-    send_msg(s, pt_buf_str(&b), id, kind == P_INIT);
+    mcp_send(s, pt_buf_str(&b), id, kind == P_INIT);
     pt_buf_free(&b);
     return id;
 }
@@ -254,523 +259,15 @@ static void notify(srv *s, const char *method, pt_str params)
     pt_buf_init(&b, pt_sys_allocator());
     mcp_notify(&b, method, params);
     if (!b.oom)
-        send_msg(s, pt_buf_str(&b), 0, false);
+        mcp_send(s, pt_buf_str(&b), 0, false);
     pt_buf_free(&b);
-}
-
-/* ---- stdio ---- */
-
-static void flush_later(void *ud, pt_rt *rt);
-
-static void stdio_flush(srv *s)
-{
-    while (s->outq.n) {
-        long w = pt_proc_write(s->p, s->outq.p, s->outq.n);
-        if (w < 0) {
-            srv_fail(s, "its input closed: it stopped reading");
-            return;
-        }
-        if (w == 0) { /* the pipe is full: try again soon */
-            if (!s->flush_timer)
-                s->flush_timer = pt_rt_timer(s->m->rt, pt_rt_now(s->m->rt) + 10, flush_later, s);
-            return;
-        }
-        memmove(s->outq.p, s->outq.p + w, s->outq.n - (size_t)w);
-        s->outq.n -= (size_t)w;
-    }
-}
-
-static void flush_later(void *ud, pt_rt *rt)
-{
-    srv *s = (srv *)ud;
-    (void)rt;
-    s->flush_timer = 0;
-    if (s->p)
-        stdio_flush(s);
-}
-
-static void on_message(srv *s, pt_str json);
-
-static void stdio_lines(srv *s, const char *p, size_t n)
-{
-    uint64_t gen = s->gen;
-    while (n && s->p && s->gen == gen) {
-        const char *nl = (const char *)memchr(p, '\n', n);
-        size_t k = nl ? (size_t)(nl - p) : n;
-        if (s->line.n + k > LINE_MAX_BYTES) {
-            srv_fail(s, "sent a message longer than %u MiB", LINE_MAX_BYTES >> 20);
-            return;
-        }
-        if (!nl) {
-            pt_buf_put(&s->line, p, n);
-            return;
-        }
-        if (s->line.n) {
-            pt_buf_put(&s->line, p, k);
-            if (s->line.oom) {
-                srv_fail(s, "out of memory reading its output");
-                return;
-            }
-            on_message(s, pt_buf_str(&s->line));
-            pt_buf_reset(&s->line);
-        } else {
-            on_message(s, (pt_str){p, k});
-        }
-        p += k + 1;
-        n -= k + 1;
-    }
-}
-
-static void stdio_err(void *ud, pt_rt *rt);
-
-static void stdio_died(srv *s)
-{
-    int status = 0;
-    char tail[400] = "";
-    size_t i, n, start;
-    if (s->err_fd >= 0) /* what it said last, before its stdout closed */
-        stdio_err(s, s->m->rt);
-    n = s->errtail_n;
-    pt_proc_reap(s->p, true, &status);
-    /* the last lines of what it said on stderr */
-    while (n && (s->errtail[n - 1] == '\n' || s->errtail[n - 1] == ' '))
-        n--;
-    start = n > 300 ? n - 300 : 0;
-    for (i = start; i < n; i++)
-        tail[i - start] = s->errtail[i] == '\n' ? ' ' : s->errtail[i];
-    tail[n - start] = 0;
-    srv_fail(s, "exited with status %d%s%s", status, tail[0] ? ": " : "", tail);
-}
-
-static void stdio_out(void *ud, pt_rt *rt)
-{
-    srv *s = (srv *)ud;
-    char *io = s->m->io;
-    (void)rt;
-    while (s->p) {
-        long r = pt_proc_read(s->p, io, IO_CHUNK);
-        if (r < 0)
-            return; /* nothing more now */
-        if (r == 0) {
-            stdio_died(s);
-            return;
-        }
-        stdio_lines(s, io, (size_t)r);
-    }
-}
-
-static void stdio_err(void *ud, pt_rt *rt)
-{
-    srv *s = (srv *)ud;
-    char buf[4096];
-    (void)rt;
-    for (;;) {
-        long r = s->p ? pt_proc_read_err(s->p, buf, sizeof buf) : 0;
-        size_t k;
-        if (r <= 0) {
-            if (r == 0 && s->err_fd >= 0) { /* closed: stop watching */
-                pt_rt_unwatch(s->m->rt, s->err_fd);
-                s->err_fd = -1;
-            }
-            return;
-        }
-        k = (size_t)r;
-        if (k >= sizeof s->errtail) {
-            memcpy(s->errtail, buf + k - sizeof s->errtail, sizeof s->errtail);
-            s->errtail_n = sizeof s->errtail;
-        } else {
-            if (s->errtail_n + k > sizeof s->errtail) {
-                size_t drop = s->errtail_n + k - sizeof s->errtail;
-                memmove(s->errtail, s->errtail + drop, s->errtail_n - drop);
-                s->errtail_n -= drop;
-            }
-            memcpy(s->errtail + s->errtail_n, buf, k);
-            s->errtail_n += k;
-        }
-    }
-}
-
-static void stdio_exit(void *ud, pt_rt *rt)
-{
-    srv *s = (srv *)ud;
-    stdio_out(ud, rt); /* what it wrote before it ended */
-    if (s->p)
-        stdio_err(ud, rt);
-    if (s->p)
-        stdio_died(s);
-}
-
-static void stdio_close(srv *s)
-{
-    pt_rt *rt = s->m->rt;
-    if (s->out_fd >= 0)
-        pt_rt_unwatch(rt, s->out_fd);
-    if (s->err_fd >= 0)
-        pt_rt_unwatch(rt, s->err_fd);
-    if (s->exit_fd >= 0)
-        pt_rt_unwatch(rt, s->exit_fd);
-    s->out_fd = s->err_fd = s->exit_fd = -1;
-    if (s->flush_timer)
-        pt_rt_timer_cancel(rt, s->flush_timer);
-    s->flush_timer = 0;
-    if (s->p) {
-        pt_proc_close_in(s->p); /* EOF first: a polite server exits */
-        pt_proc_free(s->p);     /* ...then SIGKILL to its group */
-    }
-    s->p = NULL;
-    pt_buf_reset(&s->line);
-    pt_buf_reset(&s->outq);
-}
-
-static bool stdio_start(srv *s)
-{
-    pt_rt *rt = s->m->rt;
-    pt_proc_opts po;
-    char err[300];
-    const char *cwd = s->cwd;
-    pt_str sc = pt_session_cwd(pt_rt_agent(rt));
-    char dir[4096];
-    if (!cwd && sc.n && sc.n < sizeof dir) {
-        memcpy(dir, sc.p, sc.n);
-        dir[sc.n] = 0;
-        cwd = dir;
-    }
-    memset(&po, 0, sizeof po);
-    po.stdin_pipe = true;
-    po.split_err = true;
-    s->errtail_n = 0;
-    s->p = pt_proc_spawn(s->argv, cwd, s->m->unset, s->env, &po, err, sizeof err);
-    if (!s->p) {
-        srv_fail(s, "cannot start %s: %s", s->target, err);
-        return false;
-    }
-    s->out_fd = pt_proc_out_fd(s->p);
-    s->err_fd = pt_proc_err_fd(s->p);
-    s->exit_fd = pt_proc_exit_fd(s->p);
-    if (!pt_rt_watch(rt, s->out_fd, stdio_out, s) || !pt_rt_watch(rt, s->err_fd, stdio_err, s) ||
-        (s->exit_fd >= 0 && !pt_rt_watch(rt, s->exit_fd, stdio_exit, s))) {
-        srv_fail(s, "out of memory");
-        return false;
-    }
-    return true;
-}
-
-/* ---- HTTP calls ---- */
-
-static void h_header(void *ud, pt_str name, pt_str value)
-{
-    hcall *h = (hcall *)ud;
-    size_t n;
-    if (pt_str_ieq(name, PT_S("content-type"))) {
-        n = value.n < sizeof h->ctype - 1 ? value.n : sizeof h->ctype - 1;
-        memcpy(h->ctype, value.p, n);
-        h->ctype[n] = 0;
-    } else if (pt_str_ieq(name, PT_S("mcp-session-id"))) {
-        n = value.n < sizeof h->session - 1 ? value.n : sizeof h->session - 1;
-        memcpy(h->session, value.p, n);
-        h->session[n] = 0;
-    } else if (pt_str_ieq(name, PT_S("www-authenticate"))) {
-        pt_buf_reset(&h->www);
-        pt_buf_puts(&h->www, mcp_cut(value, 2048));
-    }
-}
-
-static void h_head(void *ud, int status, pt_str retry_after)
-{
-    hcall *h = (hcall *)ud;
-    (void)retry_after;
-    h->status = status;
-    h->sse_on = h->on_msg && status >= 200 && status < 300 && pt_str_starts(pt_strz(h->ctype), PT_S("text/event-stream"));
-}
-
-static int h_event(void *ud, const pt_sse_event *ev)
-{
-    hcall *h = (hcall *)ud;
-    if ((!ev->event.n || pt_str_eqz(ev->event, "message")) && ev->data.n)
-        h->on_msg(h, ev->data);
-    return 0;
-}
-
-static void h_body(void *ud, const char *p, size_t n)
-{
-    hcall *h = (hcall *)ud;
-    if (h->sse_on) {
-        pt_sse_feed(&h->sse, p, n, h_event, h);
-        return;
-    }
-    if (h->body.n + n > BODY_MAX) {
-        h->too_big = true;
-        return;
-    }
-    pt_buf_put(&h->body, p, n);
-}
-
-static void unlink_h(hcall *h)
-{
-    hcall **pp;
-    for (pp = &h->m->hcalls; *pp; pp = &(*pp)->next)
-        if (*pp == h) {
-            *pp = h->next;
-            break;
-        }
-}
-
-static void h_fire(void *ud, pt_rt *rt)
-{
-    hcall *h = (hcall *)ud;
-    (void)rt;
-    h->timer = 0;
-    /* off the list first: done may close what it belonged to */
-    unlink_h(h);
-    if (h->done)
-        h->done(h);
-    hcall_free(h);
-}
-
-static void h_done(void *ud, const char *error)
-{
-    hcall *h = (hcall *)ud;
-    h->req = NULL;
-    h->ended = true;
-    if (h->sse_on)
-        pt_sse_finish(&h->sse, h_event, h);
-    if (error)
-        snprintf(h->err, sizeof h->err, "%s", error);
-    else if (h->too_big)
-        snprintf(h->err, sizeof h->err, "the response is larger than %u MiB", BODY_MAX >> 20);
-    h->timer = pt_rt_timer(h->m->rt, 0, h_fire, h);
-    if (!h->timer) { /* out of memory: no done, but no leak */
-        snprintf(h->err, sizeof h->err, "out of memory");
-    }
-}
-
-hcall *hcall_new(mcp *m, srv *s, const char *method, pt_str url)
-{
-    hcall *h = (hcall *)calloc(1, sizeof *h);
-    if (!h)
-        return NULL;
-    h->m = m;
-    h->s = s;
-    pt_arena_init(&h->ar, pt_sys_allocator(), 1024);
-    pt_buf_init(&h->body_out, pt_sys_allocator());
-    pt_buf_init(&h->body, pt_sys_allocator());
-    pt_buf_init(&h->www, pt_sys_allocator());
-    pt_sse_init(&h->sse, pt_sys_allocator());
-    h->hr.method = method;
-    h->hr.url = pt_arena_cstr(&h->ar, url);
-    h->hr.headers = h->hdr;
-    h->hr.hcap = sizeof h->hdr / sizeof h->hdr[0];
-    h->hr.flags = PT_HTTP_DECOMPRESS;
-    h->next = m->hcalls;
-    m->hcalls = h;
-    return h;
-}
-
-void hcall_header(hcall *h, const char *name, pt_str value)
-{
-    if (h->hr.nheaders < h->hr.hcap) {
-        h->hdr[h->hr.nheaders].name = pt_arena_cstr(&h->ar, pt_strz(name));
-        h->hdr[h->hr.nheaders++].value = pt_arena_cstr(&h->ar, value);
-    }
-}
-
-void hcall_free(hcall *h)
-{
-    unlink_h(h);
-    if (h->req)
-        pt_rt_http_cancel(h->m->rt, h->req);
-    if (h->timer)
-        pt_rt_timer_cancel(h->m->rt, h->timer);
-    pt_arena_free(&h->ar);
-    pt_buf_free(&h->body_out);
-    pt_buf_free(&h->body);
-    pt_buf_free(&h->www);
-    pt_sse_free(&h->sse);
-    free(h);
-}
-
-bool hcall_start(hcall *h)
-{
-    pt_http_sink sink;
-    if (h->ar.oom || h->body_out.oom) {
-        hcall_free(h);
-        return false;
-    }
-    h->hr.body = pt_buf_str(&h->body_out);
-    memset(&sink, 0, sizeof sink);
-    sink.ud = h;
-    sink.head = h_head;
-    sink.body = h_body;
-    sink.done = h_done;
-    sink.header = h_header;
-    h->req = pt_rt_http_start(h->m->rt, &h->hr, &sink);
-    if (!h->req) {
-        hcall_free(h);
-        return false;
-    }
-    return true;
-}
-
-/* ---- Streamable HTTP ---- */
-
-static void post_msg(hcall *h, pt_str json)
-{
-    srv *s = h->s;
-    if (s->gen == (uint64_t)(uintptr_t)h->ud)
-        on_message(s, json);
-}
-
-static void post_done(hcall *h)
-{
-    srv *s = h->s;
-    pend p;
-    char msg[700];
-    if (s->gen != (uint64_t)(uintptr_t)h->ud)
-        return; /* sent before a restart */
-    if (h->init && h->session[0])
-        snprintf(s->session, sizeof s->session, "%s", h->session);
-    if (h->err[0]) {
-        snprintf(msg, sizeof msg, "%s: %s", s->url, h->err);
-        if (h->init)
-            srv_fail(s, "%s", msg);
-        else if (h->msg_id && pend_take(s->m, s, h->msg_id, &p))
-            pend_fail(&p, msg);
-        return;
-    }
-    if (h->status == 401) {
-        if (!mcp_auth_unauthorized(s, pt_buf_str(&h->www)))
-            mcp_needs_login(s, "the server asks for a login");
-        return;
-    }
-    if (h->status == 404 && s->session[0] && !h->init) {
-        /* the session is gone (the server restarted): start a new one */
-        s->session[0] = 0;
-        fail_all(s, "the server ended its session; it was restarted: try again", false);
-        mcp_reconnect(s);
-        return;
-    }
-    if (h->status < 200 || h->status >= 300) {
-        snprintf(msg, sizeof msg, "%s answered HTTP %d%s%.*s", s->url, h->status, h->body.n ? ": " : "",
-                 (int)mcp_cut(pt_buf_str(&h->body), 300).n, h->body.p ? h->body.p : "");
-        if (h->init)
-            srv_fail(s, "%s", msg);
-        else if (h->msg_id && pend_take(s->m, s, h->msg_id, &p))
-            pend_fail(&p, msg);
-        return;
-    }
-    if (!h->sse_on && h->body.n && pt_str_starts(pt_strz(h->ctype), PT_S("application/json")))
-        on_message(s, pt_buf_str(&h->body));
-    /* a request whose answer never came */
-    if (s->gen == (uint64_t)(uintptr_t)h->ud && h->msg_id && pend_take(s->m, s, h->msg_id, &p)) {
-        if (p.kind == P_INIT)
-            srv_fail(s, "%s did not answer initialize", s->url);
-        else
-            pend_fail(&p, "the server sent no answer");
-    }
-}
-
-static void post_flush(void *ud, pt_rt *rt)
-{
-    srv *s = (srv *)ud;
-    const char *bearer;
-    (void)rt;
-    s->post_timer = 0;
-    while (s->outbox) {
-        qmsg *q = s->outbox;
-        hcall *h;
-        uint32_t i;
-        s->outbox = q->next;
-        h = hcall_new(s->m, s, "POST", pt_strz(s->url));
-        if (!h) {
-            free(q);
-            srv_fail(s, "out of memory");
-            return;
-        }
-        h->ud = (void *)(uintptr_t)s->gen;
-        h->msg_id = q->id;
-        h->init = q->init;
-        h->on_msg = post_msg;
-        h->done = post_done;
-        pt_buf_put(&h->body_out, q->data, q->n);
-        free(q);
-        hcall_header(h, "Content-Type", PT_S("application/json"));
-        hcall_header(h, "Accept", PT_S("application/json, text/event-stream"));
-        if (s->version[0])
-            hcall_header(h, "MCP-Protocol-Version", pt_strz(s->version));
-        if (s->session[0])
-            hcall_header(h, "Mcp-Session-Id", pt_strz(s->session));
-        if ((bearer = mcp_auth_bearer(s)))
-            hcall_header(h, "Authorization", pt_strz(bearer));
-        for (i = 0; i < s->nheaders; i++)
-            hcall_header(h, s->headers[i].name, pt_strz(s->headers[i].value));
-        if (!hcall_start(h)) {
-            srv_fail(s, "cannot start a request to %s", s->url);
-            return;
-        }
-    }
-}
-
-static void http_close(srv *s)
-{
-    hcall *h, *next;
-    for (h = s->m->hcalls; h; h = next) {
-        next = h->next;
-        if (h->s == s && h->done == post_done)
-            hcall_free(h);
-    }
-    while (s->outbox) {
-        qmsg *q = s->outbox;
-        s->outbox = q->next;
-        free(q);
-    }
-    if (s->post_timer)
-        pt_rt_timer_cancel(s->m->rt, s->post_timer);
-    s->post_timer = 0;
-}
-
-static void send_msg(srv *s, pt_str msg, int64_t id, bool init)
-{
-    if (!s->http) {
-        if (!s->p)
-            return;
-        pt_buf_puts(&s->outq, msg);
-        pt_buf_putc(&s->outq, '\n');
-        if (s->outq.oom) {
-            srv_fail(s, "out of memory");
-            return;
-        }
-        if (!s->flush_timer)
-            stdio_flush(s);
-        return;
-    }
-    {
-        qmsg *q = (qmsg *)malloc(sizeof *q + msg.n), **pp;
-        if (!q) {
-            srv_fail(s, "out of memory");
-            return;
-        }
-        q->next = NULL;
-        q->id = id;
-        q->init = init;
-        q->n = msg.n;
-        memcpy(q->data, msg.p, msg.n);
-        for (pp = &s->outbox; *pp; pp = &(*pp)->next)
-            ;
-        *pp = q;
-        /* never from inside an HTTP callback: a timer starts the request */
-        if (!s->post_timer)
-            s->post_timer = pt_rt_timer(s->m->rt, 0, post_flush, s);
-    }
 }
 
 /* ---- the server's life ---- */
 
 static void srv_close(srv *s)
 {
-    if (s->http)
-        http_close(s);
-    else
-        stdio_close(s);
+    mcp_io_close(s);
     s->initialized = false;
     s->gen++;
 }
@@ -782,10 +279,10 @@ static void set_failed(srv *s, pt_mcp_state st, const char *msg)
     s->state = st;
     s->failed_at = pt_rt_now(s->m->rt);
     release(s);
-    fail_all(s, msg, true);
+    mcp_fail_all(s, msg, true);
 }
 
-static void srv_fail(srv *s, const char *fmt, ...)
+void mcp_srv_fail(srv *s, const char *fmt, ...)
 {
     char msg[600];
     va_list ap;
@@ -827,7 +324,7 @@ static void srv_connect(srv *s, bool hold)
     }
     if (s->http)
         mcp_auth_load(s);
-    else if (!stdio_start(s))
+    else if (!mcp_stdio_start(s))
         return;
     pt_buf_init(&params, pt_sys_allocator());
     mcp_init_params(&params);
@@ -837,7 +334,7 @@ static void srv_connect(srv *s, bool hold)
 
 void mcp_reconnect(srv *s)
 {
-    fail_all(s, "the server is restarting", false);
+    mcp_fail_all(s, "the server is restarting", false);
     srv_connect(s, false);
 }
 
@@ -998,7 +495,7 @@ static void tools_apply(srv *s)
         t.cancel = rt->fallback.cancel;
         t.ud = s->m;
         if (!pt_rt_tool_add(rt, &t)) {
-            srv_fail(s, "out of memory registering its tools");
+            mcp_srv_fail(s, "out of memory registering its tools");
             return;
         }
     }
@@ -1036,7 +533,7 @@ static void server_request(srv *s, const mcp_msg *msg)
         mcp_reply_error(&b, msg->id, -32601, "pytte does not support this request");
     }
     if (!b.oom)
-        send_msg(s, pt_buf_str(&b), 0, false);
+        mcp_send(s, pt_buf_str(&b), 0, false);
     pt_buf_free(&b);
 }
 
@@ -1120,11 +617,11 @@ static void response(srv *s, const mcp_msg *msg)
     if (!msg->numeric || !pend_take(s->m, s, msg->nid, &p) || p.gen != s->gen)
         return; /* not ours, or from before a restart */
     if (msg->is_error) {
-        char why[600];
+        char why[480]; /* 400 of the message and the code: "listing tools: " fits in s->error */
         snprintf(why, sizeof why, "%.*s (MCP error %lld)", (int)mcp_cut(msg->err_message, 400).n,
                  msg->err_message.p, (long long)msg->err_code);
         if (p.kind == P_INIT)
-            srv_fail(s, "initialize: %s", why);
+            mcp_srv_fail(s, "initialize: %s", why);
         else if (p.kind == P_TOOLS) { /* no tools, then; and why, so it is not a silent 0 */
             tools_apply(s);
             ready(s);
@@ -1190,7 +687,7 @@ static void response(srv *s, const mcp_msg *msg)
     }
 }
 
-static void on_message(srv *s, pt_str json)
+void mcp_on_message(srv *s, pt_str json)
 {
     mcp *m = s->m;
     mcp_msg msg;
@@ -1203,7 +700,7 @@ static void on_message(srv *s, pt_str json)
         pt_arena_init(&tmp, pt_sys_allocator(), 0);
         arr = pt_json_parse(json, &tmp, NULL);
         for (e = pt_json_is(arr, PT_J_ARR) ? arr->child : NULL; e; e = e->next)
-            on_message(s, e->raw);
+            mcp_on_message(s, e->raw);
         pt_arena_free(&tmp);
         return;
     }
@@ -1601,7 +1098,7 @@ static void add_srvs(mcp *m, const pt_rt_mcp_server *servers, uint32_t n, bool *
             return;
         }
         m->srvs[m->nsrvs++] = s;
-        if (m->rt->mcp_started) /* added late: no epoch waits for it */
+        if (m->rt->mcp.started) /* added late: no epoch waits for it */
             srv_connect(s, false);
     }
 }
@@ -1609,7 +1106,7 @@ static void add_srvs(mcp *m, const pt_rt_mcp_server *servers, uint32_t n, bool *
 bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_server *servers, uint32_t n)
 {
     const pt_ai_catalog *cat = rt->c.catalog ? rt->c.catalog : pt_ai_builtin_catalog();
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i, k, nu = 0;
     bool ok = true;
     pt_rt_tool fb;
@@ -1626,7 +1123,7 @@ bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_serv
     if (host)
         m->host = *host;
     pt_arena_init(&m->ar, pt_sys_allocator(), 4096);
-    m->io = (char *)malloc(IO_CHUNK);
+    m->io = (char *)malloc(MCP_IO_CHUNK);
     m->unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *m->unset);
     if (!m->io || !m->unset) {
         mcp_free(m);
@@ -1640,9 +1137,9 @@ bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_serv
         mcp_free(m);
         return false;
     }
-    rt->mcp = m;
-    rt->mcp_free = mcp_free;
-    rt->mcp_start = mcp_start;
+    rt->mcp.ud = m;
+    rt->mcp.free = mcp_free;
+    rt->mcp.start = mcp_start;
     memset(&fb, 0, sizeof fb);
     fb.def.name = PT_S("mcp__");
     fb.run = t_run;
@@ -1654,7 +1151,7 @@ bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_serv
 
 static srv *find_srv(pt_rt *rt, pt_str name)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i;
     for (i = 0; m && i < m->nsrvs; i++)
         if (pt_str_eqz(name, m->srvs[i]->name))
@@ -1664,7 +1161,7 @@ static srv *find_srv(pt_rt *rt, pt_str name)
 
 uint32_t pt_rt_mcp_servers(pt_rt *rt, pt_rt_mcp_info *out, uint32_t max)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i;
     for (i = 0; m && i < m->nsrvs && i < max; i++) {
         srv *s = m->srvs[i];
@@ -1682,7 +1179,7 @@ uint32_t pt_rt_mcp_servers(pt_rt *rt, pt_rt_mcp_info *out, uint32_t max)
 
 const pt_rt_mcp_prompt *pt_rt_mcp_prompts(pt_rt *rt, uint32_t *n)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i, k = 0;
     *n = 0;
     for (i = 0; m && i < m->nsrvs; i++) {
@@ -1700,7 +1197,7 @@ const pt_rt_mcp_prompt *pt_rt_mcp_prompts(pt_rt *rt, uint32_t *n)
 
 const pt_rt_mcp_resource *pt_rt_mcp_resources(pt_rt *rt, uint32_t *n)
 {
-    mcp *m = (mcp *)rt->mcp;
+    mcp *m = (mcp *)rt->mcp.ud;
     uint32_t i, k = 0;
     *n = 0;
     for (i = 0; m && i < m->nsrvs; i++) {
@@ -1783,7 +1280,7 @@ bool pt_rt_mcp_restart(pt_rt *rt, pt_str server)
     srv *s = find_srv(rt, server);
     if (!s)
         return false;
-    fail_all(s, "the server was restarted", true);
+    mcp_fail_all(s, "the server was restarted", true);
     srv_connect(s, false);
     return true;
 }

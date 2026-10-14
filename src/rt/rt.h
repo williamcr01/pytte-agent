@@ -75,8 +75,8 @@ void pt_rt_tool_fallback(pt_rt *rt, const pt_rt_tool *t);
 void pt_rt_tool_remove(pt_rt *rt, pt_str name);
 /* Whether a tool of that name is registered. */
 bool pt_rt_tool_has(pt_rt *rt, pt_str name);
-/* bash, bash_poll, read, write, edit (tools_builtin.c); grep, find, ls
- * (tools_search.c); web_fetch (tools_web.c). */
+/* read, write, edit (tools_builtin.c); bash, bash_poll (tools_bash.c);
+ * grep, find, ls (tools_search.c); web_fetch (tools_web.c). */
 bool pt_rt_add_builtins(pt_rt *rt);
 
 /* A bash command that went to the background. command lives until the

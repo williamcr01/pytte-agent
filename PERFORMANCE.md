@@ -339,14 +339,20 @@ make BUILD=build/direct CURL_LINK=direct build/direct/test/test_http
 ```
 
 For matching before measurements, archive the baseline commit into a separate
-directory, copy `tests/bench_perf.c` into it, and compile that harness with
-`-DPT_BENCH_LEGACY`. The current Makefile's benchmark rule can be used from that
-directory with:
+directory, copy `tests/bench_perf.c` into it, and compile that harness with the
+switch for the baseline's `pt_agent` layout: `-DPT_BENCH_FLAT_AGENT` for a
+baseline from before its state was grouped into sub-structs (`main@f1d8c5c` and
+older), or `-DPT_BENCH_LEGACY` for one that also predates the `objects` arena
+(it implies the first). The current Makefile's benchmark rule can be used from
+that directory with:
 
 ```sh
 make -f /absolute/path/to/current/Makefile BUILD=build/before \
-  CPPFLAGS='-Iinclude -Isrc -DPT_BENCH_LEGACY' build/before/bench/perf
+  CPPFLAGS='-Iinclude -Isrc -DPT_BENCH_FLAT_AGENT' build/before/bench/perf
 ```
+
+`tests/bench_http.c` takes the same switch; build it with the baseline's own
+Makefile, whose source lists match its tree.
 
 Alternate before/after workloads on the same machine and filesystem. The
 benchmark uses synthetic data and no credentials; its temporary state lives

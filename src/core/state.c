@@ -690,7 +690,7 @@ static bool apply_materials(pt_agent *a, const pt_json *r)
 static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
 {
     pt_arena *pa = &a->perm, *sa = &a->scratch;
-    claim *c = &a->newest;
+    claim *c = &a->claims.newest;
     c->id = id;
     c->event = pt_arena_dup(pa, pt_json_gets(r, "event", sa));
     c->token = pt_arena_dup(pa, pt_json_gets(r, "token", sa));

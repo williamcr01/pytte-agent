@@ -71,9 +71,10 @@ build/pytte approve ID TASK yes              # answer a call -p left waiting (ex
 build/pytte -m faux/faux --script tests/faux/slow.json   # offline
 ```
 
-In the TUI: Enter sends (queued while a run is active), Shift+Enter or
-Ctrl-J adds a newline, Esc Esc interrupts, Ctrl-C clears the draft (twice
-on an empty one quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
+In the TUI: Enter sends (queued while a run is active or the session is
+still opening), Shift+Enter or Ctrl-J adds a newline, Esc Esc interrupts,
+Ctrl-C clears the draft, else interrupts the run (twice with nothing to
+clear or interrupt quits), Ctrl-D quits, Ctrl-T cycles how thinking is shown,
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
 `/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. Settings are saved to
@@ -313,7 +314,8 @@ src/rt/                the runtime: the host loop over stores, HTTP, timers
 src/drv/               host drivers: libc, curl HTTP, faux HTTP, posix and
                        memory session stores, processes
 src/tui/               the TUI: terminal, keys, text and widths, Markdown,
-                       the band, the input box, the event loop (app.c)
+                       the band, the input box, the app and its event loop
+                       (app*.c, listed in app.h)
 src/ai/models.gen.inc  the model catalog, generated from models.dev and
                        OpenRouter by scripts/gen_models.py
 src/cli/               the pytte CLI: flags, print mode, sessions, config files

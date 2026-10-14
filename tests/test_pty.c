@@ -308,6 +308,10 @@ static bool has(pty *p, const char *text)
     return strstr(p->scratch.p, text) != NULL;
 }
 
+/* How long to wait for what follows a write that is synced to disk (a
+ * saved setting or key): quick when idle, seconds on a busy disk. */
+#define DURABLE_MS 10000
+
 static bool wait_for(pty *p, const char *text, int ms)
 {
     int64_t end = pt_sys_now_ms() + ms;
@@ -321,13 +325,52 @@ static bool wait_for(pty *p, const char *text, int ms)
     return true;
 }
 
+/* Like wait_for, on the screen with each word-wrapped line whole again:
+ * pytte continues a line on the next row after its hanging indent (two
+ * spaces), and the row break becomes the space it was. For a line whose
+ * wrap depends on the machine, such as one holding a path. */
+static bool wait_for_joined(pty *p, const char *text, int ms)
+{
+    int64_t end = pt_sys_now_ms() + ms;
+    pt_buf j;
+    bool found = false;
+    pt_buf_init(&j, pt_sys_allocator());
+    for (;;) {
+        size_t i;
+        vt_lines(p->v, p->v->rows, &p->scratch);
+        pt_buf_reset(&j);
+        for (i = 0; i < p->scratch.n; i++) {
+            const char *c = p->scratch.p + i;
+            if (*c == '\n' && i + 3 < p->scratch.n && c[1] == ' ' && c[2] == ' ' && c[3] != ' ' && c[3] != '\n') {
+                pt_buf_putc(&j, ' ');
+                i += 2;
+            } else {
+                pt_buf_putc(&j, *c);
+            }
+        }
+        pt_buf_putc(&j, 0);
+        if ((found = strstr(j.p, text) != NULL))
+            break;
+        if (pt_sys_now_ms() > end || p->eof) {
+            fprintf(stderr, "    waiting for \"%s\" (rows joined) timed out; the screen:\n%s\n", text, j.p);
+            break;
+        }
+        pump(p, 20);
+    }
+    pt_buf_free(&j);
+    return found;
+}
+
 /* Until no run is active (the activity line is gone). */
 /* A run is active: the activity row above the input shows its clock. Its
- * dot blinks, so the row starts with "• " or two spaces. */
+ * dot blinks, so the row starts with "• " or two spaces. An input that
+ * waits (for the session to open, or for its MCP fetches) is work still
+ * to come: its row says "queued · " or "fetching · ". */
 static bool busy(pty *p)
 {
     static const char *const what[] = {"working · ", "thinking · ", "writing · ", "compacting · ",
-                                       "waiting for you · ", "running ", "retrying in "};
+                                       "waiting for you · ", "running ", "retrying in ", "queued · ",
+                                       "fetching · "};
     char row[64];
     size_t i;
     for (i = 0; i < sizeof what / sizeof what[0]; i++) {
@@ -703,10 +746,13 @@ static void test_background(void)
     keys(&p, "go\r");
     CHECK(wait_for(&p, "· 1 in background (/ps)", 3000)); /* the footer */
     CHECK(wait_for(&p, "Done.", 20000));
+    /* the second poll ran for what was left of the 8.5 s: its time
+     * (" · 2s" when idle) depends on scheduling */
     CHECK(has(&p, "Starting it.\n\n"
                   "✓ bash  echo first; sleep 8.5; echo second; exit 3 · still running as session 8\n"
                   "✓ poll  session 8 · still running\n"
-                  "✗ poll  session 8 · exit 3 · 2s\n"
+                  "✗ poll  session 8 · exit 3"));
+    CHECK(has(&p, "s\n"
                   "        second\n"
                   "✗ poll  session 8 · failed\n"));
     CHECK(has(&p, "✓ bash  echo up; sleep 100 · still running as session 19\n"));
@@ -876,6 +922,7 @@ static void test_commands(void)
     keys(&p, "full\r");
     CHECK(wait_for(&p, "\n· switched thinking: full\n", 1000));
     CHECK(!has(&p, "› /thinking")); /* a command is not echoed, only what it did */
+    CHECK(wait_for(&p, "saved thinking: full", DURABLE_MS)); /* written by a worker */
     snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "\"tui\": {\n    \"thinking\": \"full\"\n  }"));
@@ -888,16 +935,16 @@ static void test_commands(void)
     keys(&p, "/settings reasoning default\r");
     CHECK(wait_for(&p, "not a value for reasoning: default", 1000));
     keys(&p, "/settings reasoning max\r");
-    CHECK(wait_for(&p, "saved reasoning: max", 1000));
+    CHECK(wait_for(&p, "saved reasoning: max", DURABLE_MS));
     CHECK(wait_for(&p, "faux · max", 1000));
     keys(&p, "/settings\r\x1b[B\x1b[B\x1b[B\x1b[C");
-    CHECK(wait_for(&p, "saved reasoning: off", 1000)); /* max wraps straight to off */
+    CHECK(wait_for(&p, "saved reasoning: off", DURABLE_MS)); /* max wraps straight to off */
     keys(&p, "\x1b[D");
     keys(&p, "\x1b");
     pump(&p, 100);
     CHECK(wait_for(&p, "faux · max", 1000)); /* off wraps straight to max */
     keys(&p, "/settings reasoning low\r");
-    CHECK(wait_for(&p, "saved reasoning: low", 1000));
+    CHECK(wait_for(&p, "saved reasoning: low", DURABLE_MS));
     CHECK(wait_for(&p, "faux · low", 1000));
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "faux · high", 1000));
@@ -934,7 +981,7 @@ static void test_commands(void)
     CHECK(wait_for(&p, "› /login anthropic ***********", 1000));
     CHECK(!has(&p, "sk-test"));
     keys(&p, "\r");
-    CHECK(wait_for(&p, "saved the Anthropic key to ", 1000));
+    CHECK(wait_for(&p, "saved the Anthropic key to ", DURABLE_MS));
     snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "{\n  \"anthropic\": {\n    \"key\": \"sk-test-123\"\n  }\n}\n"));
@@ -1078,7 +1125,7 @@ static void test_history_pager_draft(void)
     CHECK(wait_for(&p, "› first question", 1000));
     keys(&p, "\x03"); /* Ctrl-C clears it */
     keys(&p, "/settings pager cat\r");
-    CHECK(wait_for(&p, "saved pager: cat", 1000));
+    CHECK(wait_for(&p, "saved pager: cat", DURABLE_MS));
     keys(&p, "\x0f"); /* Ctrl-O: the thinking in full, through cat */
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 2000));
     CHECK(wait_for(&p, "› ", 1000));
@@ -1135,6 +1182,7 @@ static void test_early_input(void)
     CHECK(p.v->kitty == 0);
     keys(&p, "early prompt\rremaining draft");
     CHECK(wait_for(&p, "› remaining draft", 1000));
+    CHECK(has(&p, "  queued · early prompt")); /* sent while the session opens: shown waiting */
     /* A late CPR is dropped; late kitty negotiation still enables keys. */
     keys(&p, "\x1b[1;1R\x1b[?0u\x1b[?1;2c");
     CHECK(p.v->kitty == 1 && has(&p, "› remaining draft"));
@@ -1185,7 +1233,7 @@ static void test_blocked_settings(void)
         put(fd, original, sizeof original - 1);
         close(fd);
     }
-    CHECK(wait_for(&p, "saved thinking: hidden", 3000));
+    CHECK(wait_for(&p, "saved thinking: hidden", DURABLE_MS));
     keys(&p, "\x03\x14\x14\x04"); /* Rapid changes are flushed on quit. */
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
@@ -1250,8 +1298,9 @@ static void test_mcp(void)
     CHECK(!has(&p, "contents of note://one")); /* the model's to read */
     CHECK(wait_idle(&p, 3000));
     keys(&p, "/mcp\r");
-    CHECK(wait_for(&p, "t · ready · ", 2000));
-    CHECK(wait_for(&p, "1 resources", 2000)); /* the line wraps where the path ends */
+    /* the line holds test_mcp's path: where it wraps depends on the checkout */
+    CHECK(wait_for_joined(&p, "t · ready · ", 2000));
+    CHECK(wait_for_joined(&p, "--mcp-server ok · 7 tools, 1 prompts, 1 resources", 2000));
     keys(&p, "\x04");
     CHECK(finish(&p, 5000) == 0);
     modes_restored(&p);

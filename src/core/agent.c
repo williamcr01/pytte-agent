@@ -63,7 +63,7 @@ uint32_t pt_core_new_id(pt_agent *a)
 
 uint32_t pt_core_new_fx(pt_agent *a)
 {
-    return ++a->next_fx;
+    return ++a->fxq.next;
 }
 
 bool pt_core_grow(pt_agent *a, void **arr, uint32_t *cap, uint32_t need, size_t elem)
@@ -136,7 +136,7 @@ entry *pt_core_entry(pt_agent *a, uint32_t id)
 
 void pt_core_doc_begin(pt_agent *a, pt_str key)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     uint32_t i, id = 0;
     for (i = 0; i < a->ndocs; i++)
         if (pt_str_eq(a->docs[i].key, key))
@@ -154,16 +154,16 @@ void pt_core_doc_begin(pt_agent *a, pt_str key)
 void pt_core_write_doc(pt_agent *a, pt_str key, pt_str value)
 {
     pt_core_doc_begin(a, key);
-    pt_jw_raw(&a->cw, value);
-    pt_jw_obj_end(&a->cw);
+    pt_jw_raw(&a->commit.w, value);
+    pt_jw_obj_end(&a->commit.w);
 }
 
 void pt_core_after(pt_agent *a, after_kind k, const char *outcome, pt_str error, int64_t until)
 {
-    a->after = k;
-    a->after_outcome = pt_arena_dup(&a->after_a, pt_strz(outcome));
-    a->after_error = pt_arena_dup(&a->after_a, error);
-    a->after_until = until;
+    a->commit.after = k;
+    a->commit.outcome = pt_arena_dup(&a->commit.ar, pt_strz(outcome));
+    a->commit.error = pt_arena_dup(&a->commit.ar, error);
+    a->commit.until = until;
 }
 
 void pt_core_cancel(pt_agent *a, uint32_t task_id, uint32_t fx_id)
@@ -212,8 +212,8 @@ bool pt_core_queue(pt_agent *a, const pt_fx *fx, pt_str bytes)
     uint32_t i;
     queued_fx *q;
     if (fx->kind == PT_FX_LIVE) { /* a newer snapshot replaces a queued one */
-        for (i = 0; i < a->qlen; i++) {
-            q = &a->q[(a->qhead + i) % PT_FXQ];
+        for (i = 0; i < a->fxq.len; i++) {
+            q = &a->fxq.v[(a->fxq.head + i) % PT_FXQ];
             if (q->fx.kind == PT_FX_LIVE && q->fx.task == fx->task) {
                 pt_buf_reset(&q->bytes);
                 pt_buf_puts(&q->bytes, bytes);
@@ -221,13 +221,13 @@ bool pt_core_queue(pt_agent *a, const pt_fx *fx, pt_str bytes)
             }
         }
     }
-    if (a->qlen == PT_FXQ) {
+    if (a->fxq.len == PT_FXQ) {
         if (fx->kind == PT_FX_LIVE)
             return true; /* best effort */
         pt_core_fail(a, PT_FATAL_OOM, "effect queue full", PT_STR_NULL);
         return false;
     }
-    q = &a->q[(a->qhead + a->qlen++) % PT_FXQ];
+    q = &a->fxq.v[(a->fxq.head + a->fxq.len++) % PT_FXQ];
     q->fx = *fx;
     pt_buf_reset(&q->bytes);
     if (fx->kind == PT_FX_LIVE)
@@ -239,34 +239,34 @@ bool pt_core_queue(pt_agent *a, const pt_fx *fx, pt_str bytes)
 
 void pt_core_commit_begin(pt_agent *a, uint32_t task_id)
 {
-    pt_log_begin(&a->commit, &a->cw, a->seq + 1, pt_core_now(a));
-    a->commit_task = task_id;
-    a->after = AFTER_NONE;
-    a->after_live_del = 0;
-    a->commit_close = false;
-    pt_arena_reset(&a->after_a);
+    pt_log_begin(&a->commit.buf, &a->commit.w, a->seq + 1, pt_core_now(a));
+    a->commit.task = task_id;
+    a->commit.after = AFTER_NONE;
+    a->commit.live_del = 0;
+    a->commit.close = false;
+    pt_arena_reset(&a->commit.ar);
 }
 
 bool pt_core_commit_end(pt_agent *a)
 {
     pt_fx fx;
     task *t;
-    pt_log_end(&a->commit, &a->cw);
-    if (a->commit.oom) {
+    pt_log_end(&a->commit.buf, &a->commit.w);
+    if (a->commit.buf.oom) {
         pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
         return false;
     }
     memset(&fx, 0, sizeof fx);
     fx.kind = PT_FX_COMMIT;
     fx.id = pt_core_new_fx(a);
-    fx.task = a->commit_task;
-    fx.bytes = pt_buf_str(&a->commit);
+    fx.task = a->commit.task;
+    fx.bytes = pt_buf_str(&a->commit.buf);
     fx.sync = !a->o.config.no_sync;
     if (!pt_core_queue(a, &fx, PT_STR_NULL))
         return false;
-    a->commit_fx = fx.id;
-    a->commit_out = true;
-    t = a->commit_task ? pt_core_task(a, a->commit_task) : NULL;
+    a->commit.fx = fx.id;
+    a->commit.out = true;
+    t = a->commit.task ? pt_core_task(a, a->commit.task) : NULL;
     if (t)
         t->fx = fx.id;
     return true;
@@ -274,12 +274,12 @@ bool pt_core_commit_end(pt_agent *a)
 
 static void commit_landed(pt_agent *a, const char *error)
 {
-    task *t = a->commit_task ? pt_core_task(a, a->commit_task) : NULL;
-    pt_str line = pt_buf_str(&a->commit);
+    task *t = a->commit.task ? pt_core_task(a, a->commit.task) : NULL;
+    pt_str line = pt_buf_str(&a->commit.buf);
     const pt_json *root;
     uint64_t seq;
     pt_event ev;
-    a->commit_out = false;
+    a->commit.out = false;
     if (t)
         t->fx = 0;
     if (error) {
@@ -297,21 +297,21 @@ static void commit_landed(pt_agent *a, const char *error)
     a->seq = seq;
     memset(&ev, 0, sizeof ev);
     ev.kind = PT_E_COMMITTED;
-    ev.task = a->commit_task;
+    ev.task = a->commit.task;
     ev.line = line;
     pt_core_emit(a, &ev);
-    if (a->after_live_del)
-        pt_core_live_del(a, a->after_live_del);
-    if (a->after != AFTER_NONE) {
+    if (a->commit.live_del)
+        pt_core_live_del(a, a->commit.live_del);
+    if (a->commit.after != AFTER_NONE) {
         memset(&ev, 0, sizeof ev);
-        ev.kind = a->after == AFTER_RETRY ? PT_E_RETRY : a->after == AFTER_COMPACT ? PT_E_COMPACT : PT_E_RUN_DONE;
-        ev.task = a->commit_task;
-        ev.outcome = a->after_outcome;
-        ev.error = a->after_error;
-        ev.until = a->after_until;
+        ev.kind = a->commit.after == AFTER_RETRY ? PT_E_RETRY : a->commit.after == AFTER_COMPACT ? PT_E_COMPACT : PT_E_RUN_DONE;
+        ev.task = a->commit.task;
+        ev.outcome = a->commit.outcome;
+        ev.error = a->commit.error;
+        ev.until = a->commit.until;
         pt_core_emit(a, &ev);
     }
-    if (a->commit_close)
+    if (a->commit.close)
         a->closed = true;
 }
 
@@ -319,7 +319,7 @@ static void commit_landed(pt_agent *a, const char *error)
 
 void pt_core_entry_head(pt_agent *a, uint32_t id, const char *kind, uint32_t epoch)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     pt_jw_obj(w);
     pt_jw_key(w, "t");
     pt_jw_strz(w, "entry");
@@ -340,14 +340,14 @@ void pt_core_entry_begin(pt_agent *a, uint32_t id, const char *kind)
 
 void pt_core_entry_end(pt_agent *a)
 {
-    pt_jw_obj_end(&a->cw);
-    pt_jw_obj_end(&a->cw);
+    pt_jw_obj_end(&a->commit.w);
+    pt_jw_obj_end(&a->commit.w);
 }
 
 static void build_create(pt_agent *a)
 {
-    pt_jw *w = &a->cw;
-    const pt_session_cfg *c = &a->create;
+    pt_jw *w = &a->commit.w;
+    const pt_session_cfg *c = &a->req.cfg;
     pt_core_commit_begin(a, 0);
     pt_jw_obj(w);
     pt_jw_key(w, "t");
@@ -389,7 +389,7 @@ static void build_create(pt_agent *a)
         pt_jw_bool(w, true);
     }
     pt_core_entry_end(a);
-    a->want_create = false;
+    a->req.create = false;
     pt_core_commit_end(a);
 }
 
@@ -440,27 +440,27 @@ static const char *close_state(pt_agent *a)
 
 static void write_claim(pt_agent *a, const char *event)
 {
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     pt_jw_obj(w);
     pt_jw_key(w, "t");
     pt_jw_strz(w, "claim");
     pt_jw_key(w, "id");
-    pt_jw_uint(w, a->mine);
+    pt_jw_uint(w, a->claims.mine);
     pt_jw_key(w, "event");
     pt_jw_strz(w, event);
     pt_jw_key(w, "token");
-    pt_jw_str(w, a->my_token);
+    pt_jw_str(w, a->claims.token);
     pt_jw_key(w, "host");
-    pt_jw_str(w, a->me.host);
+    pt_jw_str(w, a->claims.me.host);
     pt_jw_key(w, "boot");
-    pt_jw_str(w, a->me.boot);
+    pt_jw_str(w, a->claims.me.boot);
     pt_jw_key(w, "pid");
-    pt_jw_int(w, a->me.pid);
+    pt_jw_int(w, a->claims.me.pid);
     pt_jw_key(w, "opened");
-    pt_jw_int(w, a->my_opened);
-    if (*event == 'o' && a->takeover.n) {
+    pt_jw_int(w, a->claims.opened);
+    if (*event == 'o' && a->claims.takeover.n) {
         pt_jw_key(w, "takeover");
-        pt_jw_str(w, a->takeover);
+        pt_jw_str(w, a->claims.takeover);
     }
     if (*event == 'c') {
         pt_jw_key(w, "closed");
@@ -481,12 +481,12 @@ static void build_open(pt_agent *a)
     if (a->o.random)
         a->o.random(a->o.ud, r, sizeof r);
     hex(tok, r, sizeof r);
-    a->my_token = pt_arena_dup(&a->reqs, (pt_str){tok, 16});
-    a->my_opened = pt_core_now(a);
+    a->claims.token = pt_arena_dup(&a->req.ar, (pt_str){tok, 16});
+    a->claims.opened = pt_core_now(a);
     pt_core_commit_begin(a, 0);
-    a->mine = pt_core_new_id(a);
+    a->claims.mine = pt_core_new_id(a);
     write_claim(a, "open");
-    a->want_open = false;
+    a->req.open = false;
     pt_core_commit_end(a);
 }
 
@@ -494,8 +494,8 @@ static void build_close(pt_agent *a)
 {
     pt_core_commit_begin(a, 0);
     write_claim(a, "close");
-    a->want_close = false;
-    a->commit_close = true;
+    a->req.close = false;
+    a->commit.close = true;
     pt_core_commit_end(a);
 }
 
@@ -524,7 +524,7 @@ static void write_placement(pt_agent *a, input *in)
 {
     task t;
     input placed = *in;
-    pt_jw *w = &a->cw;
+    pt_jw *w = &a->commit.w;
     uint32_t entry_id = pt_core_new_id(a), run_id = pt_core_new_id(a);
     placed.status = IN_PLACED;
     placed.run = run_id;
@@ -561,7 +561,7 @@ static void write_placement(pt_agent *a, input *in)
  * while its text is still being stored as a blob. */
 static bool build_submit(pt_agent *a)
 {
-    sub s = a->subs[0];
+    sub s = a->subs.v[0];
     input in;
     bool place = !active_run(a) && !first_queued(a);
     if (s.kind == INK_USER && s.text.n >= PT_BLOB_MIN && !s.blob_tried) {
@@ -570,8 +570,8 @@ static bool build_submit(pt_agent *a)
             return false;
         memset(&fx, 0, sizeof fx);
         fx.kind = PT_FX_BLOB;
-        fx.id = a->subs[0].blob_fx = pt_core_new_fx(a);
-        fx.bytes = s.text; /* in subs_a until this submission is committed */
+        fx.id = a->subs.v[0].blob_fx = pt_core_new_fx(a);
+        fx.bytes = s.text; /* in subs.ar until this submission is committed */
         return pt_core_queue(a, &fx, PT_STR_NULL);
     }
     memset(&in, 0, sizeof in);
@@ -588,24 +588,24 @@ static bool build_submit(pt_agent *a)
     if (place && s.kind == INK_USER)
         write_placement(a, &in);
     else
-        pt_write_input(&a->cw, &in);
+        pt_write_input(&a->commit.w, &in);
     pt_core_commit_end(a);
-    memmove(a->subs, a->subs + 1, sizeof(sub) * --a->nsubs);
-    if (!a->nsubs)
-        pt_arena_reset(&a->subs_a);
+    memmove(a->subs.v, a->subs.v + 1, sizeof(sub) * --a->subs.n);
+    if (!a->subs.n)
+        pt_arena_reset(&a->subs.ar);
     return true;
 }
 
 void pt_fx_blob(pt_agent *a, uint32_t fx, pt_str ref)
 {
     uint32_t i;
-    for (i = 0; i < a->nsubs; i++)
-        if (a->subs[i].blob_fx == fx) {
-            a->subs[i].blob_fx = 0;
-            a->subs[i].blob_tried = true;
-            a->subs[i].blob = ref.n ? pt_arena_dup(&a->subs_a, ref) : PT_STR_NULL;
-            if (a->subs_a.oom) /* inline, then */
-                a->subs[i].blob = PT_STR_NULL;
+    for (i = 0; i < a->subs.n; i++)
+        if (a->subs.v[i].blob_fx == fx) {
+            a->subs.v[i].blob_fx = 0;
+            a->subs.v[i].blob_tried = true;
+            a->subs.v[i].blob = ref.n ? pt_arena_dup(&a->subs.ar, ref) : PT_STR_NULL;
+            if (a->subs.ar.oom) /* inline, then */
+                a->subs.v[i].blob = PT_STR_NULL;
             return;
         }
 }
@@ -635,15 +635,15 @@ static bool step(pt_agent *a)
     bool pending = false, exclusive = false; /* in round: a call not done; one that holds up the rest */
     input *q;
     pt_arena_reset(&a->scratch);
-    if (a->commit_out || a->fatal)
+    if (a->commit.out || a->fatal)
         return false;
-    if (a->want_create) {
+    if (a->req.create) {
         build_create(a);
         return true;
     }
     if (!a->loaded)
         return false;
-    if (a->want_open) {
+    if (a->req.open) {
         build_open(a);
         return true;
     }
@@ -661,19 +661,19 @@ static bool step(pt_agent *a)
     if (a->closing) {
         /* Input accepted while the opening commit was pending must still
          * reach the log. Leave its run pending for the next host. */
-        if (a->nsubs)
+        if (a->subs.n)
             return build_submit(a);
-        if (!a->want_close) {
+        if (!a->req.close) {
             a->closed = true;
             return false;
         }
         build_close(a);
         return true;
     }
-    if (a->nsubs && build_submit(a))
+    if (a->subs.n && build_submit(a))
         return true;
-    if (a->want_compact) {
-        a->want_compact = false;
+    if (a->req.compact) {
+        a->req.compact = false;
         if (!active_run(a) && pt_compact_possible(a)) {
             entry *last = pt_core_last_entry(a);
             pt_core_commit_begin(a, 0);
@@ -711,7 +711,7 @@ static bool step(pt_agent *a)
         } else if (!t->fx && (t->kind == TASK_COMPACT ? pt_compact_step(a, t) : pt_run_step(a, t))) {
             return true;
         }
-        if (a->fatal || a->commit_out)
+        if (a->fatal || a->commit.out)
             return false;
     }
     return false;
@@ -723,11 +723,11 @@ int pt_poll(pt_agent *a, pt_fx *out)
     pt_run_poll_begin(a);
     if (a->fatal)
         return 0;
-    if (!a->qlen)
+    if (!a->fxq.len)
         step(a);
     if (a->fatal)
         return 0;
-    if (!a->qlen) {
+    if (!a->fxq.len) {
         if (pt_idle(a) && !a->idle_sent) {
             pt_event ev;
             a->idle_sent = true;
@@ -737,9 +737,9 @@ int pt_poll(pt_agent *a, pt_fx *out)
         }
         return 0;
     }
-    q = &a->q[a->qhead];
-    a->qhead = (a->qhead + 1) % PT_FXQ;
-    a->qlen--;
+    q = &a->fxq.v[a->fxq.head];
+    a->fxq.head = (a->fxq.head + 1) % PT_FXQ;
+    a->fxq.len--;
     *out = q->fx;
     if (out->kind == PT_FX_CANCEL)
         pt_run_cancel_delivered(a, out->cancel);
@@ -756,8 +756,8 @@ int pt_poll(pt_agent *a, pt_fx *out)
 bool pt_idle(const pt_agent *a)
 {
     uint32_t i;
-    if (a->fatal || a->commit_out || a->qlen || a->want_create || a->want_open || a->want_close ||
-        a->nsubs || a->want_compact || !a->loaded)
+    if (a->fatal || a->commit.out || a->fxq.len || a->req.create || a->req.open || a->req.close ||
+        a->subs.n || a->req.compact || !a->loaded)
         return false;
     if (a->closing)
         return a->closed;
@@ -789,7 +789,7 @@ void pt_fx_done(pt_agent *a, uint32_t fx, const char *error)
     uint32_t i;
     if (a->fatal)
         return;
-    if (a->commit_out && fx == a->commit_fx) {
+    if (a->commit.out && fx == a->commit.fx) {
         commit_landed(a, error);
         return;
     }
@@ -829,16 +829,16 @@ pt_agent *pt_new(const pt_opts *o)
     pt_arena_init(&a->epoch, a->al, 4096);
     pt_arena_init(&a->scratch, a->al, 8192);
     pt_arena_init(&a->objects, a->al, 1024);
-    pt_arena_init(&a->reqs, a->al, 1024);
-    pt_arena_init(&a->subs_a, a->al, 1024);
-    pt_arena_init(&a->after_a, a->al, 1024);
-    pt_buf_init(&a->commit, a->al);
+    pt_arena_init(&a->req.ar, a->al, 1024);
+    pt_arena_init(&a->subs.ar, a->al, 1024);
+    pt_arena_init(&a->commit.ar, a->al, 1024);
+    pt_buf_init(&a->commit.buf, a->al);
     pt_buf_init(&a->live_out, a->al);
-    pt_buf_init(&a->mat_system, a->al);
-    pt_buf_init(&a->mat_tools, a->al);
-    pt_buf_init(&a->mat_skills, a->al);
+    pt_buf_init(&a->mat.system, a->al);
+    pt_buf_init(&a->mat.tools, a->al);
+    pt_buf_init(&a->mat.skills, a->al);
     for (i = 0; i < PT_FXQ; i++)
-        pt_buf_init(&a->q[i].bytes, a->al);
+        pt_buf_init(&a->fxq.v[i].bytes, a->al);
     a->next_id = 1;
     a->o.config.model = pt_arena_dup(&a->perm, o->config.model);
     a->o.config.compact_model = pt_arena_dup(&a->perm, o->config.compact_model);
@@ -879,21 +879,21 @@ void pt_free(pt_agent *a)
     a->al.fn(a->al.ud, a->tasks, sizeof(task *) * a->tcap, 0);
     a->al.fn(a->al.ud, a->inputs, sizeof(input *) * a->icap, 0);
     a->al.fn(a->al.ud, a->entries, sizeof(entry) * a->ecap, 0);
-    a->al.fn(a->al.ud, a->subs, sizeof(sub) * a->scap, 0);
+    a->al.fn(a->al.ud, a->subs.v, sizeof(sub) * a->subs.cap, 0);
     for (i = 0; i < PT_FXQ; i++)
-        pt_buf_free(&a->q[i].bytes);
-    pt_buf_free(&a->commit);
+        pt_buf_free(&a->fxq.v[i].bytes);
+    pt_buf_free(&a->commit.buf);
     pt_buf_free(&a->live_out);
-    pt_buf_free(&a->mat_system);
-    pt_buf_free(&a->mat_tools);
-    pt_buf_free(&a->mat_skills);
+    pt_buf_free(&a->mat.system);
+    pt_buf_free(&a->mat.tools);
+    pt_buf_free(&a->mat.skills);
     pt_arena_free(&a->perm);
     pt_arena_free(&a->epoch);
     pt_arena_free(&a->scratch);
     pt_arena_free(&a->objects);
-    pt_arena_free(&a->reqs);
-    pt_arena_free(&a->subs_a);
-    pt_arena_free(&a->after_a);
+    pt_arena_free(&a->req.ar);
+    pt_arena_free(&a->subs.ar);
+    pt_arena_free(&a->commit.ar);
     a->al.fn(a->al.ud, a, sizeof *a, 0);
 }
 
@@ -915,7 +915,7 @@ void pt_set_config(pt_agent *a, const pt_config *c)
 
 bool pt_create(pt_agent *a, const pt_session_cfg *c)
 {
-    if (a->loaded || a->want_create) {
+    if (a->loaded || a->req.create) {
         pt_core_seterr(a, "the session already exists", PT_STR_NULL);
         return false;
     }
@@ -923,16 +923,16 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
         pt_core_seterr(a, "skills must be a JSON array and prompt an object", PT_STR_NULL);
         return false;
     }
-    a->create.skills = pt_arena_dup(&a->reqs, c->skills);
-    a->create.prompt = pt_arena_dup(&a->reqs, c->prompt);
+    a->req.cfg.skills = pt_arena_dup(&a->req.ar, c->skills);
+    a->req.cfg.prompt = pt_arena_dup(&a->req.ar, c->prompt);
     a->prompt = pt_arena_dup(&a->perm, c->prompt);
-    a->create.cwd = pt_arena_dup(&a->reqs, c->cwd);
-    a->create.provisional = c->provisional;
-    a->create.host = pt_arena_dup(&a->reqs, c->host);
-    a->create.system = pt_arena_dup(&a->reqs, c->system);
-    a->create.ntools = 0;
+    a->req.cfg.cwd = pt_arena_dup(&a->req.ar, c->cwd);
+    a->req.cfg.provisional = c->provisional;
+    a->req.cfg.host = pt_arena_dup(&a->req.ar, c->host);
+    a->req.cfg.system = pt_arena_dup(&a->req.ar, c->system);
+    a->req.cfg.ntools = 0;
     if (c->ntools) {
-        pt_tool_def *d = (pt_tool_def *)pt_arena_alloc(&a->reqs, sizeof(pt_tool_def) * c->ntools);
+        pt_tool_def *d = (pt_tool_def *)pt_arena_alloc(&a->req.ar, sizeof(pt_tool_def) * c->ntools);
         uint32_t i;
         if (!d) {
             pt_core_fail(a, PT_FATAL_OOM, "out of memory creating session", PT_STR_NULL);
@@ -940,19 +940,19 @@ bool pt_create(pt_agent *a, const pt_session_cfg *c)
         }
         for (i = 0; i < c->ntools; i++) {
             d[i] = c->tools[i];
-            d[i].name = pt_arena_dup(&a->reqs, c->tools[i].name);
-            d[i].description = pt_arena_dup(&a->reqs, c->tools[i].description);
-            d[i].schema = pt_arena_dup(&a->reqs, c->tools[i].schema);
-            d[i].source = pt_arena_dup(&a->reqs, c->tools[i].source);
+            d[i].name = pt_arena_dup(&a->req.ar, c->tools[i].name);
+            d[i].description = pt_arena_dup(&a->req.ar, c->tools[i].description);
+            d[i].schema = pt_arena_dup(&a->req.ar, c->tools[i].schema);
+            d[i].source = pt_arena_dup(&a->req.ar, c->tools[i].source);
         }
-        a->create.tools = d;
-        a->create.ntools = c->ntools;
+        a->req.cfg.tools = d;
+        a->req.cfg.ntools = c->ntools;
     }
-    if (a->reqs.oom || a->perm.oom) {
+    if (a->req.ar.oom || a->perm.oom) {
         pt_core_fail(a, PT_FATAL_OOM, "out of memory creating session", PT_STR_NULL);
         return false;
     }
-    a->want_create = true;
+    a->req.create = true;
     a->loaded = true;
     a->have_session = true;
     a->cur_epoch = 1;
@@ -1009,12 +1009,12 @@ bool pt_load_done(pt_agent *a)
 
 bool pt_open(pt_agent *a, const pt_identity *me, bool force)
 {
-    const claim *c = &a->newest;
+    const claim *c = &a->claims.newest;
     if (!a->loaded) {
         pt_core_seterr(a, "no session loaded", PT_STR_NULL);
         return false;
     }
-    a->takeover = PT_STR_NULL;
+    a->claims.takeover = PT_STR_NULL;
     if (c->id && pt_str_eqz(c->event, "open") && !pt_str_eq(c->host, me->host)) {
         if (!force) {
             pt_buf b;
@@ -1028,13 +1028,13 @@ bool pt_open(pt_agent *a, const pt_identity *me, bool force)
             pt_buf_free(&b);
             return false;
         }
-        a->takeover = pt_arena_dup(&a->reqs, c->token);
+        a->claims.takeover = pt_arena_dup(&a->req.ar, c->token);
     }
-    a->me.host = pt_arena_dup(&a->reqs, me->host);
-    a->me.boot = pt_arena_dup(&a->reqs, me->boot);
-    a->me.pid = me->pid;
-    a->want_open = true;
-    return !a->reqs.oom;
+    a->claims.me.host = pt_arena_dup(&a->req.ar, me->host);
+    a->claims.me.boot = pt_arena_dup(&a->req.ar, me->boot);
+    a->claims.me.pid = me->pid;
+    a->req.open = true;
+    return !a->req.ar.oom;
 }
 
 void pt_close(pt_agent *a)
@@ -1042,9 +1042,9 @@ void pt_close(pt_agent *a)
     if (a->closing)
         return;
     a->closing = true;
-    if (a->mine || a->want_open)
-        a->want_close = true;
-    else if (!a->want_create && !a->commit_out && !a->nsubs)
+    if (a->claims.mine || a->req.open)
+        a->req.close = true;
+    else if (!a->req.create && !a->commit.out && !a->subs.n)
         a->closed = true;
 }
 
@@ -1064,23 +1064,23 @@ bool pt_submit(pt_agent *a, const pt_input *in)
         for (i = 0; i < a->ninputs; i++)
             if (pt_str_eq(a->inputs[i]->req, in->req))
                 return true;
-        for (i = 0; i < a->nsubs; i++)
-            if (pt_str_eq(a->subs[i].req, in->req))
+        for (i = 0; i < a->subs.n; i++)
+            if (pt_str_eq(a->subs.v[i].req, in->req))
                 return true;
     }
-    if (!pt_core_grow(a, (void **)&a->subs, &a->scap, a->nsubs + 1, sizeof(sub)))
+    if (!pt_core_grow(a, (void **)&a->subs.v, &a->subs.cap, a->subs.n + 1, sizeof(sub)))
         return false;
     {
         sub pending;
         memset(&pending, 0, sizeof pending);
-        pending.text = pt_arena_dup(&a->subs_a, in->text);
-        pending.req = pt_arena_dup(&a->subs_a, in->req);
+        pending.text = pt_arena_dup(&a->subs.ar, in->text);
+        pending.req = pt_arena_dup(&a->subs.ar, in->req);
         pending.note = in->note;
-        if (a->subs_a.oom) {
+        if (a->subs.ar.oom) {
             pt_core_fail(a, PT_FATAL_OOM, "out of memory queueing submission", PT_STR_NULL);
             return false;
         }
-        a->subs[a->nsubs++] = pending;
+        a->subs.v[a->subs.n++] = pending;
     }
     a->idle_sent = false;
     return true;
@@ -1088,9 +1088,9 @@ bool pt_submit(pt_agent *a, const pt_input *in)
 
 bool pt_compact(pt_agent *a)
 {
-    if (a->fatal || active_run(a) || a->want_compact || !pt_compact_possible(a))
+    if (a->fatal || active_run(a) || a->req.compact || !pt_compact_possible(a))
         return false;
-    a->want_compact = true;
+    a->req.compact = true;
     a->idle_sent = false;
     return true;
 }
@@ -1121,7 +1121,7 @@ pt_str pt_doc(const pt_agent *a, pt_str key)
 
 pt_str pt_session_cwd(const pt_agent *a)
 {
-    return a->cwd.n ? a->cwd : a->create.cwd;
+    return a->cwd.n ? a->cwd : a->req.cfg.cwd;
 }
 
 pt_str pt_session_model(const pt_agent *a)

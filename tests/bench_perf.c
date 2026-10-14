@@ -8,6 +8,26 @@
 #include <time.h>
 
 #include "core/core.h"
+
+/* pt_agent's field paths. A baseline from before its state was grouped
+ * (main@f1d8c5c and older) builds with -DPT_BENCH_FLAT_AGENT, which
+ * PT_BENCH_LEGACY implies: that layout is older still. */
+#if defined(PT_BENCH_LEGACY) && !defined(PT_BENCH_FLAT_AGENT)
+#define PT_BENCH_FLAT_AGENT
+#endif
+#ifdef PT_BENCH_FLAT_AGENT
+#define AGENT_REQ_AR(a) ((a)->reqs)
+#define AGENT_SUBS_AR(a) ((a)->subs_a)
+#define AGENT_COMMIT_AR(a) ((a)->after_a)
+#define AGENT_COMMIT_BUF(a) ((a)->commit)
+#define AGENT_FXQ(a) ((a)->q)
+#else
+#define AGENT_REQ_AR(a) ((a)->req.ar)
+#define AGENT_SUBS_AR(a) ((a)->subs.ar)
+#define AGENT_COMMIT_AR(a) ((a)->commit.ar)
+#define AGENT_COMMIT_BUF(a) ((a)->commit.buf)
+#define AGENT_FXQ(a) ((a)->fxq.v)
+#endif
 #include "tui/tui.h"
 #include "base/arena.c"
 
@@ -181,16 +201,16 @@ static void core_work(counts *c, size_t reply, unsigned turns)
 #ifndef PT_BENCH_LEGACY
     arena_usage(c, &h.a->objects);
 #endif
-    arena_usage(c, &h.a->reqs);
-    arena_usage(c, &h.a->subs_a);
-    arena_usage(c, &h.a->after_a);
+    arena_usage(c, &AGENT_REQ_AR(h.a));
+    arena_usage(c, &AGENT_SUBS_AR(h.a));
+    arena_usage(c, &AGENT_COMMIT_AR(h.a));
     for (i = 0; i < h.a->ntasks; i++)
         arena_usage(c, &h.a->tasks[i]->a);
     for (i = 0; i < h.a->ninputs; i++)
         arena_usage(c, &h.a->inputs[i]->a);
-    c->buffer_cap = h.a->commit.cap + h.a->live_out.cap;
+    c->buffer_cap = AGENT_COMMIT_BUF(h.a).cap + h.a->live_out.cap;
     for (i = 0; i < PT_FXQ; i++)
-        c->buffer_cap += h.a->q[i].bytes.cap;
+        c->buffer_cap += AGENT_FXQ(h.a)[i].bytes.cap;
     pt_free(h.a);
     pt_buf_free(&h.log);
     pt_buf_free(&h.live);

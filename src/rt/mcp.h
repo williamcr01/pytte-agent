@@ -1,6 +1,6 @@
 /* MCP inside the runtime: the protocol codec (mcp_proto.c, pure: no I/O,
- * so the fuzzer links it alone), the client (mcp.c) and OAuth for remote
- * servers (mcp_oauth.c). */
+ * so the fuzzer links it alone), the client (mcp.c), its transports
+ * (mcp_io.c) and OAuth for remote servers (mcp_oauth.c). */
 #ifndef PT_RT_MCP_H
 #define PT_RT_MCP_H
 

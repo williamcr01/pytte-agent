@@ -65,8 +65,8 @@ int LLVMFuzzerTestOneInput(const unsigned char *data, size_t n)
     skills[0].path = PT_S("/a/SKILL.md");
     skills[1].name = PT_S("b-c.d");
     skills[1].path = PT_S("/b/SKILL.md");
-    rt.skills = skills;
-    rt.nskills = 2;
+    rt.skills.v = skills;
+    rt.skills.n = 2;
     pt_buf_init(&f.name, pt_sys_allocator());
     pt_buf_init(&f.description, pt_sys_allocator());
     parse_skill(file, &f);

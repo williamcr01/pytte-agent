@@ -40,10 +40,10 @@ pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a)
         snprintf(rt->session, sizeof rt->session, "%s", c->session);
     rt->c.session = NULL;
     pt_buf_init(&rt->scratch, pt_sys_allocator());
-    pt_buf_init(&rt->mat_cur, pt_sys_allocator());
+    pt_buf_init(&rt->mat.cur, pt_sys_allocator());
     pt_arena_init(&rt->ar, pt_sys_allocator(), 4096);
-    pt_arena_init(&rt->prompt_ar, pt_sys_allocator(), 0);
-    pt_arena_init(&rt->skills_ar, pt_sys_allocator(), 0);
+    pt_arena_init(&rt->prompt.ar, pt_sys_allocator(), 0);
+    pt_arena_init(&rt->skills.ar, pt_sys_allocator(), 0);
     return rt;
 }
 
@@ -171,12 +171,12 @@ void pt_rt_free(pt_rt *rt)
         return;
     }
     rt->free_waiting = false;
-    if (rt->mcp_free)
-        rt->mcp_free(rt->mcp);
-    rt->mcp_free = NULL;
+    if (rt->mcp.free)
+        rt->mcp.free(rt->mcp.ud);
+    rt->mcp.free = NULL;
     pt_rt_tools_free(rt);
     pt_rt_prompt_free(rt);
-    pt_buf_free(&rt->mat_cur);
+    pt_buf_free(&rt->mat.cur);
     free(rt->reqs);
     free(rt->sleeps);
     free(rt->timers);
@@ -195,7 +195,7 @@ pt_http_driver *pt_rt_http(const pt_rt *rt)
 
 void pt_rt_use_worker(pt_rt *rt, pt_worker *worker)
 {
-    rt->worker = worker;
+    rt->io.worker = worker;
 }
 
 /* ---- recovery ---- */
@@ -316,10 +316,10 @@ static void store_io(void *ud)
 {
     pt_rt *rt = (pt_rt *)ud;
     pt_store *st = rt->c.store;
-    const pt_fx *fx = &rt->io;
+    const pt_fx *fx = &rt->io.fx;
     uint64_t size;
-    rt->io_ok = false;
-    rt->io_error[0] = 0;
+    rt->io.ok = false;
+    rt->io.error[0] = 0;
     if (fx->kind == PT_FX_BLOB) {
         static const char digits[] = "0123456789abcdef";
         unsigned char d[32];
@@ -335,13 +335,13 @@ static void store_io(void *ud)
         pt_sha256_init(&sh);
         pt_sha256_update(&sh, fx->bytes.p, fx->bytes.n);
         pt_sha256_final(&sh, d);
-        memcpy(rt->io_blob, "sha256:", 7);
+        memcpy(rt->io.blob, "sha256:", 7);
         for (i = 0; i < 32; i++) {
-            rt->io_blob[7 + 2 * i] = digits[d[i] >> 4];
-            rt->io_blob[8 + 2 * i] = digits[d[i] & 15];
+            rt->io.blob[7 + 2 * i] = digits[d[i] >> 4];
+            rt->io.blob[8 + 2 * i] = digits[d[i] & 15];
         }
-        rt->io_blob[71] = 0;
-        rt->io_ok = st->blob_commit(st, h, rt->io_blob + 7) == 0;
+        rt->io.blob[71] = 0;
+        rt->io.ok = st->blob_commit(st, h, rt->io.blob + 7) == 0;
         return;
     }
     if (fx->kind == PT_FX_LIVE) {
@@ -349,45 +349,45 @@ static void store_io(void *ud)
             st->live_put(st, fx->task, fx->bytes.p, fx->bytes.n);
         else
             st->live_del(st, fx->task);
-        rt->io_ok = true; /* snapshots remain best effort */
+        rt->io.ok = true; /* snapshots remain best effort */
         return;
     }
     if (st->size(st, &size) != 0) {
-        snprintf(rt->io_error, sizeof rt->io_error, "%s", st->err);
+        snprintf(rt->io.error, sizeof rt->io.error, "%s", st->err);
         return;
     }
     if (size != rt->log_end) {
-        snprintf(rt->io_error, sizeof rt->io_error, "the log was modified by another writer");
+        snprintf(rt->io.error, sizeof rt->io.error, "the log was modified by another writer");
         return;
     }
     if (st->append(st, fx->bytes.p, fx->bytes.n, fx->sync) != 0) {
-        snprintf(rt->io_error, sizeof rt->io_error, "%s", st->err);
+        snprintf(rt->io.error, sizeof rt->io.error, "%s", st->err);
         return;
     }
-    rt->io_ok = true;
+    rt->io.ok = true;
 }
 
 static void io_done(pt_rt *rt)
 {
-    rt->io_pending = false;
-    if (rt->io.kind == PT_FX_COMMIT) {
-        if (rt->io_ok)
-            rt->log_end += rt->io.bytes.n;
-        pt_fx_done(rt->a, rt->io.id, rt->io_ok ? NULL : rt->io_error);
-    } else if (rt->io.kind == PT_FX_BLOB) {
-        pt_fx_blob(rt->a, rt->io.id, rt->io_ok ? pt_strz(rt->io_blob) : PT_STR_NULL);
+    rt->io.pending = false;
+    if (rt->io.fx.kind == PT_FX_COMMIT) {
+        if (rt->io.ok)
+            rt->log_end += rt->io.fx.bytes.n;
+        pt_fx_done(rt->a, rt->io.fx.id, rt->io.ok ? NULL : rt->io.error);
+    } else if (rt->io.fx.kind == PT_FX_BLOB) {
+        pt_fx_blob(rt->a, rt->io.fx.id, rt->io.ok ? pt_strz(rt->io.blob) : PT_STR_NULL);
     }
 }
 
 static bool finish_io(pt_rt *rt, bool wait)
 {
-    if (!rt->io_pending)
+    if (!rt->io.pending)
         return false;
-    while (!pt_worker_finish(rt->worker)) {
+    while (!pt_worker_finish(rt->io.worker)) {
         pt_waitfd fd;
         if (!wait)
             return false;
-        fd.fd = pt_worker_fd(rt->worker);
+        fd.fd = pt_worker_fd(rt->io.worker);
         pt_sys_wait(&fd, 1, -1);
     }
     io_done(rt);
@@ -396,12 +396,12 @@ static bool finish_io(pt_rt *rt, bool wait)
 
 static void start_io(pt_rt *rt, const pt_fx *fx)
 {
-    rt->io = *fx;
-    if (!rt->worker) {
+    rt->io.fx = *fx;
+    if (!rt->io.worker) {
         store_io(rt);
         io_done(rt);
-    } else if (pt_worker_start(rt->worker, store_io, rt)) {
-        rt->io_pending = true;
+    } else if (pt_worker_start(rt->io.worker, store_io, rt)) {
+        rt->io.pending = true;
     } else if (fx->kind == PT_FX_COMMIT) {
         pt_fx_done(rt->a, fx->id, "could not schedule the durable write");
     } else if (fx->kind == PT_FX_BLOB) {
@@ -524,13 +524,13 @@ static void answer_materials(pt_rt *rt, uint32_t id, pt_str current)
     bool built;
     pt_buf_init(&sys, pt_sys_allocator());
     pt_buf_init(&skills, pt_sys_allocator());
-    built = rt->have_prompt &&
+    built = rt->prompt.have &&
             pt_rt_build_prompt(rt, pt_session_cwd(rt->a), pt_session_prompt(rt->a), &sys, &skills);
     memset(&m, 0, sizeof m);
     m.system = built ? pt_buf_str(&sys) : current;
     m.skills = built ? pt_buf_str(&skills) : PT_STR_NULL;
     m.tools = pt_rt_tool_defs(rt, &m.ntools);
-    pt_fx_materials(rt->a, id, rt->have_prompt && !built ? NULL : &m);
+    pt_fx_materials(rt->a, id, rt->prompt.have && !built ? NULL : &m);
     pt_buf_free(&sys);
     pt_buf_free(&skills);
 }
@@ -538,21 +538,21 @@ static void answer_materials(pt_rt *rt, uint32_t id, pt_str current)
 void pt_rt_materials_hold(pt_rt *rt, bool on)
 {
     if (on) {
-        rt->mat_holds++;
+        rt->mat.holds++;
         return;
     }
-    if (rt->mat_holds && !--rt->mat_holds && rt->mat_fx) {
-        uint32_t id = rt->mat_fx;
-        rt->mat_fx = 0;
+    if (rt->mat.holds && !--rt->mat.holds && rt->mat.fx) {
+        uint32_t id = rt->mat.fx;
+        rt->mat.fx = 0;
         /* the tools as they are now; the prompt rebuilt, or kept */
-        answer_materials(rt, id, rt->mat_cur.oom ? PT_STR_NULL : pt_buf_str(&rt->mat_cur));
-        pt_buf_reset(&rt->mat_cur);
+        answer_materials(rt, id, rt->mat.cur.oom ? PT_STR_NULL : pt_buf_str(&rt->mat.cur));
+        pt_buf_reset(&rt->mat.cur);
     }
 }
 
 bool pt_rt_materials_waiting(const pt_rt *rt)
 {
-    return rt->mat_fx != 0;
+    return rt->mat.fx != 0;
 }
 
 static void handle(pt_rt *rt, const pt_fx *fx)
@@ -583,10 +583,10 @@ static void handle(pt_rt *rt, const pt_fx *fx)
         start_io(rt, fx);
         break;
     case PT_FX_EPOCH_MATERIALS:
-        if (rt->mat_holds) {
-            rt->mat_fx = fx->id; /* answered by the last release */
-            pt_buf_reset(&rt->mat_cur);
-            pt_buf_puts(&rt->mat_cur, fx->bytes);
+        if (rt->mat.holds) {
+            rt->mat.fx = fx->id; /* answered by the last release */
+            pt_buf_reset(&rt->mat.cur);
+            pt_buf_puts(&rt->mat.cur, fx->bytes);
         }
         else
             answer_materials(rt, fx->id, fx->bytes);
@@ -661,7 +661,7 @@ static unsigned drain(pt_rt *rt)
     /* LIVE bytes last until the next poll; COMMIT bytes until completion.
      * Holding the poll while I/O is pending safely borrows both, so there
      * is no snapshot/commit allocation or copy on the worker path. */
-    while (!rt->io_pending && pt_poll(rt->a, &fx)) {
+    while (!rt->io.pending && pt_poll(rt->a, &fx)) {
         handle(rt, &fx);
         n++;
     }
@@ -712,8 +712,8 @@ static void wait_once(pt_rt *rt, int timeout_ms, pt_waitfd *fds, unsigned nfds)
         fds[i].ready = false;
     for (i = 0; i < total; i++)
         all[i] = fds[i];
-    if (rt->io_pending) {
-        all[total].fd = pt_worker_fd(rt->worker);
+    if (rt->io.pending) {
+        all[total].fd = pt_worker_fd(rt->io.worker);
         all[total++].ready = false;
     }
     first_watch = total;
@@ -755,10 +755,10 @@ static pt_rt_result status(pt_rt *rt)
     if (pt_fatal(rt->a))
         return PT_RT_FATAL;
     if (pt_idle(rt->a))
-        return !rt->closing && rt->builtin_idle && rt->builtin_idle(rt->builtin) ? PT_RT_BUSY : PT_RT_IDLE;
+        return !rt->closing && rt->builtin.idle && rt->builtin.idle(rt->builtin.ud) ? PT_RT_BUSY : PT_RT_IDLE;
     /* Watches, timers and requests outside a tool call (MCP servers, a
      * login) live on; only what the agent waits for keeps it from asking. */
-    if (!rt->nreqs && !rt->nsleeps && !rt->io_pending && !rt->ncalls && !rt->mat_fx) {
+    if (!rt->nreqs && !rt->nsleeps && !rt->io.pending && !rt->ncalls && !rt->mat.fx) {
         if (pt_asks(rt->a, NULL, 0))
             return PT_RT_ASK;
         if (!rt->ntimers && !rt->nwatches && !rt->nhttp)
@@ -770,9 +770,9 @@ static pt_rt_result status(pt_rt *rt)
 /* MCP servers start on the host thread, once its loop runs. */
 static void start_mcp(pt_rt *rt)
 {
-    if (!rt->mcp_started && rt->mcp_start) {
-        rt->mcp_started = true;
-        rt->mcp_start(rt->mcp);
+    if (!rt->mcp.started && rt->mcp.start) {
+        rt->mcp.started = true;
+        rt->mcp.start(rt->mcp.ud);
     }
 }
 
@@ -818,12 +818,12 @@ bool pt_rt_close(pt_rt *rt)
     while (!pt_closed(rt->a) && !pt_fatal(rt->a)) {
         bool progress = false;
         finish_io(rt, true);
-        while (!rt->io_pending && pt_poll(rt->a, &fx)) {
+        while (!rt->io.pending && pt_poll(rt->a, &fx)) {
             progress = true;
             if (fx.kind == PT_FX_COMMIT || fx.kind == PT_FX_LIVE)
                 handle(rt, &fx);
         }
-        if (!progress && !rt->io_pending)
+        if (!progress && !rt->io.pending)
             break; /* a stuck core; never silently drop a large input queue */
     }
     finish_io(rt, true);
