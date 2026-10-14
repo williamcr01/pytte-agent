@@ -341,7 +341,7 @@ typedef enum {
     PT_RT_ASK      /* nothing can go on until a tool call is approved (pt_asks) */
 } pt_rt_result;
 
-/* Until idle, fatal or stopped. */
+/* Until idle with no background command running, fatal or stopped. */
 pt_rt_result pt_rt_run(pt_rt *rt);
 /* One bounded step, for hosts that wait on more than the agent (a TUI):
  * start what the agent hands out, then wait up to timeout_ms (-1: no

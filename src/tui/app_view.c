@@ -678,15 +678,20 @@ void app_out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->summary, 0);
         if (full && v->files.n)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->files, 0);
-    } else if (is_note(v) && !full) { /* its "- session ..." lines */
+    } else if (is_note(v) && !full) { /* its "- session ..." lines, up to the output after them */
         pt_str text = m->text;
         size_t at = 0, e;
+        bool listed = false;
         app_out_blank(out);
         while (at < text.n) {
             for (e = at; e < text.n && text.p[e] != '\n'; e++)
                 ;
-            if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ')
+            if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ') {
                 app_out_note(a, out, TUI_DIM, (pt_str){text.p + at + 2, e - at - 2});
+                listed = true;
+            } else if (listed && e == at) {
+                break;
+            }
             at = e + 1;
         }
     } else if (strcmp(v->kind, "user") == 0) { /* as it looked at the prompt */

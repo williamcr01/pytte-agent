@@ -92,20 +92,29 @@ if command -v jq >/dev/null; then
     blob="$XDG_STATE_HOME/pytte/sessions/$id/blobs/$(echo "$sum" | cut -c1-2)/$(echo "$sum" | cut -c3-)"
     check "...stored under its hash" [ "$(sha256sum <"$blob" | cut -c1-64)" = "$sum" ]
     check "...the result names its file" sh -c 'printf "%s" "$1" | jq -se ".[0].data.content | contains(\"bytes omitted; the whole output is in $2]\")" >/dev/null' _ "$results" "$blob"
-    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/background.json go >/dev/null 2>&1
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/background_print.json go >/dev/null 2>&1
     results=$("$pytte" log --json | jq -c 'select(.kind == "tool_result") | .data')
     bg() { sh -c 'printf "%s" "$1" | jq -se "$2" >/dev/null' _ "$results" "$1"; }
-    check "a command past its yield goes to the background" bg '.[0] | (.content == "first\n\n[still running as session 8; bash_poll reads on]") and .details.session == 8 and (.is_error | not)'
-    check "...a poll waits at least 5s" bg '.[1] | .content == "\n[still running as session 8]" and .details.ms >= 5000'
-    check "...a poll waits for the end and its exit code" bg '.[2] | .content == "second\n\n[exit code 3]" and .details.exit == 3 and .is_error'
-    check "...an ended session read once is gone" bg '.[3] | (.content | startswith("No session 8:")) and .is_error'
-    check "...a stopped session is no error" bg '.[5] | .content == "\n[stopped]" and (.is_error | not)'
+    check "a command past its yield goes to the background" bg '.[0] | (.content == "first\n\n[still running as session 8; you will be told when it ends]") and .details.session == 8 and (.is_error | not)'
+    check "...a poll returns at once" bg '.[1] | .content == "\n[still running as session 8; you will be told when it ends]" and .details.ms < 1000'
+    check "...its end is told in the next result" bg '.[2] | .content == "(no output)\n[pytte: background session 8 ended with exit code 3: echo first; sleep 2; echo second; exit 3; bash_poll reads its output]"'
+    check "...a poll reads the rest and its exit code" bg '.[3] | .content == "second\n\n[exit code 3]" and .details.exit == 3 and .is_error'
+    check "...an ended session read once is gone" bg '.[4] | (.content | startswith("No session 8:")) and .is_error'
+    check "...a stopped session is no error" bg '.[6] | .content == "\n[stopped]" and (.is_error | not)'
     check "...and nothing outlives pytte" sh -c '! pgrep -f "^sh -c echo up; sleep 100" >/dev/null && ! pgrep -xf "sleep 100" >/dev/null'
     out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/notify_later.json go 2>/dev/null)
-    check "a background command that ended unread starts a turn" [ "$(printf '%s\n' "$out" | tail -1)" = "Read it." ]
     log=$("$pytte" log --json)
-    check "...from a note by pytte, once" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | length == 1 and (.[0].data.content | contains(\"- session 8 ended with exit code 0: sleep 1.5; echo late\"))" >/dev/null' _ "$log"
-    check "...and the model reads it" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[-1].data.content == \"late\\n\\n[ended]\"" >/dev/null' _ "$log"
+    check "a background command that ends during a turn is told in the next result" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[1].data.content == \"busy\n\n[pytte: background session 8 ended with exit code 0: sleep 1.5; echo late; bash_poll reads its output]\"" >/dev/null' _ "$log"
+    check "...not again in a note" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | length == 0" >/dev/null' _ "$log"
+    check "...and bash_poll reads it" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[-1].data.content == \"late\n\n[ended]\"" >/dev/null' _ "$log"
+    out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/notify_idle.json go 2>/dev/null)
+    check "-p waits for a background command, which starts a turn when it ends" [ "$(printf '%s\n' "$out" | tail -1)" = "It printed late." ]
+    log=$("$pytte" log --json)
+    check "...from a note by pytte, once, with what it printed" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | length == 1 and (.[0].data.content | contains(\"- session 8 ended with exit code 0: sleep 1.5; echo late\n\") and contains(\"Session 8 printed:\n<output>\nlate\n</output>\n\"))" >/dev/null' _ "$log"
+    out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/notify_long.json go 2>/dev/null)
+    log=$("$pytte" log --json)
+    check "a note shows the end of a long output, from a whole line" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | .[0].data.content | test(\"Session 8 printed \\\\(its last [0-9]+ bytes; bash_poll reads what came before\\\\):\n<output>\n[0-9]+\n(.|\n)*\n3000\n</output>\")" >/dev/null' _ "$log"
+    check "...and the session stays for bash_poll" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[-1].data.content | startswith(\"1\n2\n3\n\") and endswith(\"3000\n\n[ended]\")" >/dev/null' _ "$log"
     d=$XDG_STATE_HOME/files
     mkdir -p "$d" && seq 1 5000 >"$d/big.txt"
     printf '{"turns": [{"content": [{"type": "tool_call", "name": "write", "args": {"path": "%s/notes.txt", "content": "hi"}}]}, {"content": [{"type": "tool_call", "name": "read", "args": {"path": "%s/big.txt"}}]}, {"content": [{"type": "text", "text": "Read."}]}]}' \

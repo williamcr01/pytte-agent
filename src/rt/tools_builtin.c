@@ -837,6 +837,16 @@ static bool builtins_idle(void *ud)
     return pt_rt_bash_idle(((builtins *)ud)->bash);
 }
 
+static void builtins_ended(void *ud, pt_buf *out)
+{
+    pt_rt_bash_ended(((builtins *)ud)->bash, out);
+}
+
+static bool builtins_running(void *ud)
+{
+    return pt_rt_bash_running(((builtins *)ud)->bash);
+}
+
 uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max)
 {
     builtins *b = (builtins *)rt->builtin.ud;
@@ -915,6 +925,8 @@ bool pt_rt_add_builtins(pt_rt *rt)
     rt->builtin.ud = b;
     rt->builtin.free = builtins_free;
     rt->builtin.idle = builtins_idle;
+    rt->builtin.ended = builtins_ended;
+    rt->builtin.running = builtins_running;
     memset(t, 0, sizeof t);
     for (i = 1; i < 4; i++) { /* read, write, edit */
         t[i].def.source = PT_S("builtin");

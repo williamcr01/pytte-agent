@@ -706,7 +706,8 @@ static void test_tool_rendering(void)
 }
 
 /* A background command that ends while the agent is idle: pytte tells
- * the model in a note of its own, and the model carries on. */
+ * the model in a note of its own, with what it printed, and the model
+ * carries on without a poll. */
 static void test_background_note(void)
 {
     pty p;
@@ -721,18 +722,18 @@ static void test_background_note(void)
     CHECK(has(&p, "It runs in the background.\n\n"
                   "· worked for "));
     CHECK(has(&p, "· worked for 1s\n\n"
-                  "· session 8 ended with exit code 0: sleep 2; echo built\n\n"
-                  "✓ poll  session 8\n\n"
+                  "· session 8 ended with exit code 0: sleep 2; echo built; echo '- not a session'\n\n"
                   "  It printed built."));
-    CHECK(!has(&p, "[pytte]")); /* the note is not shown as typed */
+    CHECK(!has(&p, "[pytte]"));          /* the note is not shown as typed */
+    CHECK(!has(&p, "· not a session")); /* nor its output */
     CHECK(wait_idle(&p, 3000));
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
     pty_free(&p);
-    /* the log: a user entry from pytte, and the poll read the output */
+    /* the log: a user entry from pytte, with the output */
     log = last_log(&n);
     CHECK(log && strstr(log, "\"from\":\"pytte\"") != NULL);
-    CHECK(log && strstr(log, "built\\n\\n[ended]") != NULL);
+    CHECK(log && strstr(log, "<output>\\nbuilt\\n- not a session\\n</output>") != NULL);
     free(log);
 }
 
@@ -748,31 +749,30 @@ static void test_background(void)
     CHECK(wait_for(&p, "· 1 in background (/ps)", 3000)); /* the footer */
     CHECK(wait_for(&p, "s · ↑ ", 3000) && has(&p, " ↓ ")); /* the run's tokens, beside its clock */
     CHECK(wait_for(&p, "Done.", 20000));
-    /* the second poll ran for what was left of the 8.5 s: its time
-     * (" · 2s" when idle) depends on scheduling */
+    /* a poll returns at once; the end is told in the next result */
     CHECK(has(&p, "Starting it.\n\n"
-                  "✓ bash  echo first; sleep 8.5; echo second; exit 3 · still running as session 8\n"
+                  "✓ bash  echo first; sleep 2; echo second; exit 3 · still running as session 8\n"
                   "✓ poll  session 8 · still running\n"
-                  "✗ poll  session 8 · exit 3"));
-    CHECK(has(&p, "s\n"
+                  "✓ bash  sleep 2.5"));
+    CHECK(has(&p, "✗ poll  session 8 · exit 3\n"
                   "        second\n"
                   "✗ poll  session 8 · failed\n"));
-    CHECK(has(&p, "✓ bash  echo up; sleep 100 · still running as session 19\n"));
-    CHECK(has(&p, "✓ poll  session 19 (stop)\n"));
-    CHECK(has(&p, "✓ bash  echo left; sleep 100 · still running as session 24\n"));
+    CHECK(has(&p, "✓ bash  echo up; sleep 100 · still running as session 22\n"));
+    CHECK(has(&p, "✓ poll  session 22 (stop)\n"));
+    CHECK(has(&p, "✓ bash  echo left; sleep 100 · still running as session 27\n"));
     CHECK(!has(&p, "[still running"));
     CHECK(wait_idle(&p, 3000));
     /* one left running: the footer counts it, /ps lists it, /stop ends it */
     CHECK(wait_for(&p, "· 1 in background (/ps)", 2000));
     keys(&p, "/ps\r");
-    CHECK(wait_for(&p, "session 24 · running ", 2000));
+    CHECK(wait_for(&p, "session 27 · running ", 2000));
     CHECK(has(&p, "· echo left; sleep 100"));
     keys(&p, "/stop\r");
     CHECK(wait_for(&p, "stopping 1 background command\n", 2000));
     pump(&p, 300);
     CHECK(!has(&p, "in background (/ps)"));
     keys(&p, "/ps\r");
-    CHECK(wait_for(&p, "session 24 · ended (exit 143), not read yet · echo left; sleep 100", 2000));
+    CHECK(wait_for(&p, "session 27 · ended (exit 143), not read yet · echo left; sleep 100", 2000));
     keys(&p, "/stop\r");
     CHECK(wait_for(&p, "no background commands running", 2000));
     keys(&p, "\x04");

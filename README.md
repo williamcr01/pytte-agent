@@ -189,14 +189,13 @@ session starts and again at each compaction.
 
 Tools: `bash` runs a command line in its own process group (stdin empty,
 stdout and stderr together, an optional timeout). A command still running
-after `yield` seconds (default 10) goes on in the background as a session,
-and the model works on; `bash_poll` reads what it printed since, waits for
-it to end (at least 5 seconds per poll), or stops it. The footer counts
-the ones still running, `/ps` lists them and `/stop` stops them; they
-end when pytte does. When one ends and nothing has read it by the time
-the model is idle, pytte starts a turn with a note saying so (shown as
-`· session 8 ended with exit code 0: make test`), and the model reads it
-and carries on; a command the user stopped with `/stop` gets no note. `read` shows a file with
+after `yield` seconds (default 120) goes on in the background as a session.
+The model is told when it ends rather than polling: in its next tool
+result while it works, else in a note with what the command printed that
+starts a turn (shown as `· session 8 ended with exit code 0: make test`);
+`bash_poll` checks on one or stops it. The footer counts the ones still
+running, `/ps` lists them and `/stop` stops them; they end when pytte
+does. See [docs/bash.md](docs/bash.md). `read` shows a file with
 line numbers, up to 2000 lines or 50 KiB, cut at a whole line, and says
 where to read on; an image (PNG, JPEG, GIF, WebP, up to 3.75 MiB and 8000
 pixels a side) goes to the model as an image, or as a note to a model that

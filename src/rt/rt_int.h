@@ -96,6 +96,11 @@ typedef struct rt_builtin {
     /* The agent is idle: true when it submitted something (a note that
      * background commands ended), so there is work again. */
     bool (*idle)(void *ud);
+    /* A tool call ends: append to its result a line per background
+     * command that ended untold since. */
+    void (*ended)(void *ud, pt_buf *out);
+    /* Background commands still running. */
+    bool (*running)(void *ud);
 } rt_builtin;
 
 /* mcp.c's state. */
@@ -178,6 +183,10 @@ void pt_rt_bash_tools(bash *b, pt_rt_tool t[2]);
 /* The agent is idle: submit a note for background commands that ended
  * unread; true when it did. */
 bool pt_rt_bash_idle(bash *b);
+/* A tool result is being written: append a line to out for each
+ * background command that ended untold, and count it told. */
+void pt_rt_bash_ended(bash *b, pt_buf *out);
+bool pt_rt_bash_running(const bash *b);
 uint32_t pt_rt_bash_backgrounds(const bash *b, pt_rt_background *out, uint32_t max);
 uint32_t pt_rt_bash_stop_all(bash *b);
 /* tools_web.c: web_fetch, with its state */

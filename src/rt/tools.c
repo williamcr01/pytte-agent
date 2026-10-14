@@ -491,6 +491,8 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r)
         c->output_oom = true;
     if (rt->scratch.n == dn)
         pt_buf_putz(&rt->scratch, "(no output)");
+    if (!rt->closing && rt->builtin.ended) /* background commands that ended meanwhile */
+        rt->builtin.ended(rt->builtin.ud, &rt->scratch);
     memset(&res, 0, sizeof res);
     res.content = rt->scratch.oom || c->output_oom ? PT_S("out of memory keeping the output")
                                                    : (pt_str){rt->scratch.p + dn, rt->scratch.n - dn};
