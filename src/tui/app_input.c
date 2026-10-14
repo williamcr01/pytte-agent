@@ -95,7 +95,7 @@ static xreq *xreq_new(app *a, queued_input *q, uint32_t k)
     return x;
 }
 
-void xreq_drop(app *a, xreq *x)
+void app_xreq_drop(app *a, xreq *x)
 {
     xreq **pp;
     for (pp = &a->queue.xs; *pp; pp = &(*pp)->next)
@@ -116,7 +116,7 @@ static bool names_prompt(app *a, pt_str text)
     for (i = 1; i < text.n && text.p[i] != ' ' && text.p[i] != '\n'; i++)
         ;
     colon = pt_str_find((pt_str){text.p + 1, i - 1}, ':');
-    return colon > 0 && mcp_known(a, (pt_str){text.p + 1, (size_t)colon});
+    return colon > 0 && app_mcp_known(a, (pt_str){text.p + 1, (size_t)colon});
 }
 
 /* The prompt's arguments from what follows its command: name=value, or
@@ -218,7 +218,7 @@ static int expand_start(app *a, queued_input *q)
     if (ns > CLI_MCP_MAX)
         ns = CLI_MCP_MAX;
     if (names_prompt(a, t)) {
-        const pt_rt_mcp_prompt *p = find_prompt(a, t);
+        const pt_rt_mcp_prompt *p = app_find_prompt(a, t);
         size_t e;
         pt_buf args;
         xreq *x;
@@ -245,7 +245,7 @@ static int expand_start(app *a, queued_input *q)
         pt_buf_free(&args);
         if (!ok) {
             if (x)
-                xreq_drop(a, x);
+                app_xreq_drop(a, x);
             snprintf(q->err, sizeof q->err, "cannot ask the MCP server for the prompt");
             return -1;
         }
@@ -294,7 +294,7 @@ static int expand_start(app *a, queued_input *q)
             x = xreq_new(a, q, q->want);
             if (!x || !pt_rt_mcp_read(a->s.rt, server, uri, x_done, x)) {
                 if (x)
-                    xreq_drop(a, x);
+                    app_xreq_drop(a, x);
                 snprintf(q->err, sizeof q->err, "cannot ask the MCP server for @%.*s",
                          (int)(tok.n > 200 ? 200 : tok.n), tok.p);
                 return -1;
@@ -330,7 +330,7 @@ static void expand_text(queued_input *q, pt_str base, pt_buf *out)
     }
 }
 
-void queued_submit(app *a)
+void app_queued_submit(app *a)
 {
     uint32_t i = 0;
     while (a->open && i < a->queue.n) {
@@ -341,26 +341,26 @@ void queued_submit(app *a)
             pt_buf_reset(&a->command);
             pt_buf_puts(&a->command, pt_buf_str(&q->text));
             if (a->command.oom) {
-                out_z(a, TUI_RED, "out of memory queuing a command");
+                app_out_z(a, TUI_RED, "out of memory queuing a command");
                 return;
             }
             queued_remove(a, i);
-            run_command(a, pt_buf_str(&a->command));
-            menu_update(a);
+            app_run_command(a, pt_buf_str(&a->command));
+            app_menu_update(a);
         } else {
             pt_input in;
             pt_buf text, full;
             char err[600];
             bool ok;
             if (!q->xid && expand_start(a, q) < 0) {
-                out_z(a, TUI_RED, q->err);
+                app_out_z(a, TUI_RED, q->err);
                 queued_remove(a, i);
                 continue;
             }
             if (q->got < q->want)
                 break; /* what comes after it waits for its fetches */
             if (q->failed) {
-                out_z(a, TUI_RED, q->err);
+                app_out_z(a, TUI_RED, q->err);
                 queued_remove(a, i);
                 continue;
             }
@@ -371,7 +371,7 @@ void queued_submit(app *a)
             /* skills in what was typed; not in what servers sent */
             switch (q->prompt ? 0 : pt_rt_expand_skills(a->s.rt, in.text, &text, err, sizeof err)) {
             case -1: /* not sent: it is still in the history */
-                out_z(a, TUI_RED, err);
+                app_out_z(a, TUI_RED, err);
                 queued_remove(a, i);
                 pt_buf_free(&text);
                 pt_buf_free(&full);
@@ -388,7 +388,7 @@ void queued_submit(app *a)
             pt_buf_free(&text);
             pt_buf_free(&full);
             if (!ok) {
-                out_z(a, TUI_RED, pt_error(a->s.a));
+                app_out_z(a, TUI_RED, pt_error(a->s.a));
                 return;
             }
             if (!a->sess.named) { /* the first prompt names the session */
@@ -401,48 +401,48 @@ void queued_submit(app *a)
     }
 }
 
-void submit(app *a)
+void app_submit(app *a)
 {
     pt_str text = pt_str_trim(pt_buf_str(&a->in.text));
     bool command;
     if (!text.n)
         return;
-    if (secret_at(text)) {
+    if (app_secret_at(text)) {
         /* the key stays out of the history */
     } else if (a->hist.ready) {
         if (!tui_hist_add(&a->in, text))
-            out_z(a, TUI_RED, "out of memory adding to input history");
-        history_append(a, text);
+            app_out_z(a, TUI_RED, "out of memory adding to input history");
+        app_history_append(a, text);
     } else {
         tui_hist_line(&a->hist.pending, text);
     }
     command = text.p[0] == '/' && pt_str_find(text, '\n') < 0 && !pt_str_starts(text, PT_S("/skill:")) &&
               !names_prompt(a, text);
-    if (command && (!a->sess.opening || secret_at(text))) { /* a key is never queued */
+    if (command && (!a->sess.opening || app_secret_at(text))) { /* a key is never queued */
         pt_buf_reset(&a->command);
         pt_buf_puts(&a->command, text);
         if (a->command.oom) {
-            out_z(a, TUI_RED, "out of memory queuing a command");
+            app_out_z(a, TUI_RED, "out of memory queuing a command");
             return;
         }
         tui_input_set(&a->in, PT_STR_NULL);
         a->menu.kind = MENU_NONE;
         a->menu.closed = false;
-        run_command(a, pt_buf_str(&a->command));
-        menu_update(a);
+        app_run_command(a, pt_buf_str(&a->command));
+        app_menu_update(a);
         a->draft.dirty = true;
         return;
     }
     if (!a->open && !a->sess.opening) {
-        out_z(a, TUI_RED, "no session");
+        app_out_z(a, TUI_RED, "no session");
         return;
     }
     if (!queue_text(a, text, command)) {
-        out_z(a, TUI_RED, "out of memory queuing input");
+        app_out_z(a, TUI_RED, "out of memory queuing input");
         return;
     }
     tui_input_set(&a->in, PT_STR_NULL);
-    queued_submit(a);
+    app_queued_submit(a);
     a->draft.dirty = true;
 }
 
@@ -456,29 +456,29 @@ static void enter(app *a)
         return;
     }
     if (a->menu.kind == MENU_CMD && a->menu.n) {
-        pt_str label = item_label(a, a->menu.sel);
-        const pt_rt_mcp_prompt *p = find_prompt(a, label);
+        pt_str label = app_item_label(a, a->menu.sel);
+        const pt_rt_mcp_prompt *p = app_find_prompt(a, label);
         uint32_t k;
         bool needs = false;
         for (k = 0; p && k < p->nargs; k++)
             needs = needs || p->args[k].required;
-        if ((menu_takes_arg(label) && !pt_str_eqz(label, "settings")) || needs) {
+        if ((app_menu_takes_arg(label) && !pt_str_eqz(label, "settings")) || needs) {
             /* /model and friends: show their arguments first */
-            if (complete(a))
+            if (app_complete(a))
                 return;
         } else {
-            complete(a);
+            app_complete(a);
         }
     } else if (a->menu.kind == MENU_ARG && a->menu.n) {
         bool skill = a->menu.of_skills || a->menu.of_mentions;
-        pt_str label = item_label(a, a->menu.sel);
+        pt_str label = app_item_label(a, a->menu.sel);
         bool sub = pt_str_starts(d, PT_S("/mcp ")) && (pt_str_eqz(label, "login") || pt_str_eqz(label, "logout") ||
                                                       pt_str_eqz(label, "restart"));
-        complete(a);
+        app_complete(a);
         if (skill || sub)
             return; /* a $skill or @mention picked: the message goes on; /mcp login: then the name */
     }
-    submit(a);
+    app_submit(a);
 }
 
 static void settings_key(app *a, const tui_ev *ev)
@@ -500,13 +500,13 @@ static void settings_key(app *a, const tui_ev *ev)
     if (vals) {
         for (i = 0; i < nv && strcmp(a->cfg->val[k], vals[i]) != 0; i++)
             ;
-        save_setting(a, k, vals[((i < nv ? i : 0) + dir + nv) % nv]);
+        app_save_setting(a, k, vals[((i < nv ? i : 0) + dir + nv) % nv]);
     } else { /* model, pager, compact-model: edit as a command */
         snprintf(d, sizeof d, "/settings %s %s", app_settings[a->menu.set_sel].name, k == CFG_PAGER ? a->cfg->val[k] : "");
         a->menu.kind = MENU_NONE;
         a->menu.closed = false;
         tui_input_set(&a->in, pt_strz(d));
-        menu_update(a);
+        app_menu_update(a);
     }
 }
 
@@ -520,9 +520,9 @@ static void interrupt(app *a)
 static void answer(app *a, int choice)
 {
     if (choice == 1 && !pt_rt_allow(a->s.rt, a->ask.view.name, pt_strz(a->ask.prefix)))
-        out_z(a, TUI_RED, "out of memory: allowed this once only");
+        app_out_z(a, TUI_RED, "out of memory: allowed this once only");
     if (!pt_approve(a->s.a, a->ask.view.task, choice != 2, PT_STR_NULL))
-        out_z(a, TUI_RED, pt_error(a->s.a));
+        app_out_z(a, TUI_RED, pt_error(a->s.a));
     a->ask.task = 0;
     set_dirty(a);
 }
@@ -530,7 +530,7 @@ static void answer(app *a, int choice)
 /* Keys while a tool call waits: true when taken. */
 static bool ask_key(app *a, const tui_ev *ev)
 {
-    if (!asking(a))
+    if (!app_asking(a))
         return false;
     if (ev->kind == TE_TEXT) {
         if (ev->text.n == 1 && ev->text.p[0] >= '1' && ev->text.p[0] <= '3')
@@ -550,7 +550,7 @@ static bool ask_key(app *a, const tui_ev *ev)
     return true;
 }
 
-void on_key(app *a, const tui_ev *ev)
+void app_on_key(app *a, const tui_ev *ev)
 {
     int64_t now = pt_sys_now_ms();
     uint32_t k = ev->key;
@@ -566,7 +566,7 @@ void on_key(app *a, const tui_ev *ev)
         tui_input_insert(&a->in, ev->text);
         a->menu.closed = false;
         a->draft.dirty = true;
-        menu_update(a);
+        app_menu_update(a);
         return;
     }
     if (ev->kind != TE_KEY)
@@ -580,13 +580,13 @@ void on_key(app *a, const tui_ev *ev)
         return;
     }
     if (k == TK_TAB && !ev->mods) {
-        complete(a);
+        app_complete(a);
         return;
     }
     if (k == TK_ESC) {
         if (a->menu.kind != MENU_NONE) {
             a->menu.closed = true;
-            menu_update(a);
+            app_menu_update(a);
         } else if (a->run.active) {
             if (now - a->pace.esc_at < DOUBLE_MS)
                 interrupt(a);
@@ -601,7 +601,7 @@ void on_key(app *a, const tui_ev *ev)
         if (a->in.text.n) {
             tui_input_set(&a->in, PT_STR_NULL);
             a->draft.dirty = true;
-            menu_update(a);
+            app_menu_update(a);
         } else if (a->run.active) {
             interrupt(a);
         } else if (now - a->pace.ctrlc_at < DOUBLE_MS) {
@@ -620,20 +620,20 @@ void on_key(app *a, const tui_ev *ev)
         return;
     }
     if (ctrl && k == 'z') {
-        suspend(a);
+        app_suspend(a);
         tui_term_stop_self();
-        resume(a);
+        app_resume(a);
         return;
     }
     if (ctrl && k == 't') {
-        save_setting(a, CFG_THINKING, app_th_names[(a->thinking + 1) % NTH]);
+        app_save_setting(a, CFG_THINKING, app_th_names[(a->thinking + 1) % NTH]);
         return;
     }
     if (ctrl && k == 'o') {
         if (a->sess.opening)
             a->pager_pending = true;
         else
-            pager(a);
+            app_pager(a);
         return;
     }
     if ((k == TK_UP || k == TK_DOWN) && !ev->mods && a->menu.kind != MENU_NONE && a->menu.n) {
@@ -644,13 +644,13 @@ void on_key(app *a, const tui_ev *ev)
     if (r == TI_TOP || r == TI_BOTTOM) {
         if (tui_hist_move(&a->in, r == TI_TOP ? -1 : 1)) {
             a->menu.closed = true; /* a recalled command does not open the menu */
-            menu_update(a);
+            app_menu_update(a);
         }
         return;
     }
     if (r == TI_EDITED || a->in.text.n != before) {
         a->menu.closed = false;
         a->draft.dirty = true;
-        menu_update(a);
+        app_menu_update(a);
     }
 }

@@ -306,71 +306,71 @@ static inline int width(const app *a)
 }
 
 /* app_view.c: scrollback output and the display model built from the agent's events */
-void out_text(app *a, pt_buf *out, int style, const char *prefix, int pstyle, pt_str raw, int indent);
-void out_note(app *a, pt_buf *out, int style, pt_str raw);
-void out_z(app *a, int style, const char *z);
-void out_blank(pt_buf *out);
-pt_str call_gist(app *a, pt_str args);
-int tool_of(pt_str name);
-void phrase(app *a, pt_buf *out, pt_str name, pt_str args);
-void secs_short(char *out, size_t cap, int64_t ms);
-int64_t run_clock(const app *a, int64_t now);
-const char *blink(const app *a, int64_t now);
-bool starts(pt_str s, const char *z);
-bool runs_oom(const app *a);
-void group_render(app *a, pt_buf *out, bool live);
-void group_close(app *a);
-void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full);
-void live_end(app *a);
-void on_event(void *ud, const pt_event *ev);
-void out_tail(app *a);
+void app_out_text(app *a, pt_buf *out, int style, const char *prefix, int pstyle, pt_str raw, int indent);
+void app_out_note(app *a, pt_buf *out, int style, pt_str raw);
+void app_out_z(app *a, int style, const char *z);
+void app_out_blank(pt_buf *out);
+pt_str app_call_gist(app *a, pt_str args);
+int app_tool_of(pt_str name);
+void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args);
+void app_secs_short(char *out, size_t cap, int64_t ms);
+int64_t app_run_clock(const app *a, int64_t now);
+const char *app_blink(const app *a, int64_t now);
+bool app_starts(pt_str s, const char *z);
+bool app_runs_oom(const app *a);
+void app_group_render(app *a, pt_buf *out, bool live);
+void app_group_close(app *a);
+void app_out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full);
+void app_live_end(app *a);
+void app_on_event(void *ud, const pt_event *ev);
+void app_out_tail(app *a);
 
 /* app_band.c: the band: the frame under the scrollback, and painting it */
-void tokens_short(char *out, size_t cap, uint64_t n);
-bool asking(app *a);
-void flush_out(app *a);
-void paint(app *a);
+void app_tokens_short(char *out, size_t cap, uint64_t n);
+bool app_asking(app *a);
+void app_flush_out(app *a);
+void app_paint(app *a);
 
 /* app_menu.c: the menu under the input, and completing from it */
-int find_setting(pt_str name);
-bool menu_takes_arg(pt_str cmd);
-pt_str item_label(const app *a, int i);
-const pt_rt_mcp_prompt *find_prompt(app *a, pt_str cmd);
-size_t secret_at(pt_str d);
-void menu_update(app *a);
-bool complete(app *a);
+int app_find_setting(pt_str name);
+bool app_menu_takes_arg(pt_str cmd);
+pt_str app_item_label(const app *a, int i);
+const pt_rt_mcp_prompt *app_find_prompt(app *a, pt_str cmd);
+size_t app_secret_at(pt_str d);
+void app_menu_update(app *a);
+bool app_complete(app *a);
 
 /* app_cmd.c: settings, the model, and the slash commands */
-void effort_label(const app *a, char *out, size_t cap);
-void apply_symbols(app *a);
-void apply_thinking(app *a);
-void finish_setting(app *a);
-bool save_setting(app *a, int k, const char *v);
-void update_model(app *a);
-void set_config(app *a);
-uint32_t bg_running(app *a);
-void mcp_note(void *ud, const char *server, const char *msg);
-void show_notes(app *a);
-void run_command(app *a, pt_str line);
-bool mcp_known(app *a, pt_str name);
+void app_effort_label(const app *a, char *out, size_t cap);
+void app_apply_symbols(app *a);
+void app_apply_thinking(app *a);
+void app_finish_setting(app *a);
+bool app_save_setting(app *a, int k, const char *v);
+void app_update_model(app *a);
+void app_set_config(app *a);
+uint32_t app_bg_running(app *a);
+void app_mcp_note(void *ud, const char *server, const char *msg);
+void app_show_notes(app *a);
+void app_run_command(app *a, pt_str line);
+bool app_mcp_known(app *a, pt_str name);
 
 /* app_session.c: opening, switching and closing sessions; drafts, history, the pager */
-void save_draft(app *a);
-bool session_empty(app *a);
-bool open_session(app *a, const char *id);
-void close_session(app *a);
-void switch_session(app *a, const char *id);
-void suspend(app *a);
-void resume(app *a);
-void pager(app *a);
-void history_append(app *a, pt_str text);
-void history_load(app *a);
-void finish_session(app *a);
+void app_save_draft(app *a);
+bool app_session_empty(app *a);
+bool app_open_session(app *a, const char *id);
+void app_close_session(app *a);
+void app_switch_session(app *a, const char *id);
+void app_suspend(app *a);
+void app_resume(app *a);
+void app_pager(app *a);
+void app_history_append(app *a, pt_str text);
+void app_history_load(app *a);
+void app_finish_session(app *a);
 
 /* app_input.c: what is typed: keys, the input queue, MCP prompts and @-mentions */
-void xreq_drop(app *a, xreq *x);
-void queued_submit(app *a);
-void submit(app *a);
-void on_key(app *a, const tui_ev *ev);
+void app_xreq_drop(app *a, xreq *x);
+void app_queued_submit(app *a);
+void app_submit(app *a);
+void app_on_key(app *a, const tui_ev *ev);
 
 #endif

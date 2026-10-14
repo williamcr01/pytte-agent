@@ -57,7 +57,7 @@ static int timeout_ms(app *a, int64_t now)
     if (tui_keys_pending(&a->keys))
         AT(a->pace.keys_at + 30);
     if (a->run.active && !a->run.wait_at) { /* the clock's next half second */
-        due = now + BLINK_MS - run_clock(a, now) % BLINK_MS;
+        due = now + BLINK_MS - app_run_clock(a, now) % BLINK_MS;
         AT(due);
     }
     if (now - a->pace.esc_at < DOUBLE_MS)
@@ -79,7 +79,7 @@ static void read_keys(app *a, bool flush)
         if (ev.kind == TE_REPLY)
             on_reply(a, &ev);
         else
-            on_key(a, &ev);
+            app_on_key(a, &ev);
 }
 
 static int quit_code(int sig)
@@ -128,7 +128,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     a->mcp = mcp;
     pt_buf_init(&a->mcp_notes, pt_sys_allocator());
     if (mcp)
-        cli_mcp_host(&a->o.mcp_host, mcp_note, a);
+        cli_mcp_host(&a->o.mcp_host, app_mcp_note, a);
     a->pace.interval = 33;
     a->pace.esc_at = a->pace.ctrlc_at = -DOUBLE_MS;
     /* the watchdog first: before the store is opened */
@@ -141,8 +141,8 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     a->o.model = o->model ? a->model.ref : NULL;
     tui_set_ambiguous_wide(amb && strcmp(amb, "wide") == 0);
     a->color = !getenv("NO_COLOR") || !*getenv("NO_COLOR");
-    apply_symbols(a);
-    apply_thinking(a);
+    app_apply_symbols(a);
+    app_apply_thinking(a);
     tui_keys_init(&a->keys);
     a->keys.want_cpr = true;
     tui_input_init(&a->in, pt_sys_allocator());
@@ -171,18 +171,18 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         return 1;
     }
     tui_term_size(a->t, &a->rows, &a->cols);
-    history_load(a);
+    app_history_load(a);
     if (!getcwd(a->sess.start_dir, sizeof a->sess.start_dir))
         a->sess.start_dir[0] = 0;
     if (id)
         snprintf(picked, sizeof picked, "%s", id);
-    if (!open_session(a, id ? picked : NULL)) {
+    if (!app_open_session(a, id ? picked : NULL)) {
         startup_free(a);
         fprintf(stderr, "pytte: %s\n", a->sess.err);
         return a->code ? a->code : 1;
     }
     a->o.worktree = NULL; /* -w: this open only; copied by it */
-    set_config(a);
+    app_set_config(a);
     tui_band_init(&a->band, a->rows, a->cols, pt_sys_allocator());
     a->band.reflow = reflows();
     a->band.color = a->color;
@@ -206,14 +206,14 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         pt_buf first;
         pt_buf_init(&first, pt_sys_allocator());
         snprintf(head, sizeof head, " %s · /help for commands", PT_VERSION);
-        out_text(a, &first, TUI_DIM, "pytte", ACCENT | TUI_BOLD, pt_strz(head), 0);
+        app_out_text(a, &first, TUI_DIM, "pytte", ACCENT | TUI_BOLD, pt_strz(head), 0);
         pt_buf_puts(&first, pt_buf_str(&a->lines));
         pt_buf_reset(&a->lines);
         pt_buf_puts(&a->lines, pt_buf_str(&first));
         pt_buf_free(&first);
     }
     if (a->mcp && a->mcp->warn[0])
-        out_z(a, TUI_RED, a->mcp->warn);
+        app_out_z(a, TUI_RED, a->mcp->warn);
     if (a->mcp && a->mcp->nuntrusted) { /* the trust flow: say what would run */
         char names[400] = "", line[700];
         uint32_t i;
@@ -227,15 +227,15 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
                  "this project has MCP servers that are not trusted, so they do not run: %s. "
                  "/mcp trust runs them (programs on this machine: trust only what you know)",
                  names);
-        out_z(a, TUI_DIM, line);
+        app_out_z(a, TUI_DIM, line);
     }
     if (prompt && *prompt) {
         a->draft.drop_restored = true;
         tui_input_set(&a->in, pt_strz(prompt));
-        submit(a);
+        app_submit(a);
     }
-    menu_update(a);
-    paint(a);
+    app_menu_update(a);
+    app_paint(a);
     while (!a->quit) {
         pt_waitfd fds[5];
         int64_t now = pt_sys_now_ms();
@@ -248,27 +248,27 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         fds[4].fd = a->saving && a->saving->active ? pt_worker_fd(a->saving->worker) : -1;
         if (a->sess.opening) {
             pt_sys_wait(fds, 5, timeout_ms(a, now));
-            finish_session(a);
+            app_finish_session(a);
         } else if (a->open)
             pt_rt_step(a->s.rt, timeout_ms(a, now), fds, 5);
         else
             pt_sys_wait(fds, 5, timeout_ms(a, now));
-        finish_setting(a);
-        show_notes(a);
+        app_finish_setting(a);
+        app_show_notes(a);
         if (a->queue.expanded) {
             a->queue.expanded = false;
-            queued_submit(a);
+            app_queued_submit(a);
             set_dirty(a);
         }
         if (a->menu.sessions && a->menu.sessions->pending && pt_worker_finish(a->menu.sessions->worker)) {
             a->menu.sessions->pending = false;
             a->menu.sessions->ready = true;
-            menu_update(a);
+            app_menu_update(a);
             a->pace.urgent = true;
         }
         now = pt_sys_now_ms();
         {
-            uint32_t bg = bg_running(a);
+            uint32_t bg = app_bg_running(a);
             if (bg != a->run.nbg) {
                 a->run.nbg = bg;
                 set_dirty(a);
@@ -295,11 +295,11 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
                 break;
             }
             if (bits & TS_TSTP) {
-                suspend(a);
+                app_suspend(a);
                 tui_term_stop_self();
-                resume(a);
+                app_resume(a);
             } else if (bits & TS_CONT) {
-                resume(a); /* stopped by someone else; the shell may have reset the modes */
+                app_resume(a); /* stopped by someone else; the shell may have reset the modes */
                 tui_band_redraw(&a->band);
             }
             if (bits & TS_WINCH)
@@ -332,42 +332,42 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
                 a->pace.urgent = true;
             }
         }
-        if (a->run.active && !a->run.wait_at && run_clock(a, now) / BLINK_MS != a->run.tick) {
-            a->run.tick = run_clock(a, now) / BLINK_MS;
+        if (a->run.active && !a->run.wait_at && app_run_clock(a, now) / BLINK_MS != a->run.tick) {
+            a->run.tick = app_run_clock(a, now) / BLINK_MS;
             set_dirty(a);
         }
         if (now - a->pace.esc_at < DOUBLE_MS + 50 || now - a->pace.ctrlc_at < DOUBLE_MS + 50)
             set_dirty(a);
         if (a->draft.dirty && now - a->draft.at >= 1000)
-            save_draft(a);
+            app_save_draft(a);
         if (a->quit)
             break;
         if (a->pace.urgent || (a->pace.dirty && now - a->pace.last_paint >= a->pace.interval))
-            paint(a);
+            app_paint(a);
     }
     /* quit: the close claim, then the terminal. What was shown of an
      * unfinished answer stays (pytte -c picks the run up again). */
     if (a->code != 129 && ((a->view.kind != LIVE_NONE && a->view.live.n) || a->group.n)) {
         if (a->view.kind != LIVE_NONE && a->view.live.n) {
-            live_end(a);
-            out_z(a, TUI_DIM, "(detached)");
+            app_live_end(a);
+            app_out_z(a, TUI_DIM, "(detached)");
         }
-        group_close(a); /* the band is erased next */
+        app_group_close(a); /* the band is erased next */
         a->menu.kind = MENU_NONE;
-        paint(a);
+        app_paint(a);
     }
     a->quit = true;
     while (a->sess.opening) {
         pt_waitfd fd;
         fd.fd = cli_session_job_fd(a->sess.opening);
         pt_sys_wait(&fd, 1, -1);
-        finish_session(a);
+        app_finish_session(a);
     }
     snprintf(kept, sizeof kept, "%.63s", a->open ? a->s.id : "");
-    close_session(a);
+    app_close_session(a);
     while (a->saving && (a->saving->active || a->saving->pending)) {
         pt_waitfd fd;
-        finish_setting(a);
+        app_finish_setting(a);
         if (!a->saving->active)
             continue;
         fd.fd = pt_worker_fd(a->saving->worker);
@@ -382,13 +382,13 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         free(a->menu.sessions);
     }
     tui_band_erase(&a->band);
-    flush_out(a);
+    app_flush_out(a);
     if (a->code != 129 && kept[0] && !a->sess.discarded) { /* how to come back to it */
         char last[200];
         pt_buf_reset(&a->lines);
-        out_blank(&a->lines);
+        app_out_blank(&a->lines);
         snprintf(last, sizeof last, "to continue this session: pytte -r %s", kept);
-        out_z(a, TUI_DIM, last);
+        app_out_z(a, TUI_DIM, last);
         pt_buf_reset(&a->tmp);
         tui_sgr(&a->tmp, pt_buf_str(&a->lines), a->color);
         tui_term_write(a->t, pt_buf_str(&a->tmp)); /* OPOST makes \n a new line */

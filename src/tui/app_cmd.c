@@ -59,7 +59,7 @@ static pt_reasoning effort_used(const app *a, pt_reasoning want)
 }
 
 /* "max", or "max→high" when the model does not take max. */
-void effort_label(const app *a, char *out, size_t cap)
+void app_effort_label(const app *a, char *out, size_t cap)
 {
     pt_reasoning used = effort_used(a, a->o.reasoning);
     if (used == a->o.reasoning)
@@ -69,7 +69,7 @@ void effort_label(const app *a, char *out, size_t cap)
                  pt_reasoning_name(used));
 }
 
-void apply_symbols(app *a)
+void app_apply_symbols(app *a)
 {
     const char *v = a->cfg->val[CFG_SYMBOLS], *term = getenv("TERM");
     const char *loc = getenv("LC_ALL");
@@ -89,7 +89,7 @@ void apply_symbols(app *a)
     a->view.md.ascii = a->ascii;
 }
 
-void apply_thinking(app *a)
+void app_apply_thinking(app *a)
 {
     int i;
     a->thinking = TH_COLLAPSED;
@@ -118,10 +118,10 @@ static void start_setting(app *a)
     job->pending &= ~(1u << k);
     job->active = pt_worker_start(job->worker, write_setting, job);
     if (!job->active)
-        out_z(a, TUI_RED, "not saved: could not schedule the settings write");
+        app_out_z(a, TUI_RED, "not saved: could not schedule the settings write");
 }
 
-void finish_setting(app *a)
+void app_finish_setting(app *a)
 {
     config_job *job = a->saving;
     if (job && job->active && pt_worker_finish(job->worker)) {
@@ -129,14 +129,14 @@ void finish_setting(app *a)
         unsigned i;
         job->active = false;
         if (!job->ok) {
-            group_close(a);
-            out_note(a, &a->lines, TUI_RED, pt_strz(job->err));
+            app_group_close(a);
+            app_out_note(a, &a->lines, TUI_RED, pt_strz(job->err));
         } else {
             for (i = 0; i < NSETTINGS && app_settings[i].k != job->key; i++)
                 ;
             snprintf(msg, sizeof msg, "saved %s: %s", i < NSETTINGS ? app_settings[i].name : "setting",
                      job->value[0] ? job->value : "(none)");
-            out_z(a, TUI_DIM, msg);
+            app_out_z(a, TUI_DIM, msg);
         }
         a->pace.urgent = true;
     }
@@ -144,7 +144,7 @@ void finish_setting(app *a)
 }
 
 /* Apply now and queue a durable save; report success after it lands. */
-bool save_setting(app *a, int k, const char *v)
+bool app_save_setting(app *a, int k, const char *v)
 {
     char err[700];
     bool ok = true;
@@ -154,7 +154,7 @@ bool save_setting(app *a, int k, const char *v)
     if ((k == CFG_MODEL || (k == CFG_COMPACT_MODEL && *v)) &&
         !pt_ai_resolve(cli_catalog(), pt_strz(v), &t, &a->ar, &why)) {
         snprintf(err, sizeof err, "%s: %s", v, why ? why : "unknown");
-        out_z(a, TUI_RED, err);
+        app_out_z(a, TUI_RED, err);
         return false;
     }
     if (strcmp(a->cfg->src[k], "default") == 0 || strcmp(a->cfg->src[k], "user") == 0)
@@ -172,7 +172,7 @@ bool save_setting(app *a, int k, const char *v)
         a->saving = job;
     }
     if (!a->saving) {
-        out_z(a, TUI_RED, "not saved: could not allocate the settings worker");
+        app_out_z(a, TUI_RED, "not saved: could not allocate the settings worker");
         ok = false;
     } else {
         snprintf(a->saving->next[k], sizeof a->saving->next[k], "%s", v);
@@ -180,11 +180,11 @@ bool save_setting(app *a, int k, const char *v)
         start_setting(a);
     }
     if (k == CFG_THINKING) {
-        apply_thinking(a);
-        set_config(a);
+        app_apply_thinking(a);
+        app_set_config(a);
     }
     if (k == CFG_SYMBOLS)
-        apply_symbols(a);
+        app_apply_symbols(a);
     if (k == CFG_PERMS && pt_perm_parse(pt_strz(a->cfg->val[k]), &a->o.perm) && a->open)
         pt_rt_set_perm(a->s.rt, a->o.perm);
     if (k == CFG_SKILLS) { /* from the next epoch on: compaction or a new session */
@@ -194,20 +194,20 @@ bool save_setting(app *a, int k, const char *v)
     }
     if (k == CFG_COMPACT_MODEL) {
         a->o.compact_model = a->cfg->val[k][0] ? a->cfg->val[k] : NULL;
-        set_config(a);
+        app_set_config(a);
     }
     if (k == CFG_REASONING) {
         pt_reasoning r;
         if (cli_effort_parse(pt_strz(a->cfg->val[k]), &r)) {
             a->o.reasoning = r;
-            set_config(a);
+            app_set_config(a);
         }
     }
     return ok;
 }
 
 /* The model shown: the configured one, else the session's last. */
-void update_model(app *a)
+void app_update_model(app *a)
 {
     uint32_t n = a->open ? pt_entry_count(a->s.a) : 0;
     pt_entry_view v;
@@ -235,7 +235,7 @@ void update_model(app *a)
     }
 }
 
-void set_config(app *a)
+void app_set_config(app *a)
 {
     pt_config c;
     memset(&c, 0, sizeof c);
@@ -249,11 +249,11 @@ void set_config(app *a)
     c.no_sync = a->o.no_sync;
     if (a->open)
         pt_set_config(a->s.a, &c);
-    update_model(a);
+    app_update_model(a);
 }
 
 /* Background commands still running. */
-uint32_t bg_running(app *a)
+uint32_t app_bg_running(app *a)
 {
     pt_rt_background v[32];
     uint32_t n = a->open ? pt_rt_backgrounds(a->s.rt, v, 32) : 0, i, k = 0;
@@ -269,17 +269,17 @@ static void cmd_ps(app *a)
     uint32_t n = a->open ? pt_rt_backgrounds(a->s.rt, v, 32) : 0, i;
     char line[300], took[32];
     if (!n) {
-        out_z(a, TUI_DIM, "no background commands");
+        app_out_z(a, TUI_DIM, "no background commands");
         return;
     }
     for (i = 0; i < n && i < 32; i++) {
-        secs_short(took, sizeof took, pt_sys_now_ms() - v[i].started);
+        app_secs_short(took, sizeof took, pt_sys_now_ms() - v[i].started);
         if (v[i].ended)
             snprintf(line, sizeof line, "session %u · ended (exit %d), not read yet · %.200s", v[i].session,
                      v[i].status, v[i].command);
         else
             snprintf(line, sizeof line, "session %u · running %s · %.200s", v[i].session, took, v[i].command);
-        out_note(a, &a->lines, TUI_DIM, pt_strz(line));
+        app_out_note(a, &a->lines, TUI_DIM, pt_strz(line));
     }
 }
 
@@ -288,27 +288,27 @@ static void cmd_status(app *a)
     char line[5000], name[CLI_NAME_MAX + 1], eff[40];
     pt_str cwd = a->open ? pt_session_cwd(a->s.a) : PT_STR_NULL;
     snprintf(line, sizeof line, "session %s, owned by pid %ld\nstore %s", a->s.id, (long)getpid(), a->s.dir);
-    out_z(a, TUI_DIM, line);
+    app_out_z(a, TUI_DIM, line);
     if (cli_session_name(a->s.dir, name, sizeof name)) {
         snprintf(line, sizeof line, "name %s", name);
-        out_z(a, TUI_DIM, line);
+        app_out_z(a, TUI_DIM, line);
     }
     snprintf(line, sizeof line, "directory %.*s", (int)(cwd.n < 4096 ? cwd.n : 4096), cwd.p ? cwd.p : "");
-    out_z(a, TUI_DIM, line);
-    effort_label(a, eff, sizeof eff);
+    app_out_z(a, TUI_DIM, line);
+    app_effort_label(a, eff, sizeof eff);
     snprintf(line, sizeof line, "model %s · effort %s", a->model.name[0] ? a->model.name : "(none)", eff);
-    out_z(a, TUI_DIM, line);
+    app_out_z(a, TUI_DIM, line);
     if (a->model.ctx_window)
         snprintf(line, sizeof line, "context %llu of %u tokens (%u%%)", (unsigned long long)a->model.ctx_used, a->model.ctx_window,
                  (unsigned)(a->model.ctx_used * 100 / a->model.ctx_window));
     else
         snprintf(line, sizeof line, "context %llu tokens", (unsigned long long)a->model.ctx_used);
-    out_z(a, TUI_DIM, line);
+    app_out_z(a, TUI_DIM, line);
     snprintf(line, sizeof line, "terminal %dx%d · %s · %s · kitty keys %s · %s · %s symbols", a->cols, a->rows,
              getenv("TERM") ? getenv("TERM") : "(no TERM)", a->band.reflow ? "reflows" : "does not reflow",
              a->caps.kitty ? "on" : "off", a->caps.answered ? "answers queries" : "no query replies",
              a->ascii ? "ascii" : "unicode");
-    out_z(a, TUI_DIM, line);
+    app_out_z(a, TUI_DIM, line);
 }
 
 /* The usage doc: tokens per model, and what they cost where prices are known. */
@@ -319,7 +319,7 @@ static void cmd_usage(app *a)
     pt_arena_reset(&a->ar);
     u = a->open ? pt_json_parse(pt_doc(a->s.a, PT_S("usage")), &a->ar, NULL) : NULL;
     if (!pt_json_is(u, PT_J_OBJ) || !u->len) {
-        out_z(a, TUI_DIM, "no tokens used yet");
+        app_out_z(a, TUI_DIM, "no tokens used yet");
         return;
     }
     for (c = u->child; c; c = c->next) {
@@ -328,9 +328,9 @@ static void cmd_usage(app *a)
         pt_ai_target t;
         const char *why;
         int n;
-        tokens_short(in, sizeof in, ti + cr + cw);
-        tokens_short(out, sizeof out, to);
-        tokens_short(cache, sizeof cache, cr);
+        app_tokens_short(in, sizeof in, ti + cr + cw);
+        app_tokens_short(out, sizeof out, to);
+        app_tokens_short(cache, sizeof cache, cr);
         n = snprintf(line, sizeof line, "%.*s: %s in (%s from cache) · %s out · %lld requests", (int)c->key.n,
                      c->key.p, in, cache, out, (long long)pt_json_geti(c, "requests", 0));
         if (pt_ai_resolve(cli_catalog(), c->key, &t, &a->ar, &why) && t.known && t.model.cost.input) {
@@ -339,7 +339,7 @@ static void cmd_usage(app *a)
                           (double)cr * (double)k->cache_read + (double)cw * (double)k->cache_write) / 1e12;
             snprintf(line + n, sizeof line - (size_t)n, " · $%.2f", usd);
         }
-        out_z(a, TUI_DIM, line);
+        app_out_z(a, TUI_DIM, line);
     }
 }
 
@@ -349,12 +349,12 @@ static void cmd_help(app *a)
     char line[200];
     for (i = 0; i < NCMDS; i++) {
         snprintf(line, sizeof line, "/%s%s  %s", app_cmds[i].name, app_cmds[i].args, app_cmds[i].desc);
-        out_z(a, TUI_DIM, line);
+        app_out_z(a, TUI_DIM, line);
     }
-    out_z(a, TUI_DIM, "$name anywhere in a message, or /skill:name first, gives the model a skill's instructions");
+    app_out_z(a, TUI_DIM, "$name anywhere in a message, or /skill:name first, gives the model a skill's instructions");
     if (a->mcp && a->mcp->nall)
-        out_z(a, TUI_DIM, "/server:prompt [args] sends an MCP server's prompt; @server:uri adds a resource to a message");
-    out_z(a, TUI_DIM,
+        app_out_z(a, TUI_DIM, "/server:prompt [args] sends an MCP server's prompt; @server:uri adds a resource to a message");
+    app_out_z(a, TUI_DIM,
           "enter send · shift+enter, alt+enter or ctrl-j newline · esc esc interrupt · ctrl-c clear, "
           "interrupt or quit · ctrl-d quit · ctrl-t thinking · ctrl-o details · ctrl-z suspend · ctrl-l redraw");
 }
@@ -385,44 +385,44 @@ static void cmd_login(app *a, pt_str arg)
             snprintf(msg, sizeof msg, "%s: %s%s", q->id,
                      env && *env ? "from " : cli_auth_key(q->id) ? "saved in auth.json" : "no key",
                      env && *env ? q->key_env[0] : "");
-            out_z(a, TUI_DIM, msg);
+            app_out_z(a, TUI_DIM, msg);
         }
-        out_z(a, TUI_DIM, "/login <provider> saves a key; a key in the environment comes first");
+        app_out_z(a, TUI_DIM, "/login <provider> saves a key; a key in the environment comes first");
         return;
     }
     if (!p) {
         snprintf(msg, sizeof msg, "not a provider: %.*s", (int)(name.n > 100 ? 100 : name.n), name.p);
-        out_z(a, TUI_RED, msg);
+        app_out_z(a, TUI_RED, msg);
         return;
     }
     if (!key.n) {
         snprintf(msg, sizeof msg, "/login %s ", p->id);
         tui_input_set(&a->in, pt_strz(msg));
         snprintf(msg, sizeof msg, "paste the %s API key and press enter", p->name);
-        out_z(a, TUI_DIM, msg);
+        app_out_z(a, TUI_DIM, msg);
         return;
     }
     if (!cli_auth_valid(key)) {
-        out_z(a, TUI_RED, "not an API key: it has spaces or control characters");
+        app_out_z(a, TUI_RED, "not an API key: it has spaces or control characters");
         return;
     }
     if (!cli_auth_save(p->id, key, err, sizeof err)) {
-        out_z(a, TUI_RED, err);
+        app_out_z(a, TUI_RED, err);
         return;
     }
     cli_auth_path(path, sizeof path);
     snprintf(msg, sizeof msg, "saved the %s key to %s", p->name, path);
-    out_z(a, TUI_DIM, msg);
+    app_out_z(a, TUI_DIM, msg);
     if (err[0])
-        out_z(a, TUI_RED, err);
+        app_out_z(a, TUI_RED, err);
     if (p->key_env[0] && getenv(p->key_env[0]) && *getenv(p->key_env[0])) {
         snprintf(msg, sizeof msg, "%s is set in the environment and is used instead", p->key_env[0]);
-        out_z(a, TUI_DIM, msg);
+        app_out_z(a, TUI_DIM, msg);
     }
 }
 
 /* From a server, inside a step: shown at the loop's next pass. */
-void mcp_note(void *ud, const char *server, const char *msg)
+void app_mcp_note(void *ud, const char *server, const char *msg)
 {
     app *a = (app *)ud;
     pt_buf_putz(&a->mcp_notes, server ? server : "");
@@ -432,7 +432,7 @@ void mcp_note(void *ud, const char *server, const char *msg)
     set_dirty(a);
 }
 
-void show_notes(app *a)
+void app_show_notes(app *a)
 {
     pt_str all = pt_buf_str(&a->mcp_notes);
     size_t at = 0;
@@ -448,8 +448,8 @@ void show_notes(app *a)
             ;
         msg = (pt_str){all.p + tab + 1, e > tab ? e - tab - 1 : 0};
         snprintf(line, sizeof line, "mcp %.*s: %.*s", (int)(tab - at), all.p + at, (int)msg.n, msg.p);
-        out_z(a,
-              starts(msg, "failed") || starts(msg, "stopped") || starts(msg, "login failed") ||
+        app_out_z(a,
+              app_starts(msg, "failed") || app_starts(msg, "stopped") || app_starts(msg, "login failed") ||
                       pt_str_contains(msg, PT_S("log in with"))
                   ? TUI_RED
                   : TUI_DIM,
@@ -488,7 +488,7 @@ static void cmd_mcp(app *a, pt_str arg)
         name = pt_str_trim((pt_str){arg.p + sp + 1, arg.n - (size_t)sp - 1});
     }
     if (!a->mcp) {
-        out_z(a, TUI_DIM, "MCP servers are off (--no-mcp)");
+        app_out_z(a, TUI_DIM, "MCP servers are off (--no-mcp)");
         return;
     }
     n = a->open ? pt_rt_mcp_servers(a->s.rt, in, CLI_MCP_MAX) : 0;
@@ -496,7 +496,7 @@ static void cmd_mcp(app *a, pt_str arg)
         n = CLI_MCP_MAX;
     if (!sub.n) {
         if (!a->mcp->nall) {
-            out_z(a, TUI_DIM, "no MCP servers: add them to mcpServers in ~/.config/pytte/config.json, or to "
+            app_out_z(a, TUI_DIM, "no MCP servers: add them to mcpServers in ~/.config/pytte/config.json, or to "
                               ".mcp.json in a project");
             return;
         }
@@ -507,13 +507,13 @@ static void cmd_mcp(app *a, pt_str arg)
                          in[i].nprompts, in[i].nresources);
             else if (in[i].error[0])
                 snprintf(msg + k, sizeof msg - (size_t)k, " · %s", in[i].error);
-            out_z(a, in[i].state == PT_MCP_FAILED || in[i].state == PT_MCP_AUTH ? TUI_RED : TUI_DIM, msg);
+            app_out_z(a, in[i].state == PT_MCP_FAILED || in[i].state == PT_MCP_AUTH ? TUI_RED : TUI_DIM, msg);
         }
         for (i = 0; i < a->mcp->nall; i++)
             if (!a->mcp->info[i].runs) {
                 snprintf(msg, sizeof msg, "%s · not trusted (%s): /mcp trust runs this project's servers",
                          a->mcp->all[i].name, a->mcp->info[i].source);
-                out_z(a, TUI_DIM, msg);
+                app_out_z(a, TUI_DIM, msg);
             }
         return;
     }
@@ -522,11 +522,11 @@ static void cmd_mcp(app *a, pt_str arg)
         pt_rt_mcp_server add[CLI_MCP_MAX];
         uint32_t k = 0;
         if (!cli_mcp_trust(a->mcp, on, err, sizeof err)) {
-            out_z(a, TUI_RED, err);
+            app_out_z(a, TUI_RED, err);
             return;
         }
         if (!on) {
-            out_z(a, TUI_DIM, "no longer trusting this project's MCP servers: new sessions start without them");
+            app_out_z(a, TUI_DIM, "no longer trusting this project's MCP servers: new sessions start without them");
             cli_mcp_free(a->mcp);
             cli_mcp_load(a->mcp, a->mcp->project);
             a->o.nmcp = a->mcp->n;
@@ -549,27 +549,27 @@ static void cmd_mcp(app *a, pt_str arg)
                 add[k++] = a->mcp->run[i];
         }
         if (k && a->open && !pt_rt_mcp_setup(a->s.rt, &a->o.mcp_host, add, k)) {
-            out_z(a, TUI_RED, "out of memory starting them");
+            app_out_z(a, TUI_RED, "out of memory starting them");
             return;
         }
         snprintf(msg, sizeof msg, "trusted this project's MCP servers%s", k ? ": starting them; their tools come with the next session (/new) or after /compact" : "");
-        out_z(a, TUI_DIM, msg);
+        app_out_z(a, TUI_DIM, msg);
         return;
     }
     if (!pt_str_eqz(sub, "login") && !pt_str_eqz(sub, "logout") && !pt_str_eqz(sub, "restart")) {
-        out_z(a, TUI_RED, "/mcp [login|logout|restart NAME] [trust|untrust]");
+        app_out_z(a, TUI_RED, "/mcp [login|logout|restart NAME] [trust|untrust]");
         return;
     }
     if (!name.n) {
-        out_z(a, TUI_RED, "which server?");
+        app_out_z(a, TUI_RED, "which server?");
         return;
     }
     for (i = 0; i < n && !pt_str_eqz(name, in[i].name); i++)
         ;
     if (i == n) {
         snprintf(msg, sizeof msg, "no MCP server %.*s%s", (int)(name.n > 64 ? 64 : name.n), name.p,
-                 mcp_known(a, name) ? " runs: /mcp trust runs this project's servers" : "");
-        out_z(a, TUI_RED, msg);
+                 app_mcp_known(a, name) ? " runs: /mcp trust runs this project's servers" : "");
+        app_out_z(a, TUI_RED, msg);
         return;
     }
     if (pt_str_eqz(sub, "restart")) {
@@ -577,7 +577,7 @@ static void cmd_mcp(app *a, pt_str arg)
         snprintf(msg, sizeof msg, "restarting %s", in[i].name);
     } else if (strcmp(in[i].transport, "http") != 0) {
         snprintf(msg, sizeof msg, "%s is not a remote server: only those log in", in[i].name);
-        out_z(a, TUI_RED, msg);
+        app_out_z(a, TUI_RED, msg);
         return;
     } else if (pt_str_eqz(sub, "login")) {
         pt_rt_mcp_login(a->s.rt, name); /* it says what goes on */
@@ -586,7 +586,7 @@ static void cmd_mcp(app *a, pt_str arg)
         pt_rt_mcp_logout(a->s.rt, name);
         snprintf(msg, sizeof msg, "logged out of %s", in[i].name);
     }
-    out_z(a, TUI_DIM, msg);
+    app_out_z(a, TUI_DIM, msg);
 }
 
 static bool valid_setting(int s, const char *v)
@@ -598,7 +598,7 @@ static bool valid_setting(int s, const char *v)
     return !app_settings[s].vals;
 }
 
-void run_command(app *a, pt_str line)
+void app_run_command(app *a, pt_str line)
 {
     pt_str cmd = line, arg = PT_S("");
     long sp = pt_str_find(line, ' ');
@@ -610,8 +610,8 @@ void run_command(app *a, pt_str line)
     cmd.p++;
     cmd.n--;
     snprintf(v, sizeof v, "%.*s", (int)(arg.n < sizeof v ? arg.n : sizeof v - 1), arg.p);
-    group_close(a);
-    out_blank(&a->lines); /* the command itself is not echoed: only what it did */
+    app_group_close(a);
+    app_out_blank(&a->lines); /* the command itself is not echoed: only what it did */
     if (pt_str_eqz(cmd, "model")) {
         if (arg.n) {
             pt_ai_target t;
@@ -619,70 +619,70 @@ void run_command(app *a, pt_str line)
             pt_arena_reset(&a->ar);
             if (!pt_ai_resolve(cli_catalog(), arg, &t, &a->ar, &why)) {
                 snprintf(msg, sizeof msg, "%s: %s", v, why ? why : "unknown");
-                out_z(a, TUI_RED, msg);
+                app_out_z(a, TUI_RED, msg);
                 return;
             }
             snprintf(a->model.ref, sizeof a->model.ref, "%.255s", v);
             a->o.model = a->model.ref;
-            set_config(a);
+            app_set_config(a);
         }
         snprintf(msg, sizeof msg, "%smodel: %s", arg.n ? "switched " : "",
                  a->model.name[0] ? a->model.name : "(the session's last)");
-        out_z(a, TUI_DIM, msg);
+        app_out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "effort")) {
         if (arg.n) {
             pt_reasoning r;
             if (!cli_effort_parse(arg, &r)) {
-                out_z(a, TUI_RED, "levels: off, minimal, low, medium, high, xhigh, max");
+                app_out_z(a, TUI_RED, "levels: off, minimal, low, medium, high, xhigh, max");
                 return;
             }
             a->o.reasoning = r;
-            set_config(a);
+            app_set_config(a);
         }
         {
             char eff[40];
-            effort_label(a, eff, sizeof eff);
+            app_effort_label(a, eff, sizeof eff);
             snprintf(msg, sizeof msg, "%seffort: %s%s", arg.n ? "switched " : "", eff,
                      effort_used(a, a->o.reasoning) != a->o.reasoning ? " (the nearest this model takes)" : "");
         }
-        out_z(a, TUI_DIM, msg);
+        app_out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "new")) {
-        switch_session(a, NULL);
+        app_switch_session(a, NULL);
     } else if (pt_str_eqz(cmd, "resume")) {
         if (!arg.n) {
             tui_input_set(&a->in, PT_S("/resume "));
             a->menu.closed = false;
-            menu_update(a);
+            app_menu_update(a);
             return;
         }
-        switch_session(a, v);
+        app_switch_session(a, v);
     } else if (pt_str_eqz(cmd, "fork")) {
         if (!a->open)
-            out_z(a, TUI_RED, "no session to fork");
-        else if (session_empty(a))
-            out_z(a, TUI_DIM, "nothing to fork yet");
+            app_out_z(a, TUI_RED, "no session to fork");
+        else if (app_session_empty(a))
+            app_out_z(a, TUI_DIM, "nothing to fork yet");
         else if (a->run.active)
-            out_z(a, TUI_RED, "/fork waits for the run to end (esc esc stops it)");
+            app_out_z(a, TUI_RED, "/fork waits for the run to end (esc esc stops it)");
         else {
             a->o.fork = true;
-            switch_session(a, NULL);
+            app_switch_session(a, NULL);
             a->o.fork = false;
             a->sess.created = false; /* a copy: never discarded as empty */
         }
     } else if (pt_str_eqz(cmd, "worktree") || pt_str_eqz(cmd, "wt")) {
         if (arg.n && !cli_worktree_name_ok(v)) {
             snprintf(msg, sizeof msg, "not a worktree name: %.100s (letters, digits, - _ .)", v);
-            out_z(a, TUI_RED, msg);
+            app_out_z(a, TUI_RED, msg);
             return;
         }
         a->o.worktree = v; /* copied by the open */
-        switch_session(a, NULL);
+        app_switch_session(a, NULL);
         a->o.worktree = NULL;
     } else if (pt_str_eqz(cmd, "status")) {
         cmd_status(a);
     } else if (pt_str_eqz(cmd, "compact")) {
         if (!a->open || !pt_compact(a->s.a))
-            out_z(a, TUI_DIM, "nothing to compact yet");
+            app_out_z(a, TUI_DIM, "nothing to compact yet");
     } else if (pt_str_eqz(cmd, "usage")) {
         cmd_usage(a);
     } else if (pt_str_eqz(cmd, "ps")) {
@@ -692,18 +692,18 @@ void run_command(app *a, pt_str line)
         char said[64];
         snprintf(said, sizeof said, n ? "stopping %u background command%s" : "no background commands running", n,
                  n == 1 ? "" : "s");
-        out_z(a, TUI_DIM, said);
+        app_out_z(a, TUI_DIM, said);
     } else if (pt_str_eqz(cmd, "thinking")) {
         if (arg.n) {
-            if (!valid_setting(find_setting(PT_S("thinking")), v)) {
-                out_z(a, TUI_RED, "modes: collapsed, full, hidden");
+            if (!valid_setting(app_find_setting(PT_S("thinking")), v)) {
+                app_out_z(a, TUI_RED, "modes: collapsed, full, hidden");
                 return;
             }
-            if (!save_setting(a, CFG_THINKING, v))
+            if (!app_save_setting(a, CFG_THINKING, v))
                 return;
         }
         snprintf(msg, sizeof msg, "%sthinking: %s", arg.n ? "switched " : "", app_th_names[a->thinking]);
-        out_z(a, TUI_DIM, msg);
+        app_out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "settings")) {
         long sp2 = pt_str_find(arg, ' ');
         int s;
@@ -712,13 +712,13 @@ void run_command(app *a, pt_str line)
             a->menu.set_sel = a->menu.top = 0;
             return;
         }
-        s = find_setting((pt_str){arg.p, sp2 >= 0 ? (size_t)sp2 : arg.n});
+        s = app_find_setting((pt_str){arg.p, sp2 >= 0 ? (size_t)sp2 : arg.n});
         if (s < 0) {
             size_t i;
             int n = snprintf(msg, sizeof msg, "settings:");
             for (i = 0; i < NSETTINGS && n > 0 && (size_t)n < sizeof msg; i++)
                 n += snprintf(msg + n, sizeof msg - (size_t)n, "%s %s", i ? "," : "", app_settings[i].name);
-            out_z(a, TUI_RED, msg);
+            app_out_z(a, TUI_RED, msg);
             return;
         }
         if (sp2 >= 0) {
@@ -726,10 +726,10 @@ void run_command(app *a, pt_str line)
             snprintf(v, sizeof v, "%.*s", (int)(val.n < sizeof v ? val.n : sizeof v - 1), val.p);
             if (!valid_setting(s, v)) {
                 snprintf(msg, sizeof msg, "not a value for %s: %s", app_settings[s].name, v);
-                out_z(a, TUI_RED, msg);
+                app_out_z(a, TUI_RED, msg);
                 return;
             }
-            if (!save_setting(a, app_settings[s].k, v))
+            if (!app_save_setting(a, app_settings[s].k, v))
                 return;
         }
         if (sp2 >= 0) /* saved: the value, and where it was saved */
@@ -739,7 +739,7 @@ void run_command(app *a, pt_str line)
             snprintf(msg, sizeof msg, "%s: %s (%s)", app_settings[s].name,
                      a->cfg->val[app_settings[s].k][0] ? a->cfg->val[app_settings[s].k] : "(none)",
                      a->cfg->src[app_settings[s].k]);
-        out_z(a, TUI_DIM, msg);
+        app_out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "login")) {
         cmd_login(a, arg);
     } else if (pt_str_eqz(cmd, "mcp")) {
@@ -751,12 +751,12 @@ void run_command(app *a, pt_str line)
         a->quit = true;
     } else {
         snprintf(msg, sizeof msg, "unknown command /%.*s; /help lists them", (int)(cmd.n > 100 ? 100 : cmd.n), cmd.p);
-        out_z(a, TUI_RED, msg);
+        app_out_z(a, TUI_RED, msg);
     }
 }
 
 /* The configured server of that name: running, or waiting for trust. */
-bool mcp_known(app *a, pt_str name)
+bool app_mcp_known(app *a, pt_str name)
 {
     uint32_t i;
     for (i = 0; a->mcp && i < a->mcp->nall; i++)

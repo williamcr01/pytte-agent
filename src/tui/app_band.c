@@ -15,7 +15,7 @@ static void blank_row(app *a)
 }
 
 /* A token count, short: 950, 12.3k, 200k, 1.2M. */
-void tokens_short(char *out, size_t cap, uint64_t n)
+void app_tokens_short(char *out, size_t cap, uint64_t n)
 {
     if (n < 1000)
         snprintf(out, cap, "%llu", (unsigned long long)n);
@@ -65,12 +65,12 @@ static void status_row(app *a, int64_t now, int total, int sel)
         pt_buf_putz(&a->tmp, pt_perm_name(a->o.perm));
         pt_buf_putz(&a->tmp, " · ");
         pt_buf_putz(&a->tmp, model ? model + 1 : a->model.name[0] ? a->model.name : "no model");
-        effort_label(a, eff, sizeof eff);
+        app_effort_label(a, eff, sizeof eff);
         n = snprintf(line, sizeof line, " · %s", eff);
         if (a->model.ctx_window) { /* the context used, of the model's window */
             char used[16], all[16];
-            tokens_short(used, sizeof used, a->model.ctx_used);
-            tokens_short(all, sizeof all, a->model.ctx_window);
+            app_tokens_short(used, sizeof used, a->model.ctx_used);
+            app_tokens_short(all, sizeof all, a->model.ctx_window);
             n += snprintf(line + n, sizeof line - (size_t)n, " · %s/%s", used, all);
         }
         if (a->run.nbg)
@@ -101,10 +101,10 @@ static void activity_row(app *a, int64_t now)
                                           : a->run.phase == PH_WRITE   ? "writing"
                                           : a->run.phase == PH_COMPACT ? "compacting"
                                                                    : "working");
-    secs_short(el, sizeof el, run_clock(a, now));
+    app_secs_short(el, sizeof el, app_run_clock(a, now));
     pt_buf_reset(&a->tmp);
     tui_style(&a->tmp, ACCENT | TUI_BOLD);
-    pt_buf_putz(&a->tmp, blink(a, now));
+    pt_buf_putz(&a->tmp, app_blink(a, now));
     tui_style(&a->tmp, 0);
     pt_buf_putc(&a->tmp, ' ');
     pt_buf_putz(&a->tmp, what);
@@ -146,9 +146,9 @@ static void menu_row(app *a, int i)
         int col = 0;
         if (a->menu.kind == MENU_CMD)
             pt_buf_putc(&a->tmp, '/');
-        tui_clean(&a->tmp, item_label(a, i), &col);
+        tui_clean(&a->tmp, app_item_label(a, i), &col);
         if (a->menu.items[i].dn) {
-            int pad = a->menu.label_w - tui_width(item_label(a, i), true);
+            int pad = a->menu.label_w - tui_width(app_item_label(a, i), true);
             tui_style(&a->tmp, TUI_DIM);
             for (pad = pad > 0 ? pad + 2 : 2; pad > 0; pad--)
                 pt_buf_putc(&a->tmp, ' ');
@@ -159,12 +159,12 @@ static void menu_row(app *a, int i)
 }
 
 /* The first tool call waiting for approval, if any. */
-bool asking(app *a)
+bool app_asking(app *a)
 {
     if (!a->open || a->sess.opening || !pt_asks(a->s.a, &a->ask.view, 1))
         return false;
     if (a->ask.view.task != a->ask.task) { /* a new question */
-        pt_str g = call_gist(a, a->ask.view.args);
+        pt_str g = app_call_gist(a, a->ask.view.args);
         size_t n = 0;
         a->ask.task = a->ask.view.task;
         a->ask.sel = 0;
@@ -215,7 +215,7 @@ static void ask_rows(app *a, int n)
     pt_buf_putz(&a->tmp2, a->sy->ask);
     tui_style(&a->tmp2, 0);
     pt_buf_putc(&a->tmp2, ' ');
-    if (tool_of(a->ask.view.name) < 0 && a->ask.view.prompt.n) { /* another tool: its name and what it asks */
+    if (app_tool_of(a->ask.view.name) < 0 && a->ask.view.prompt.n) { /* another tool: its name and what it asks */
         size_t at = a->tmp2.n;
         tui_style(&a->tmp2, TUI_DIM);
         pt_buf_put(&a->tmp2, a->ask.view.name.p, a->ask.view.name.n > 60 ? 60 : a->ask.view.name.n);
@@ -226,7 +226,7 @@ static void ask_rows(app *a, int n)
             if (a->tmp2.p[k] == '\n')
                 a->tmp2.p[k] = ' ';
     } else {
-        phrase(a, &a->tmp2, a->ask.view.name, a->ask.view.args);
+        app_phrase(a, &a->tmp2, a->ask.view.name, a->ask.view.args);
     }
     k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
     a->tmp2.n = k;
@@ -239,7 +239,7 @@ static void ask_rows(app *a, int n)
 static void build_frame(app *a, int64_t now)
 {
     int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, st, gap, act, i, first, top, nask;
-    size_t secret = secret_at(pt_buf_str(&a->in.text));
+    size_t secret = app_secret_at(pt_buf_str(&a->in.text));
     int total = a->menu.kind == MENU_SETTINGS ? (int)NSETTINGS : a->menu.n;
     int sel = a->menu.kind == MENU_SETTINGS ? a->menu.set_sel : a->menu.sel;
     bool tiny = a->cols < 20 || a->rows < 4;
@@ -251,7 +251,7 @@ static void build_frame(app *a, int64_t now)
     pt_buf_reset(live_rows);
     if (a->group.n || a->run.ncalls) { /* the open group */
         pt_buf_putc(live_rows, '\n');
-        group_render(a, live_rows, true);
+        app_group_render(a, live_rows, true);
     }
     if (a->view.kind != LIVE_NONE && a->view.live.n) {
         tui_md copy = a->view.md;
@@ -262,7 +262,7 @@ static void build_frame(app *a, int64_t now)
     }
     for (i = 0; (size_t)i < live_rows->n; i++)
         live_n += live_rows->p[i] == '\n';
-    a->ask.shown = asking(a);
+    a->ask.shown = app_asking(a);
     if (a->run.active && a->ask.shown && !a->run.wait_at) /* the clock stands still while the user decides */
         a->run.wait_at = now;
     else if (a->run.wait_at && !a->ask.shown) {
@@ -407,7 +407,7 @@ static void build_frame(app *a, int64_t now)
         a->menu.sel = sel;
         a->menu.label_w = 0;
         for (i = start; a->menu.kind != MENU_SETTINGS && i < start + nmenu && i < total; i++) {
-            int lw = tui_width(item_label(a, i), true);
+            int lw = tui_width(app_item_label(a, i), true);
             a->menu.label_w = lw > a->menu.label_w ? (lw > 40 ? 40 : lw) : a->menu.label_w;
         }
         for (i = start; i < start + nmenu && i < total; i++)
@@ -418,7 +418,7 @@ static void build_frame(app *a, int64_t now)
         status_row(a, now, total, sel);
 }
 
-void flush_out(app *a)
+void app_flush_out(app *a)
 {
     int ms = tui_term_write(a->t, pt_buf_str(&a->band.out));
     pt_buf_reset(&a->band.out);
@@ -429,13 +429,13 @@ void flush_out(app *a)
         a->pace.interval /= 2;
 }
 
-void paint(app *a)
+void app_paint(app *a)
 {
     int64_t now = pt_sys_now_ms();
     build_frame(a, now);
     if (a->in.text.oom || a->in.kill.oom || a->in.saved.oom || a->frame.rows.oom || a->lines.oom ||
         a->view.live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->menu.buf.oom || a->group.buf.oom ||
-        runs_oom(a) || a->live_rows.oom || a->diff.oom) {
+        app_runs_oom(a) || a->live_rows.oom || a->diff.oom) {
         if (!a->quit)
             fprintf(stderr, "pytte: out of memory drawing the terminal\n");
         a->code = 1;
@@ -453,7 +453,7 @@ void paint(app *a)
         return;
     }
     pt_buf_reset(&a->lines);
-    flush_out(a);
+    app_flush_out(a);
     a->pace.dirty = a->pace.urgent = false;
     a->pace.last_paint = now;
 }

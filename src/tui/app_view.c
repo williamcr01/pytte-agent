@@ -7,7 +7,7 @@
 /* Clean outside text, then each of its lines: style, the prefix on the
  * first line (indent spaces on the others), word-wrapped with a hanging
  * indent. */
-void out_text(app *a, pt_buf *out, int style, const char *prefix, int pstyle, pt_str raw, int indent)
+void app_out_text(app *a, pt_buf *out, int style, const char *prefix, int pstyle, pt_str raw, int indent)
 {
     pt_str s;
     size_t at = 0;
@@ -87,20 +87,20 @@ static void out_rail(app *a, pt_buf *out, const char *rail, int rstyle, int styl
 }
 
 /* A line from pytte itself, after its mark: a dim note, or a red failure. */
-void out_note(app *a, pt_buf *out, int style, pt_str raw)
+void app_out_note(app *a, pt_buf *out, int style, pt_str raw)
 {
     char mark[16];
     snprintf(mark, sizeof mark, "%s ", style & TUI_RED ? a->sy->fail : a->sy->note);
-    out_text(a, out, style, mark, style, raw, MARGIN);
+    app_out_text(a, out, style, mark, style, raw, MARGIN);
 }
 
-void out_z(app *a, int style, const char *z)
+void app_out_z(app *a, int style, const char *z)
 {
-    group_close(a);
-    out_note(a, &a->lines, style, pt_strz(z));
+    app_group_close(a);
+    app_out_note(a, &a->lines, style, pt_strz(z));
 }
 
-void out_blank(pt_buf *out)
+void app_out_blank(pt_buf *out)
 {
     pt_buf_putc(out, '\n');
 }
@@ -126,7 +126,7 @@ static void out_md(app *a, pt_buf *out, tui_md *m, pt_str raw, int base)
 
 /* The gist of a call's arguments: its first string member ("ls -la",
  * "src/a.c"), else the JSON as it came. */
-pt_str call_gist(app *a, pt_str args)
+pt_str app_call_gist(app *a, pt_str args)
 {
     const pt_json *j, *c;
     int64_t session;
@@ -152,7 +152,7 @@ static void out_call(app *a, pt_buf *out, const pt_block *b)
 {
     char head[160];
     snprintf(head, sizeof head, "%s %.*s ", a->sy->note, (int)(b->name.n > 60 ? 60 : b->name.n), b->name.p);
-    out_text(a, out, 0, head, TUI_BOLD, b->args, MARGIN);
+    app_out_text(a, out, 0, head, TUI_BOLD, b->args, MARGIN);
 }
 
 /* The builtin tools: the name shown in a row, and the kind. */
@@ -166,7 +166,7 @@ static const struct {
 };
 #define NTOOLS (sizeof tools / sizeof tools[0])
 
-int tool_of(pt_str name)
+int app_tool_of(pt_str name)
 {
     int i;
     for (i = 0; i < (int)NTOOLS; i++)
@@ -177,11 +177,11 @@ int tool_of(pt_str name)
 
 /* A call on one row: the tool's name, dim, in a column, then the gist of
  * its arguments; in a command, the programs stand out and the rest is dim. */
-void phrase(app *a, pt_buf *out, pt_str name, pt_str args)
+void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args)
 {
-    pt_str g = call_gist(a, args);
+    pt_str g = app_call_gist(a, args);
     bool cmd = pt_str_eqz(name, "bash"), at_cmd = true, in_word = false, prog = false;
-    int col = 0, cur = -1, ti = tool_of(name), w;
+    int col = 0, cur = -1, ti = app_tool_of(name), w;
     size_t k;
     tui_style(out, TUI_DIM);
     if (ti >= 0)
@@ -220,7 +220,7 @@ void phrase(app *a, pt_buf *out, pt_str name, pt_str args)
 }
 
 /* A duration, short: 5s, 2m 5s, 1h 2m. */
-void secs_short(char *out, size_t cap, int64_t ms)
+void app_secs_short(char *out, size_t cap, int64_t ms)
 {
     long long t = (long long)(ms < 0 ? 0 : ms / 1000);
     if (t < 60)
@@ -233,16 +233,16 @@ void secs_short(char *out, size_t cap, int64_t ms)
 
 /* How long the run has worked: the time spent waiting for an answer to a
  * question does not count. */
-int64_t run_clock(const app *a, int64_t now)
+int64_t app_run_clock(const app *a, int64_t now)
 {
     return (a->run.wait_at ? a->run.wait_at : now) - a->run.at;
 }
 
 /* The activity mark blinks with the clock, lighting as its seconds change;
  * it stays lit while the clock stands still. */
-const char *blink(const app *a, int64_t now)
+const char *app_blink(const app *a, int64_t now)
 {
-    return a->run.wait_at || run_clock(a, now) / BLINK_MS % 2 == 0 ? a->sy->dot : " ";
+    return a->run.wait_at || app_run_clock(a, now) / BLINK_MS % 2 == 0 ? a->sy->dot : " ";
 }
 
 /* The call a result answers: searched from the newest entry back. */
@@ -293,7 +293,7 @@ static pt_str last_lines(pt_str s, uint32_t n)
 
 static const char *const bad_names[NBAD] = {"", "failed", "timed out", "denied", "cancelled", "interrupted"};
 
-bool starts(pt_str s, const char *z)
+bool app_starts(pt_str s, const char *z)
 {
     size_t n = strlen(z);
     return s.n >= n && memcmp(s.p, z, n) == 0;
@@ -331,11 +331,11 @@ static void group_add(app *a, const pt_entry_view *v)
     int64_t ms = -1, code = 0, session = 0;
     bool has_code, timed = false, stats = false, on = false;
     unsigned add = 0, del = 0;
-    int ti = tool_of(m->name), left = TOOL_FAIL;
+    int ti = app_tool_of(m->name), left = TOOL_FAIL;
     char seg[160], tail[64];
     grow *g;
     if (a->group.n == GROUP_MAX)
-        group_close(a);
+        app_group_close(a);
     g = &a->group.rows[a->group.n];
     memset(g, 0, sizeof *g);
     g->cat = (uint8_t)(ti < 0 ? CAT_OTHER : tools[ti].cat);
@@ -348,9 +348,9 @@ static void group_add(app *a, const pt_entry_view *v)
         ms = -1;
     if (g->cat == CAT_COMMAND) { /* bash's closing note: the row says it */
         pt_str last = last_lines(text, 1);
-        timed = starts(last, "[timed out after ");
-        if (timed || starts(last, "[exit code ") || starts(last, "[stopped]") || starts(last, "[ended]") ||
-            starts(last, "[still running as session ")) {
+        timed = app_starts(last, "[timed out after ");
+        if (timed || app_starts(last, "[exit code ") || app_starts(last, "[stopped]") || app_starts(last, "[ended]") ||
+            app_starts(last, "[still running as session ")) {
             text.n = (size_t)(last.p - text.p);
             while (text.n && text.p[text.n - 1] == '\n')
                 text.n--;
@@ -360,9 +360,9 @@ static void group_add(app *a, const pt_entry_view *v)
         g->bad = G_OK;
     else if (pt_json_get(data, "interrupted"))
         g->bad = G_INTERRUPTED;
-    else if (starts(text, "The user aborted"))
+    else if (app_starts(text, "The user aborted"))
         g->bad = G_CANCELLED;
-    else if (starts(text, "Permission denied") || starts(text, "The user denied"))
+    else if (app_starts(text, "Permission denied") || app_starts(text, "The user denied"))
         g->bad = G_DENIED;
     else
         g->bad = timed ? G_TIMEOUT : G_FAILED;
@@ -396,12 +396,12 @@ static void group_add(app *a, const pt_entry_view *v)
         snprintf(tail, sizeof tail, " · still running");
     } else if (g->cat == CAT_COMMAND && ms >= 1000) {
         char took[32];
-        secs_short(took, sizeof took, ms);
+        app_secs_short(took, sizeof took, ms);
         snprintf(tail, sizeof tail, " · %s", took);
     }
     /* the row: the call, then what came of it */
     g->at = (uint32_t)a->group.buf.n;
-    phrase(a, &a->group.buf, m->name, args);
+    app_phrase(a, &a->group.buf, m->name, args);
     if (stats) { /* "+3", "+3 -1" */
         snprintf(seg, sizeof seg, " +%u", add);
         tui_style(&a->group.buf, TUI_GREEN);
@@ -488,7 +488,7 @@ static void run_done(app *a, pt_str call_id)
         }
 }
 
-bool runs_oom(const app *a)
+bool app_runs_oom(const app *a)
 {
     int i;
     for (i = 0; i < RUN_MAX; i++)
@@ -500,11 +500,11 @@ bool runs_oom(const app *a)
 /* The group: whole for the scrollback; live, for the band, with its
  * newest rows only, without details, and the running calls last, marked
  * by the blinking dot (the newest with the end of its output). */
-void group_render(app *a, pt_buf *out, bool live)
+void app_group_render(app *a, pt_buf *out, bool live)
 {
     bool running = live && a->run.ncalls;
     int i, first = 0;
-    const char *mark = blink(a, pt_sys_now_ms());
+    const char *mark = app_blink(a, pt_sys_now_ms());
     char more[48];
     if (!a->group.n && !running)
         return;
@@ -519,7 +519,7 @@ void group_render(app *a, pt_buf *out, bool live)
     for (i = first; i < a->group.n; i++) {
         const grow *g = &a->group.rows[i];
         if (g->at + g->n > a->group.buf.n || g->dat + g->dn > a->group.buf.n)
-            break; /* out of memory: paint() says so */
+            break; /* out of memory: app_paint() says so */
         group_row(a, out, g->bad ? a->sy->fail : a->sy->ok, g->bad ? TUI_RED : TUI_GREEN | TUI_DIM,
                   (pt_str){a->group.buf.p + g->at, g->n});
         if (!live)
@@ -555,12 +555,12 @@ void group_render(app *a, pt_buf *out, bool live)
 }
 
 /* The open group goes to the scrollback. */
-void group_close(app *a)
+void app_group_close(app *a)
 {
     if (!a->group.n)
         return;
-    out_blank(&a->lines);
-    group_render(a, &a->lines, false);
+    app_out_blank(&a->lines);
+    app_group_render(a, &a->lines, false);
     a->group.n = 0;
     pt_buf_reset(&a->group.buf);
 }
@@ -582,10 +582,10 @@ static void out_thinking(app *a, pt_buf *out, pt_str text, int64_t ms, bool full
             snprintf(took, sizeof took, " for <1s");
         else {
             snprintf(took, sizeof took, " for ");
-            secs_short(took + 5, sizeof took - 5, ms);
+            app_secs_short(took + 5, sizeof took - 5, ms);
         }
         snprintf(line, sizeof line, "%s thought%s", a->sy->think, took);
-        out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
+        app_out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
     }
 }
 
@@ -644,16 +644,16 @@ static bool is_note(const pt_entry_view *v)
 
 /* An entry from its record: on start, for entries not streamed, and in
  * the full view (Ctrl-O). */
-void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
+void app_out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
 {
     const pt_msg *m = v->msg;
     uint32_t i;
     if (strcmp(v->kind, "epoch") == 0 && v->epoch > 1) {
         char line[120];
-        out_blank(out);
+        app_out_blank(out);
         snprintf(line, sizeof line, "compacted: the model continues from a summary%s",
                  full ? ":" : " (ctrl+o shows it)");
-        out_note(a, out, TUI_DIM, pt_strz(line));
+        app_out_note(a, out, TUI_DIM, pt_strz(line));
         if (full)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->summary, 0);
         if (full && v->files.n)
@@ -661,27 +661,27 @@ void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
     } else if (is_note(v) && !full) { /* its "- session ..." lines */
         pt_str text = m->text;
         size_t at = 0, e;
-        out_blank(out);
+        app_out_blank(out);
         while (at < text.n) {
             for (e = at; e < text.n && text.p[e] != '\n'; e++)
                 ;
             if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ')
-                out_note(a, out, TUI_DIM, (pt_str){text.p + at + 2, e - at - 2});
+                app_out_note(a, out, TUI_DIM, (pt_str){text.p + at + 2, e - at - 2});
             at = e + 1;
         }
     } else if (strcmp(v->kind, "user") == 0) { /* as it looked at the prompt */
         pt_str text = m->text, name;
         char line[120], mark[16];
-        out_blank(out);
+        app_out_blank(out);
         snprintf(mark, sizeof mark, "%s ", a->sy->prompt);
         size_t res;
         while (pt_rt_skill_block(&text, &name)) { /* a skill's instructions: just its name */
             snprintf(line, sizeof line, "skill %.*s", (int)(name.n > 64 ? 64 : name.n), name.p);
-            out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
+            app_out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
         }
         res = resources_at(text);
         if (res)
-            out_text(a, out, TUI_BOLD, mark, ACCENT | TUI_BOLD, (pt_str){text.p, res}, MARGIN);
+            app_out_text(a, out, TUI_BOLD, mark, ACCENT | TUI_BOLD, (pt_str){text.p, res}, MARGIN);
         while (res < text.n) { /* an @-mention's contents: just which */
             const char *p = text.p + res + 20, *end = text.p + text.n, *q, *u, *close;
             for (q = p; q < end && *q != '"'; q++)
@@ -691,7 +691,7 @@ void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
                 ;
             snprintf(line, sizeof line, "resource %.*s:%.*s", (int)(q - p > 40 ? 40 : q - p), p,
                      (int)(close - u > 70 ? 70 : close - u), u);
-            out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
+            app_out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
             {
                 pt_str rest = {text.p + res + 2, text.n - res - 2};
                 size_t nx = resources_at(rest);
@@ -700,7 +700,7 @@ void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
         }
     } else if (strcmp(v->kind, "assistant") == 0) {
         bool any = false;
-        out_blank(out);
+        app_out_blank(out);
         for (i = 0; i < m->nblocks; i++) {
             const pt_block *b = &m->blocks[i];
             if (b->kind == PT_BLOCK_THINKING && (b->text.n || full)) {
@@ -719,21 +719,21 @@ void out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
             }
         }
         if (m->stop == PT_STOP_ABORTED || m->stop == PT_STOP_ERROR)
-            out_note(a, out, TUI_DIM, any ? PT_S("interrupted") : PT_S("interrupted, nothing arrived"));
+            app_out_note(a, out, TUI_DIM, any ? PT_S("interrupted") : PT_S("interrupted, nothing arrived"));
     } else if (strcmp(v->kind, "tool_result") == 0) { /* else it joins a group */
         out_rail(a, out, a->sy->bar, TUI_DIM, m->is_error ? TUI_RED | TUI_DIM : TUI_DIM, m->text, 0);
     } else if (strcmp(v->kind, "error") == 0) {
-        out_note(a, out, TUI_RED, error_message(a, v->raw));
+        app_out_note(a, out, TUI_RED, error_message(a, v->raw));
     } else if (strcmp(v->kind, "note") == 0) {
-        out_note(a, out, TUI_DIM, m->text);
+        app_out_note(a, out, TUI_DIM, m->text);
     }
 }
 
 static void begin_msg(app *a)
 {
-    group_close(a);
+    app_group_close(a);
     if (!a->view.started)
-        out_blank(&a->lines);
+        app_out_blank(&a->lines);
     a->view.started = true;
 }
 
@@ -767,7 +767,7 @@ static void live_add(app *a, pt_str delta)
 }
 
 /* The block ended: its unfinished line is complete now. */
-void live_end(app *a)
+void app_live_end(app *a)
 {
     if (a->view.kind != LIVE_NONE && a->view.live.n)
         live_line(a, pt_buf_str(&a->view.live));
@@ -782,7 +782,7 @@ void live_end(app *a)
 
 static void live_begin(app *a, int kind)
 {
-    live_end(a);
+    app_live_end(a);
     a->view.kind = kind;
     memset(&a->view.md, 0, sizeof a->view.md);
     a->view.md.ascii = a->ascii;
@@ -800,13 +800,13 @@ static void on_ai(app *a, const pt_ai_event *ev)
         break;
     case PT_EV_THINKING_START:
         if (a->thinking == TH_FULL)
-            group_close(a);
+            app_group_close(a);
         live_begin(a, LIVE_THINK);
         a->view.think_at = pt_sys_now_ms();
         a->run.phase = PH_THINK;
         break;
     case PT_EV_TEXT_START: /* the calls before it are over */
-        group_close(a);
+        app_group_close(a);
         live_begin(a, LIVE_TEXT);
         a->run.phase = PH_WRITE;
         break;
@@ -818,10 +818,10 @@ static void on_ai(app *a, const pt_ai_event *ev)
     case PT_EV_TEXT_END:
     case PT_EV_DONE:
     case PT_EV_ERROR:
-        live_end(a);
+        app_live_end(a);
         break;
     case PT_EV_TOOLCALL_END: /* shown with its result, or in the band as it runs */
-        live_end(a);
+        app_live_end(a);
         a->view.printed = true;
         break;
     default:
@@ -856,8 +856,8 @@ static void show_entry(app *a, const pt_entry_view *v)
     }
     if (strcmp(v->kind, "assistant") == 0 && !shows(a, v))
         return;
-    group_close(a);
-    out_entry(a, &a->lines, v, false);
+    app_group_close(a);
+    app_out_entry(a, &a->lines, v, false);
 }
 
 static void on_entries(app *a)
@@ -887,10 +887,10 @@ static void on_entries(app *a)
         }
         if (strcmp(v.kind, "assistant") == 0 && a->view.streamed) {
             /* already on screen; an interrupted partial gets its mark */
-            live_end(a);
+            app_live_end(a);
             if (v.msg->stop == PT_STOP_ABORTED || v.msg->stop == PT_STOP_ERROR) {
                 begin_msg(a);
-                out_z(a, TUI_DIM, a->view.printed ? "interrupted" : "interrupted, nothing arrived");
+                app_out_z(a, TUI_DIM, a->view.printed ? "interrupted" : "interrupted, nothing arrived");
             }
             a->view.streamed = false;
             a->view.started = false;
@@ -901,7 +901,7 @@ static void on_entries(app *a)
     a->view.seen = n;
 }
 
-void on_event(void *ud, const pt_event *ev)
+void app_on_event(void *ud, const pt_event *ev)
 {
     app *a = (app *)ud;
     char line[600];
@@ -916,8 +916,8 @@ void on_event(void *ud, const pt_event *ev)
         if (pt_str_eqz(ev->outcome, "started"))
             a->run.phase = PH_COMPACT;
         else if (pt_str_eqz(ev->outcome, "failed")) {
-            group_close(a);
-            out_note(a, &a->lines, TUI_RED, ev->error);
+            app_group_close(a);
+            app_out_note(a, &a->lines, TUI_RED, ev->error);
         }
         break;
     case PT_E_TOOL_START:
@@ -930,7 +930,7 @@ void on_event(void *ud, const pt_event *ev)
             pt_buf_puts(&r->id, ev->call_id);
             pt_buf_reset(&r->out);
             pt_buf_reset(&r->head);
-            phrase(a, &r->head, ev->name, ev->args);
+            app_phrase(a, &r->head, ev->name, ev->args);
         }
         break;
     case PT_E_TOOL_OUTPUT: {
@@ -961,27 +961,27 @@ void on_event(void *ud, const pt_event *ev)
         tui_clean(&a->run.retry_err, ev->error, &(int){0});
         break;
     case PT_E_RUN_DONE:
-        group_close(a);
+        app_group_close(a);
         if (pt_str_eqz(ev->outcome, "failed")) {
-            out_note(a, &a->lines, TUI_RED, ev->error);
+            app_out_note(a, &a->lines, TUI_RED, ev->error);
         } else {
             /* What the clock said, kept: how long the run took. */
             char took[32];
-            int64_t ms = run_clock(a, pt_sys_now_ms());
+            int64_t ms = app_run_clock(a, pt_sys_now_ms());
             if (ms < 1000)
                 snprintf(took, sizeof took, "<1s");
             else
-                secs_short(took, sizeof took, ms);
+                app_secs_short(took, sizeof took, ms);
             snprintf(line, sizeof line, "worked for %s", took);
-            out_blank(&a->lines);
-            out_z(a, TUI_DIM, line);
+            app_out_blank(&a->lines);
+            app_out_z(a, TUI_DIM, line);
         }
         a->run.at = pt_sys_now_ms(); /* a queued input runs next */
         a->run.wait_at = 0;
         break;
     case PT_E_FATAL:
-        group_close(a);
-        out_note(a, &a->lines, TUI_RED, ev->error);
+        app_group_close(a);
+        app_out_note(a, &a->lines, TUI_RED, ev->error);
         break;
     default:
         break;
@@ -990,7 +990,7 @@ void on_event(void *ud, const pt_event *ev)
 }
 
 /* The transcript from the third-newest user entry on (16.2.5). */
-void out_tail(app *a)
+void app_out_tail(app *a)
 {
     uint32_t n = pt_entry_count(a->s.a), i, from = 0, users = 0, earlier = 0;
     pt_entry_view v;
@@ -1005,7 +1005,7 @@ void out_tail(app *a)
             earlier++;
     if (earlier) {
         snprintf(line, sizeof line, "%u earlier entries · pytte log shows them", earlier);
-        out_z(a, TUI_DIM, line);
+        app_out_z(a, TUI_DIM, line);
     }
     for (i = from; i < n && pt_entry_at(a->s.a, i, &v); i++)
         show_entry(a, &v);

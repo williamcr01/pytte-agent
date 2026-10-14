@@ -11,13 +11,13 @@ static void draft_path(const app *a, char *out, size_t cap)
     snprintf(out, cap, "%s/draft", a->s.dir);
 }
 
-void save_draft(app *a)
+void app_save_draft(app *a)
 {
     char p[4300];
     if (!a->open)
         return;
     draft_path(a, p, sizeof p);
-    if (a->in.text.n && !secret_at(pt_buf_str(&a->in.text)))
+    if (a->in.text.n && !app_secret_at(pt_buf_str(&a->in.text)))
         pt_sys_write_file(p, a->in.text.p, a->in.text.n);
     else
         unlink(p);
@@ -28,7 +28,7 @@ void save_draft(app *a)
 static void reset_display(app *a)
 {
     uint32_t i;
-    group_close(a); /* the old session's, to the scrollback */
+    app_group_close(a); /* the old session's, to the scrollback */
     pt_buf_reset(&a->view.live);
     a->view.kind = LIVE_NONE;
     a->view.streamed = a->view.started = a->view.printed = a->run.active = false;
@@ -38,7 +38,7 @@ static void reset_display(app *a)
     a->queue.n = 0;
 }
 
-bool session_empty(app *a)
+bool app_session_empty(app *a)
 {
     uint32_t i, n;
     pt_entry_view v;
@@ -54,16 +54,16 @@ bool session_empty(app *a)
     return true;
 }
 
-bool open_session(app *a, const char *id)
+bool app_open_session(app *a, const char *id)
 {
     a->sess.opening = cli_session_begin(&a->s, &a->o, id, !a->hist.ready,
-                                    a->open && !secret_at(pt_buf_str(&a->in.text)) ? pt_buf_str(&a->in.text)
+                                    a->open && !app_secret_at(pt_buf_str(&a->in.text)) ? pt_buf_str(&a->in.text)
                                                                                    : PT_STR_NULL,
-                                    a->open && session_empty(a),
-                                    on_event, a, a->sess.err, sizeof a->sess.err);
+                                    a->open && app_session_empty(a),
+                                    app_on_event, a, a->sess.err, sizeof a->sess.err);
     if (!a->sess.opening) {
-        group_close(a);
-        out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
+        app_group_close(a);
+        app_out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
         a->code = 1;
         return false;
     }
@@ -72,27 +72,27 @@ bool open_session(app *a, const char *id)
     a->sess.discarded = false;
     a->draft.drop_restored = false;
     reset_display(a);
-    update_model(a);
+    app_update_model(a);
     return true;
 }
 
 /* Close the session; an empty one this process made is discarded unless
  * /quit asked to keep it for resuming. */
-void close_session(app *a)
+void app_close_session(app *a)
 {
     bool empty;
     while (a->sess.opening) {
         pt_waitfd fd;
         fd.fd = cli_session_job_fd(a->sess.opening);
         pt_sys_wait(&fd, 1, -1);
-        finish_session(a);
+        app_finish_session(a);
     }
     if (!a->open)
         return;
     while (a->queue.xs) /* the runtime goes: their answers never come */
-        xreq_drop(a, a->queue.xs);
-    empty = !a->sess.keep_on_quit && session_empty(a);
-    save_draft(a);
+        app_xreq_drop(a, a->queue.xs);
+    empty = !a->sess.keep_on_quit && app_session_empty(a);
+    app_save_draft(a);
     if (pt_fatal(a->s.a) == PT_FATAL_STORAGE)
         cli_session_free(&a->s);
     else
@@ -105,14 +105,14 @@ void close_session(app *a)
 
 /* /new, /resume: close this one, open the other; back to this one if
  * that fails. */
-void switch_session(app *a, const char *id)
+void app_switch_session(app *a, const char *id)
 {
     char back[64];
     snprintf(back, sizeof back, "%s", a->s.id);
     a->o.continue_current = false;
     snprintf(a->sess.fallback, sizeof a->sess.fallback, "%s", back);
     a->sess.fallback_created = a->sess.created;
-    if (!open_session(a, id)) {
+    if (!app_open_session(a, id)) {
         a->sess.fallback[0] = 0;
         a->code = 0; /* allocation failed before the old session was handed off */
         return;
@@ -124,14 +124,14 @@ void switch_session(app *a, const char *id)
     a->code = 0;
 }
 
-void suspend(app *a)
+void app_suspend(app *a)
 {
     tui_band_erase(&a->band);
-    flush_out(a);
+    app_flush_out(a);
     tui_term_suspend(a->t);
 }
 
-void resume(app *a)
+void app_resume(app *a)
 {
     tui_term_resume(a->t);
     tui_term_size(a->t, &a->rows, &a->cols);
@@ -140,7 +140,7 @@ void resume(app *a)
     a->pace.urgent = true;
 }
 
-void pager(app *a)
+void app_pager(app *a)
 {
     char path[] = "/tmp/pytte-view-XXXXXX", cmd[1200];
     uint32_t i, n;
@@ -153,23 +153,23 @@ void pager(app *a)
     pt_buf_init(&out, pt_sys_allocator());
     n = pt_entry_count(a->s.a);
     for (i = 0; i < n && pt_entry_at(a->s.a, i, &v); i++)
-        out_entry(a, &styled, &v, true);
+        app_out_entry(a, &styled, &v, true);
     tui_sgr(&out, pt_buf_str(&styled), a->color);
     if (write(fd, out.p, out.n) != (ssize_t)out.n)
         out.n = 0;
     close(fd);
     snprintf(cmd, sizeof cmd, "%s '%s'", a->cfg->val[CFG_PAGER], path);
-    suspend(a);
+    app_suspend(a);
     if (system(cmd) != 0) {
         /* a pager that fails says why itself */
     }
     unlink(path);
-    resume(a);
+    app_resume(a);
     pt_buf_free(&styled);
     pt_buf_free(&out);
 }
 
-void history_append(app *a, pt_str text)
+void app_history_append(app *a, pt_str text)
 {
     int fd;
     if (!a->hist.path[0])
@@ -188,7 +188,7 @@ void history_append(app *a, pt_str text)
     pt_buf_reset(&a->hist.pending);
 }
 
-void history_load(app *a)
+void app_history_load(app *a)
 {
     char root[4096], *slash;
     cli_sessions_dir(root, sizeof root);
@@ -197,7 +197,7 @@ void history_load(app *a)
     snprintf(a->hist.path, sizeof a->hist.path, "%s/history", root);
 }
 
-void finish_session(app *a)
+void app_finish_session(app *a)
 {
     int rc;
     char *text;
@@ -206,14 +206,14 @@ void finish_session(app *a)
         return;
     a->sess.opening = NULL;
     if (rc) {
-        group_close(a);
-        out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
+        app_group_close(a);
+        app_out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
         a->pace.urgent = true;
         if (a->sess.fallback[0]) {
             char back[64];
             snprintf(back, sizeof back, "%s", a->sess.fallback);
             a->sess.fallback[0] = 0;
-            if (open_session(a, back)) {
+            if (app_open_session(a, back)) {
                 a->sess.created = a->sess.fallback_created; /* still discarded if nothing is said */
                 return;
             }
@@ -244,10 +244,10 @@ void finish_session(app *a)
     if (!a->hist.ready) {
         text = cli_session_take_history(&a->s, &n);
         if (text && !tui_hist_load(&a->in, (pt_str){text, n}, 1000))
-            out_z(a, TUI_RED, "out of memory loading input history");
+            app_out_z(a, TUI_RED, "out of memory loading input history");
         free(text);
         if (!tui_hist_load(&a->in, pt_buf_str(&a->hist.pending), UINT32_MAX))
-            out_z(a, TUI_RED, "out of memory loading input history");
+            app_out_z(a, TUI_RED, "out of memory loading input history");
         if (a->hist.pending.n) {
             int fd = open(a->hist.path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
             if (fd >= 0) {
@@ -273,14 +273,14 @@ void finish_session(app *a)
         }
     }
     free(text);
-    set_config(a);
-    out_tail(a);
+    app_set_config(a);
+    app_out_tail(a);
     if (cli_session_note(&a->s)[0])
-        out_z(a, TUI_DIM, cli_session_note(&a->s));
-    queued_submit(a);
+        app_out_z(a, TUI_DIM, cli_session_note(&a->s));
+    app_queued_submit(a);
     if (a->pager_pending && !a->quit && a->open) {
         a->pager_pending = false;
-        pager(a);
+        app_pager(a);
     }
     a->pace.urgent = true;
 }

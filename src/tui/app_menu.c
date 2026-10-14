@@ -4,7 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "tui/app.h"
 
-int find_setting(pt_str name)
+int app_find_setting(pt_str name)
 {
     size_t i;
     if (pt_str_eqz(name, "effort"))
@@ -15,7 +15,7 @@ int find_setting(pt_str name)
     return -1;
 }
 
-bool menu_takes_arg(pt_str cmd)
+bool app_menu_takes_arg(pt_str cmd)
 {
     return pt_str_eqz(cmd, "model") || pt_str_eqz(cmd, "effort") || pt_str_eqz(cmd, "thinking") ||
            pt_str_eqz(cmd, "resume") || pt_str_eqz(cmd, "settings");
@@ -36,7 +36,7 @@ static void add_item(app *a, const char *label, size_t ln, const char *desc)
         pt_buf_putz(&a->menu.buf, desc);
 }
 
-pt_str item_label(const app *a, int i)
+pt_str app_item_label(const app *a, int i)
 {
     return (pt_str){a->menu.buf.p + a->menu.items[i].at, a->menu.items[i].n};
 }
@@ -98,7 +98,7 @@ static void add_prompts(app *a, pt_str q)
 }
 
 /* The prompt a command names ("/server:name ..." or "server:name"). */
-const pt_rt_mcp_prompt *find_prompt(app *a, pt_str cmd)
+const pt_rt_mcp_prompt *app_find_prompt(app *a, pt_str cmd)
 {
     uint32_t i, n = 0;
     const pt_rt_mcp_prompt *p = a->open ? pt_rt_mcp_prompts(a->s.rt, &n) : NULL;
@@ -149,7 +149,7 @@ static const char *const mcp_subs[] = {"login", "logout", "restart", "trust", "u
 
 /* "/login <provider> <key>": where the key starts, or 0. The key is shown
  * masked and never reaches the input history or a saved draft. */
-size_t secret_at(pt_str d)
+size_t app_secret_at(pt_str d)
 {
     long sp;
     if (!pt_str_starts(d, PT_S("/login ")))
@@ -215,7 +215,7 @@ static session_list *get_sessions(app *a, bool refresh)
     return list->ready ? list : NULL;
 }
 
-void menu_update(app *a)
+void app_menu_update(app *a)
 {
     bool was_sessions = a->menu.of_sessions, was_skills = a->menu.of_skills;
     pt_str d = pt_buf_str(&a->in.text), cmd, arg, word = last_word(d);
@@ -262,7 +262,7 @@ void menu_update(app *a)
         if (pt_str_eqz(cmd, "settings")) { /* "/settings model <id>" etc. */
             long sp2 = pt_str_find(arg, ' ');
             if (sp2 >= 0) {
-                int st = find_setting((pt_str){arg.p, (size_t)sp2});
+                int st = app_find_setting((pt_str){arg.p, (size_t)sp2});
                 arg = (pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1};
                 cmd = PT_STR_NULL;
                 if (st >= 0 && app_settings[st].vals)
@@ -323,14 +323,14 @@ void menu_update(app *a)
 
 /* Tab: complete the selected menu item. Returns true when it changed
  * the draft. */
-bool complete(app *a)
+bool app_complete(app *a)
 {
     pt_str d = pt_buf_str(&a->in.text), label;
     pt_buf nd;
     bool changed;
     if (a->menu.kind == MENU_NONE || a->menu.kind == MENU_SETTINGS || !a->menu.n)
         return false;
-    label = item_label(a, a->menu.sel);
+    label = app_item_label(a, a->menu.sel);
     pt_buf_init(&nd, pt_sys_allocator());
     if (a->menu.kind == MENU_CMD) {
         size_t i;
@@ -341,7 +341,7 @@ bool complete(app *a)
                 pt_buf_putc(&nd, ' ');
         if (pt_str_starts(label, PT_S("skill:"))) /* then what it is for */
             pt_buf_putc(&nd, ' ');
-        else if (find_prompt(a, label) && find_prompt(a, label)->nargs) /* then its arguments */
+        else if (app_find_prompt(a, label) && app_find_prompt(a, label)->nargs) /* then its arguments */
             pt_buf_putc(&nd, ' ');
     } else if (a->menu.of_sessions) { /* the whole argument: names have spaces */
         pt_buf_puts(&nd, PT_S("/resume "));
@@ -358,6 +358,6 @@ bool complete(app *a)
     if (changed)
         tui_input_set(&a->in, pt_buf_str(&nd));
     pt_buf_free(&nd);
-    menu_update(a);
+    app_menu_update(a);
     return changed;
 }
