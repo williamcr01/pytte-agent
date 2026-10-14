@@ -7,8 +7,6 @@
 int app_find_setting(pt_str name)
 {
     size_t i;
-    if (pt_str_eqz(name, "effort"))
-        name = PT_S("reasoning");
     for (i = 0; i < NSETTINGS; i++)
         if (pt_str_eqz(name, app_settings[i].name) || pt_str_eqz(name, cli_config_key(app_settings[i].k)))
             return (int)i;
@@ -280,6 +278,8 @@ void app_menu_update(app *a)
                     add_list(a, app_settings[st].vals, (size_t)app_settings[st].nv, arg);
                 else if (st >= 0 && app_settings[st].k != CFG_PAGER)
                     cmd = PT_S("model");
+                if (st >= 0 && app_settings[st].k == CFG_COMPACT_MODEL && pt_str_starts(PT_S("none"), arg))
+                    add_item(a, "none", 4, "the session's model compacts");
             } else {
                 size_t i;
                 for (i = 0; i < NSETTINGS; i++)

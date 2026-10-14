@@ -1012,7 +1012,7 @@ static void test_commands(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
-    CHECK(wait_for(&p, "  › /model     set the model", 1000)); /* descriptions in a column */
+    CHECK(wait_for(&p, "  › /model     switch the model", 1000)); /* descriptions in a column */
     CHECK(wait_for(&p, "enter run · esc close · 1/17", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "  › /quit", 1000));
@@ -1023,9 +1023,10 @@ static void test_commands(void)
     CHECK(wait_for(&p, "› /thinking ", 1000));
     CHECK(wait_for(&p, "hidden", 1000));
     keys(&p, "full\r");
-    CHECK(wait_for(&p, "\n· switched thinking: full\n", 1000));
+    CHECK(wait_for(&p, "\n· saved thinking: full\n", DURABLE_MS)); /* written by a worker */
     CHECK(!has(&p, "› /thinking")); /* a command is not echoed, only what it did */
-    CHECK(wait_for(&p, "saved thinking: full", DURABLE_MS)); /* written by a worker */
+    keys(&p, "/thinking some\r");
+    CHECK(wait_for(&p, "not a value for thinking: some (hidden, full)", 1000));
     snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "\"tui\": {\n    \"thinking\": \"full\"\n  }"));
@@ -1033,21 +1034,23 @@ static void test_commands(void)
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "switched effort: high", 1000));
     keys(&p, "/effort default\r");
-    CHECK(wait_for(&p, "levels: off, minimal, low, medium, high, xhigh, max", 1000));
+    CHECK(wait_for(&p, "not a value for effort: default (off, minimal, low, medium, high, xhigh, max)", 1000));
     CHECK(has(&p, "faux · high"));
-    keys(&p, "/settings reasoning default\r");
-    CHECK(wait_for(&p, "not a value for reasoning: default", 1000));
-    keys(&p, "/settings reasoning max\r");
-    CHECK(wait_for(&p, "saved reasoning: max", DURABLE_MS));
+    keys(&p, "/settings effort default\r");
+    CHECK(wait_for(&p, "not a value for effort: default (off,", 1000));
+    keys(&p, "/settings reasoning max\r"); /* the config key names it too */
+    CHECK(wait_for(&p, "saved effort: max", DURABLE_MS));
+    CHECK(!has(&p, "saving")); /* one line: when it is saved */
     CHECK(wait_for(&p, "faux · max", 1000));
     keys(&p, "/settings\r\x1b[B\x1b[B\x1b[B\x1b[C");
-    CHECK(wait_for(&p, "saved reasoning: off", DURABLE_MS)); /* max wraps straight to off */
+    CHECK(wait_for(&p, "←→ or enter change · esc close", 1000));
+    CHECK(wait_for(&p, "saved effort: off", DURABLE_MS)); /* max wraps straight to off */
     keys(&p, "\x1b[D");
     keys(&p, "\x1b");
     pump(&p, 100);
     CHECK(wait_for(&p, "faux · max", 1000)); /* off wraps straight to max */
-    keys(&p, "/settings reasoning low\r");
-    CHECK(wait_for(&p, "saved reasoning: low", DURABLE_MS));
+    keys(&p, "/settings effort low\r");
+    CHECK(wait_for(&p, "saved effort: low", DURABLE_MS));
     CHECK(wait_for(&p, "faux · low", 1000));
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "faux · high", 1000));
@@ -1071,6 +1074,19 @@ static void test_commands(void)
     keys(&p, "\r");
     CHECK(wait_for(&p, "\n\n✗ anthropic: no model given", 1000));
     CHECK(!has(&p, "saved model")); /* refused: nothing was saved */
+    /* the default model switches this session too, as the default effort does */
+    keys(&p, "/settings model anthropic/claude-fable-5\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "saved model: anthropic/claude-fable-5", DURABLE_MS));
+    CHECK(wait_for(&p, "claude-fable-5 · high", 1000));
+    keys(&p, "/settings model faux/faux\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "saved model: faux/faux", DURABLE_MS));
+    CHECK(wait_for(&p, "faux · high", 1000));
+    keys(&p, "/settings compact-model none\r");
+    CHECK(wait_for(&p, "saved compact-model: none", DURABLE_MS));
     keys(&p, "/status\r");
     CHECK(wait_for(&p, "kitty keys on", 1000));
     keys(&p, "/help\r");
@@ -1118,6 +1134,65 @@ static void test_commands(void)
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
     pty_free(&p);
+}
+
+/* With no model chosen, sessions opened in the TUI get theirs as at start:
+ * a new one the configured default, a resumed one its own. */
+static void test_session_model(void)
+{
+    pty p;
+    const char *args[] = {"--script", "tests/faux/hello.json", NULL};
+    const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
+    static const char fable[] = "{\"model\": \"anthropic/claude-fable-5\"}\n";
+    static const char faux[] = "{\"model\": \"faux/faux\"}\n";
+    char path[400], first[64] = "", cmd[100], *at;
+    int fd;
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        put(fd, faux, sizeof faux - 1);
+        close(fd);
+    }
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "ask · faux · ", 3000)); /* the configured default */
+    keys(&p, "hi\r");
+    CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "/status\r");
+    CHECK(wait_for(&p, "· session ", 1000));
+    if ((at = strstr(p.scratch.p, "· session ")))
+        sscanf(at + strlen("· session "), "%63[^,]", first);
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    fd = open(path, O_WRONLY | O_TRUNC);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        put(fd, fable, sizeof fable - 1);
+        close(fd);
+    }
+    pty_start(&p, 24, 80, again);
+    CHECK(wait_for(&p, "ask · faux · ", 3000)); /* resumed: its own model */
+    keys(&p, "/new\r");
+    CHECK(wait_for(&p, "ask · claude-fable-5 · ", 3000)); /* new: the default */
+    snprintf(cmd, sizeof cmd, "/resume %s\r", first);
+    keys(&p, cmd);
+    CHECK(wait_for(&p, "ask · faux · ", 3000)); /* its own again, not the new one's */
+    keys(&p, "/new\r");
+    CHECK(wait_for(&p, "ask · claude-fable-5 · ", 3000));
+    keys(&p, "/model faux/faux\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "switched model: faux/faux", 1000));
+    keys(&p, "/new\r"); /* a chosen model goes on */
+    CHECK(wait_for(&p, "ask · faux · ", 3000));
+    CHECK(!has(&p, "switched model"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    unlink(path);
 }
 
 /* The first prompt names a session; /fork continues a copy of it; /resume
@@ -1475,6 +1550,7 @@ int main(int argc, char **argv)
     RUN(test_resize_while_streaming);
     RUN(test_commands);
     RUN(test_skills);
+    RUN(test_session_model);
     RUN(test_fork_worktree);
     RUN(test_history_pager_draft);
     RUN(test_sigterm);

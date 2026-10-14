@@ -137,6 +137,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     if (o->model)
         snprintf(a->model.ref, sizeof a->model.ref, "%s", o->model);
     a->o.model = o->model ? a->model.ref : NULL;
+    a->model.pinned = o->model && (strcmp(cfg->src[CFG_MODEL], "flag") == 0 || strcmp(cfg->src[CFG_MODEL], "env") == 0);
     tui_set_ambiguous_wide(amb && strcmp(amb, "wide") == 0);
     a->color = !getenv("NO_COLOR") || !*getenv("NO_COLOR");
     app_apply_symbols(a);
