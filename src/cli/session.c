@@ -372,6 +372,16 @@ static pt_http_driver *router_new(const char *script, char *err, size_t cap)
     return &d->vt;
 }
 
+/* Loads curl before the first request, on the session-opening worker, so
+ * neither the first prompt nor an HTTP MCP server waits for it. A failure
+ * here is not reported: the first request tries again and says why. */
+static void router_warm(pt_http_driver *vd)
+{
+    router *d = (router *)vd;
+    if (!d->faux && !d->curl)
+        d->curl = pt_http_curl_new();
+}
+
 /* ---- sessions ---- */
 
 static int64_t sys_now(void *ud)
@@ -921,6 +931,7 @@ static void job_open(void *ud)
             cli_write_atomic(path, (pt_str){job->history_text + at, job->history_n - at}, why, sizeof why);
         }
     }
+    router_warm(job->s->http); /* last: the session is usable without it */
 }
 
 static void job_free(cli_open_job *job)

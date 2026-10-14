@@ -33,9 +33,10 @@ make models     # refresh the model catalog (network, needs python3)
 make width      # regenerate the display-width table from Unicode (network)
 ```
 
-The default build loads the system libcurl when the first real HTTP request
-starts. Offline sessions and terminal startup do not load its TLS dependency
-tree. Use `make CURL_LINK=direct BUILD=build/direct` for a custom or static
+The default build loads the system libcurl at runtime. Interactive sessions
+load it in the background once the session has opened, so the first request
+does not wait for it; `pytte-ai`, print mode and scripted (faux) sessions load
+it on the first real HTTP request, or never. Use `make CURL_LINK=direct BUILD=build/direct` for a custom or static
 libcurl. See [PERFORMANCE.md](PERFORMANCE.md) for reproducible measurements.
 
 For distribution, `make release` builds the native 64-bit executable

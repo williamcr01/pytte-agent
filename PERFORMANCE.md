@@ -240,9 +240,25 @@ PSS apportions shared pages, so adding parent/watchdog PSS avoids double-countin
 shared pages. These are settled measurements, rather than peak RSS. PSS also
 depends on sharing with other processes on the machine.
 
-The default binary eagerly needs only libc on this Linux system; libcurl and its
-TLS dependency tree load on the first real HTTP request. Real HTTP therefore has
-additional initialization and resident-memory costs. A successfully loaded curl
+The default binary eagerly needs only libc on this Linux system. The idle-session
+numbers above were measured before libcurl loaded: the TUI now loads libcurl and
+its TLS dependency tree on the session-opening worker right after the session
+opens (scripted faux sessions excepted), so a settled interactive session
+carries those costs before the first request, as it would after one.
+
+Background curl warm-up, 64-bit `-O2 -g` builds, `scripts/bench_tui_http.py
+--cases https --runs 9`, directory trust store, medians:
+
+| Actual TUI | Load on first request | Warm after session opens |
+|---|---:|---:|
+| Launch to prompt | 2.18 ms | 2.43 ms |
+| Settled before the first turn, RSS / PSS | 3,064 / 911 KiB | 9,988 / 4,000 KiB |
+| First turn, keypress to durable completion | 24.0 ms | 11.8 ms |
+| After the first reply, RSS | 13,200 KiB | 13,160 KiB |
+
+The warm-up moves about 12 ms of curl/TLS initialization off the first turn
+without changing launch time or the memory of a session that has made a
+request; only the idle, never-used session grows. A successfully loaded curl
 module stays loaded until process exit: global cleanup does not wait for resolver
 threads, so unloading the module after cancellation could invalidate their code.
 See [libcurl's cleanup documentation](https://curl.se/libcurl/c/curl_global_cleanup.html).
