@@ -321,6 +321,42 @@ static bool wait_for(pty *p, const char *text, int ms)
     return true;
 }
 
+/* Like wait_for, on the screen with each word-wrapped line whole again:
+ * pytte continues a line on the next row after its hanging indent (two
+ * spaces), and the row break becomes the space it was. For a line whose
+ * wrap depends on the machine, such as one holding a path. */
+static bool wait_for_joined(pty *p, const char *text, int ms)
+{
+    int64_t end = pt_sys_now_ms() + ms;
+    pt_buf j;
+    bool found = false;
+    pt_buf_init(&j, pt_sys_allocator());
+    for (;;) {
+        size_t i;
+        vt_lines(p->v, p->v->rows, &p->scratch);
+        pt_buf_reset(&j);
+        for (i = 0; i < p->scratch.n; i++) {
+            const char *c = p->scratch.p + i;
+            if (*c == '\n' && i + 3 < p->scratch.n && c[1] == ' ' && c[2] == ' ' && c[3] != ' ' && c[3] != '\n') {
+                pt_buf_putc(&j, ' ');
+                i += 2;
+            } else {
+                pt_buf_putc(&j, *c);
+            }
+        }
+        pt_buf_putc(&j, 0);
+        if ((found = strstr(j.p, text) != NULL))
+            break;
+        if (pt_sys_now_ms() > end || p->eof) {
+            fprintf(stderr, "    waiting for \"%s\" (rows joined) timed out; the screen:\n%s\n", text, j.p);
+            break;
+        }
+        pump(p, 20);
+    }
+    pt_buf_free(&j);
+    return found;
+}
+
 /* Until no run is active (the activity line is gone). */
 /* A run is active: the activity row above the input shows its clock. Its
  * dot blinks, so the row starts with "• " or two spaces. */
@@ -1250,8 +1286,9 @@ static void test_mcp(void)
     CHECK(!has(&p, "contents of note://one")); /* the model's to read */
     CHECK(wait_idle(&p, 3000));
     keys(&p, "/mcp\r");
-    CHECK(wait_for(&p, "t · ready · ", 2000));
-    CHECK(wait_for(&p, "1 resources", 2000)); /* the line wraps where the path ends */
+    /* the line holds test_mcp's path: where it wraps depends on the checkout */
+    CHECK(wait_for_joined(&p, "t · ready · ", 2000));
+    CHECK(wait_for_joined(&p, "--mcp-server ok · 7 tools, 1 prompts, 1 resources", 2000));
     keys(&p, "\x04");
     CHECK(finish(&p, 5000) == 0);
     modes_restored(&p);
