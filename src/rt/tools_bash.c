@@ -22,13 +22,8 @@
 typedef struct job job;
 
 struct bash {
-    pt_rt *rt;
+    rt_tool_kit *k; /* borrowed: the builtins' */
     job *jobs;
-    char *io;    /* borrowed: the builtins' read buffer, io_n bytes */
-    size_t io_n;
-    pt_arena ar; /* arguments of one call */
-    pt_buf note; /* the note that background commands ended, reused */
-    const char **unset; /* borrowed: API key variables, NULL-ended: never passed to tools */
 };
 
 struct job {
@@ -53,27 +48,6 @@ struct job {
     uint64_t dropped; /* bytes cut from the front of held */
 };
 
-static void done_text(pt_rt *rt, uint32_t fx, pt_str text, bool error)
-{
-    pt_rt_out r;
-    memset(&r, 0, sizeof r);
-    r.content = text.p ? text : PT_S("");
-    r.is_error = error;
-    pt_rt_tool_done(rt, fx, &r);
-}
-
-static const pt_json *args_of(bash *b, const pt_fx *fx)
-{
-    pt_arena_reset(&b->ar);
-    return pt_json_parse(fx->args, &b->ar, NULL);
-}
-
-static const char *arg_str(bash *b, const pt_json *args, const char *key)
-{
-    const pt_json *v = pt_json_get(args, key);
-    return v && v->type == PT_J_STR ? pt_arena_cstr(&b->ar, pt_json_str(v, &b->ar)) : NULL;
-}
-
 static job *find_job(bash *b, uint32_t fx)
 {
     job *j;
@@ -97,7 +71,7 @@ static void emit(job *j, const char *p, size_t n)
 {
     pt_buf *h = &j->held;
     if (j->fx) {
-        pt_rt_tool_output(j->b->rt, j->fx, p, n);
+        pt_rt_tool_output(j->b->k->rt, j->fx, p, n);
         return;
     }
     if (n >= HELD_MAX) {
@@ -117,7 +91,7 @@ static void emit(job *j, const char *p, size_t n)
 
 static void unwatch(job *j)
 {
-    pt_rt *rt = j->b->rt;
+    pt_rt *rt = j->b->k->rt;
     if (j->out_fd >= 0)
         pt_rt_unwatch(rt, j->out_fd);
     if (j->exit_fd >= 0)
@@ -136,7 +110,7 @@ static void job_free(job *j)
     *pp = j->next;
     unwatch(j);
     if (j->yield)
-        pt_rt_timer_cancel(j->b->rt, j->yield);
+        pt_rt_timer_cancel(j->b->k->rt, j->yield);
     pt_proc_free(j->p);
     pt_buf_free(&j->held);
     free(j->command);
@@ -147,7 +121,7 @@ static void job_free(job *j)
  * with where it runs on, which leaves it in the background. */
 static void job_report(job *j)
 {
-    pt_rt *rt = j->b->rt;
+    pt_rt *rt = j->b->k->rt;
     uint32_t fx = j->fx;
     char note[200], details[160];
     size_t k = 0;
@@ -203,18 +177,18 @@ static void job_drain(job *j)
 {
     bash *b = j->b;
     size_t total = 0;
-    while (total < 4 * b->io_n) {
-        long got = pt_proc_read(j->p, b->io, b->io_n);
+    while (total < 4 * RT_TOOL_IO) {
+        long got = pt_proc_read(j->p, b->k->io, RT_TOOL_IO);
         if (got < 0)
             return;
         if (got == 0) {
             j->eof = true;
             if (j->out_fd >= 0)
-                pt_rt_unwatch(b->rt, j->out_fd);
+                pt_rt_unwatch(b->k->rt, j->out_fd);
             j->out_fd = -1;
             return;
         }
-        emit(j, b->io, (size_t)got);
+        emit(j, b->k->io, (size_t)got);
         total += (size_t)got;
     }
 }
@@ -239,13 +213,13 @@ static void on_exit_fd(void *ud, pt_rt *rt)
     (void)rt;
     if (!pt_proc_reap(j->p, false, &status))
         return;
-    pt_rt_unwatch(j->b->rt, j->exit_fd);
+    pt_rt_unwatch(j->b->k->rt, j->exit_fd);
     j->exit_fd = -1;
     while (!j->eof) {
-        long got = pt_proc_read(j->p, j->b->io, j->b->io_n);
+        long got = pt_proc_read(j->p, j->b->k->io, RT_TOOL_IO);
         if (got <= 0)
             break;
-        emit(j, j->b->io, (size_t)got);
+        emit(j, j->b->k->io, (size_t)got);
     }
     job_end(j);
 }
@@ -261,7 +235,7 @@ static void on_kill(void *ud, pt_rt *rt)
 /* SIGTERM to the group, and SIGKILL two seconds later. */
 static void stop_job(job *j)
 {
-    pt_rt *rt = j->b->rt;
+    pt_rt *rt = j->b->k->rt;
     pt_proc_stop(j->p, false);
     if (j->timer)
         pt_rt_timer_cancel(rt, j->timer);
@@ -306,19 +280,19 @@ static const char *shell(void)
 static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
 {
     bash *b = (bash *)ud;
-    const pt_json *args = args_of(b, fx);
-    const char *cmd = arg_str(b, args, "command"), *argv[4], *add[4];
+    const pt_json *args = pt_rt_kit_args(b->k, fx);
+    const char *cmd = pt_rt_kit_str(b->k, args, "command"), *argv[4], *add[4];
     int64_t timeout = pt_json_geti(args, "timeout", 0), yield = pt_json_geti(args, "yield", YIELD_S);
     pt_str cwd = pt_session_cwd(pt_rt_agent(rt));
     char err[300], call_id[200], attempt[40];
     job *j;
     if (!cmd) {
-        done_text(rt, fx->id, PT_S("command is required"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("command is required"), true);
         return;
     }
     if (!(j = (job *)calloc(1, sizeof *j)) || !(j->command = (char *)malloc(strlen(cmd) + 1))) {
         free(j);
-        done_text(rt, fx->id, PT_S("out of memory"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
     memcpy(j->command, cmd, strlen(cmd) + 1);
@@ -333,11 +307,11 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     add[1] = attempt;
     add[2] = "PYTTE_TOOL=bash";
     add[3] = NULL;
-    j->p = pt_proc_spawn(argv, cwd.n ? pt_arena_cstr(&b->ar, cwd) : NULL, b->unset, add, NULL, err, sizeof err);
+    j->p = pt_proc_spawn(argv, cwd.n ? pt_arena_cstr(&b->k->ar, cwd) : NULL, b->k->unset, add, NULL, err, sizeof err);
     if (!j->p) {
         free(j->command);
         free(j);
-        done_text(rt, fx->id, pt_strz(err), true);
+        pt_rt_kit_done(rt, fx->id, pt_strz(err), true);
         return;
     }
     j->b = b;
@@ -395,7 +369,7 @@ static void bash_cancel(void *ud, pt_rt *rt, uint32_t fx)
 static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
 {
     bash *b = (bash *)ud;
-    const pt_json *args = args_of(b, fx);
+    const pt_json *args = pt_rt_kit_args(b->k, fx);
     int64_t session = pt_json_geti(args, "session", 0), wait = pt_json_geti(args, "wait", POLL_S);
     bool stop = pt_json_truthy(pt_json_get(args, "stop"));
     char msg[200];
@@ -406,12 +380,12 @@ static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
     if (!j) {
         snprintf(msg, sizeof msg,
                  "No session %lld: it ended and was read already, or pytte restarted since.", (long long)session);
-        done_text(rt, fx->id, pt_strz(msg), true);
+        pt_rt_kit_done(rt, fx->id, pt_strz(msg), true);
         return;
     }
     if (j->fx) {
         snprintf(msg, sizeof msg, "Another call is reading session %lld.", (long long)session);
-        done_text(rt, fx->id, pt_strz(msg), true);
+        pt_rt_kit_done(rt, fx->id, pt_strz(msg), true);
         return;
     }
     j->fx = fx->id;
@@ -444,7 +418,7 @@ static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
  * so a crash cannot lose or repeat it. */
 bool pt_rt_bash_idle(bash *b)
 {
-    pt_buf *t = &b->note;
+    pt_buf *t = &b->k->out;
     pt_input in;
     char line[400], req[48];
     job *j;
@@ -473,7 +447,7 @@ bool pt_rt_bash_idle(bash *b)
     in.text = pt_buf_str(t);
     in.req = pt_strz(req);
     in.note = true;
-    ok = !t->oom && pt_submit(pt_rt_agent(b->rt), &in);
+    ok = !t->oom && pt_submit(pt_rt_agent(b->k->rt), &in);
     return ok;
 }
 
@@ -525,17 +499,11 @@ static const char bash_poll_schema[] =
     "\"stop\":{\"type\":\"boolean\",\"description\":\"Stop it (SIGTERM, then SIGKILL after 2s)\"}},"
     "\"required\":[\"session\"],\"additionalProperties\":false}";
 
-bash *pt_rt_bash_new(pt_rt *rt, char *io, size_t io_n, const char **unset)
+bash *pt_rt_bash_new(rt_tool_kit *k)
 {
     bash *b = (bash *)calloc(1, sizeof *b);
-    if (!b)
-        return NULL;
-    b->rt = rt;
-    b->io = io;
-    b->io_n = io_n;
-    b->unset = unset;
-    pt_arena_init(&b->ar, pt_sys_allocator(), 4096);
-    pt_buf_init(&b->note, pt_sys_allocator());
+    if (b)
+        b->k = k;
     return b;
 }
 
@@ -552,8 +520,6 @@ void pt_rt_bash_free(bash *b)
         else
             job_free(j);
     }
-    pt_arena_free(&b->ar);
-    pt_buf_free(&b->note);
     free(b);
 }
 

@@ -153,10 +153,26 @@ typedef struct search search;
 search *pt_rt_search_new(pt_rt *rt);
 void pt_rt_search_free(search *s);
 void pt_rt_search_tools(search *s, pt_rt_tool t[3]);
-/* tools_bash.c: bash and bash_poll, with their processes. io (io_n
- * bytes) and unset are borrowed, and outlive it. */
+/* What the builtin tools share: tools_builtin.c owns it, tools_bash.c
+ * borrows it. Tools run one call at a time, on the host thread. */
+#define RT_TOOL_IO 65536
+typedef struct rt_tool_kit {
+    pt_rt *rt;
+    char *io;           /* RT_TOOL_IO bytes, reused by every call */
+    pt_buf out;         /* a call's text, reused */
+    pt_arena ar;        /* arguments of one call */
+    const char **unset; /* API key variables, NULL-ended: never passed to tools */
+} rt_tool_kit;
+/* tools_builtin.c: call fx ends with text, an error or not. */
+void pt_rt_kit_done(pt_rt *rt, uint32_t fx, pt_str text, bool error);
+/* A call's arguments, parsed into k->ar (reset first). A failed
+ * allocation fails only its call: k->out's is forgotten. */
+const pt_json *pt_rt_kit_args(rt_tool_kit *k, const pt_fx *fx);
+/* A string argument, NUL-ended in k->ar; NULL when missing or not one. */
+const char *pt_rt_kit_str(rt_tool_kit *k, const pt_json *args, const char *key);
+/* tools_bash.c: bash and bash_poll, with their processes; k outlives it. */
 typedef struct bash bash;
-bash *pt_rt_bash_new(pt_rt *rt, char *io, size_t io_n, const char **unset);
+bash *pt_rt_bash_new(rt_tool_kit *k);
 void pt_rt_bash_free(bash *b); /* stops its processes */
 void pt_rt_bash_tools(bash *b, pt_rt_tool t[2]);
 /* The agent is idle: submit a note for background commands that ended

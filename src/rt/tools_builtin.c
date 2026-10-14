@@ -19,28 +19,23 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define CHUNK 65536
 #define READ_BYTES (50u * 1024u) /* text a read shows at most */
 #define READ_LIMIT 2000 /* lines a read shows unless it asks for more */
 #define IMAGE_MAX 3932160u /* bytes: 5 MB in base64, Anthropic's limit */
 #define IMAGE_SIDE_MAX 8000u /* pixels */
 
 typedef struct builtins {
-    pt_rt *rt;
-    bash *bash; /* bash and bash_poll */
-    char *io;   /* CHUNK bytes, reused by every call */
-    pt_buf out; /* a call's text, reused */
+    rt_tool_kit k; /* lent to bash */
+    bash *bash;    /* bash and bash_poll */
     pt_buf doc;
     pt_buf spans; /* an edit's spans, reused */
     search *search; /* grep, find and ls */
     web *web;       /* web_fetch */
-    pt_arena ar; /* arguments of one call */
-    const char **unset; /* API key variables, NULL-ended: never passed to tools */
 } builtins;
 
 /* ---- shared ---- */
 
-static void done_text(pt_rt *rt, uint32_t fx, pt_str text, bool error)
+void pt_rt_kit_done(pt_rt *rt, uint32_t fx, pt_str text, bool error)
 {
     pt_rt_out r;
     memset(&r, 0, sizeof r);
@@ -53,20 +48,26 @@ static void fail(pt_rt *rt, uint32_t fx, const char *what, const char *path)
 {
     char msg[1200];
     snprintf(msg, sizeof msg, "%s %s: %s", what, path, strerror(errno));
-    done_text(rt, fx, pt_strz(msg), true);
+    pt_rt_kit_done(rt, fx, pt_strz(msg), true);
+}
+
+const pt_json *pt_rt_kit_args(rt_tool_kit *k, const pt_fx *fx)
+{
+    pt_arena_reset(&k->ar);
+    k->out.oom = false; /* a failed allocation fails only its call */
+    return pt_json_parse(fx->args, &k->ar, NULL);
 }
 
 static const pt_json *args_of(builtins *b, const pt_fx *fx)
 {
-    pt_arena_reset(&b->ar);
-    b->out.oom = b->spans.oom = false; /* a failed allocation fails only its call */
-    return pt_json_parse(fx->args, &b->ar, NULL);
+    b->spans.oom = false;
+    return pt_rt_kit_args(&b->k, fx);
 }
 
-static const char *arg_str(builtins *b, const pt_json *args, const char *key)
+const char *pt_rt_kit_str(rt_tool_kit *k, const pt_json *args, const char *key)
 {
     const pt_json *v = pt_json_get(args, key);
-    return v && v->type == PT_J_STR ? pt_arena_cstr(&b->ar, pt_json_str(v, &b->ar)) : NULL;
+    return v && v->type == PT_J_STR ? pt_arena_cstr(&k->ar, pt_json_str(v, &k->ar)) : NULL;
 }
 
 /* An absolute path: relative ones are under the session's directory. Paths
@@ -74,7 +75,7 @@ static const char *arg_str(builtins *b, const pt_json *args, const char *key)
  * trusts the agent, and absolute paths are part of the tool's behavior. */
 static const char *resolve(builtins *b, const char *path)
 {
-    pt_str cwd = pt_session_cwd(pt_rt_agent(b->rt));
+    pt_str cwd = pt_session_cwd(pt_rt_agent(b->k.rt));
     pt_buf p;
     const char *z;
     if (path[0] == '/' || !cwd.n)
@@ -83,7 +84,7 @@ static const char *resolve(builtins *b, const char *path)
     pt_buf_puts(&p, cwd);
     pt_buf_putc(&p, '/');
     pt_buf_putz(&p, path);
-    z = pt_arena_cstr(&b->ar, pt_buf_str(&p));
+    z = pt_arena_cstr(&b->k.ar, pt_buf_str(&p));
     pt_buf_free(&p);
     return z;
 }
@@ -298,7 +299,7 @@ bool pt_rt_image_size(const unsigned char *p, size_t n, const char *mime, uint32
 static void read_image(builtins *b, pt_rt *rt, const pt_fx *fx, int fd, const struct stat *st, const char *rel,
                        const char *mime)
 {
-    pt_buf *img = &b->out;
+    pt_buf *img = &b->k.out;
     char msg[600], ref[72];
     uint32_t w = 0, h = 0;
     pt_rt_out r;
@@ -309,14 +310,14 @@ static void read_image(builtins *b, pt_rt *rt, const pt_fx *fx, int fd, const st
                  "This image is %llu bytes; at most %u go to the model. Make a smaller copy (for example "
                  "with ImageMagick: magick in.png -resize 1568x1568 out.png) and read that.",
                  (unsigned long long)st->st_size, IMAGE_MAX);
-        done_text(rt, fx->id, pt_strz(msg), true);
+        pt_rt_kit_done(rt, fx->id, pt_strz(msg), true);
         return;
     }
     pt_buf_reset(img);
     /* Its size, once; one byte more shows that it grew while being read. */
     if (!pt_buf_reserve(img, (size_t)st->st_size + 1)) {
         close(fd);
-        done_text(rt, fx->id, PT_S("out of memory"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
     for (;;) {
@@ -333,7 +334,7 @@ static void read_image(builtins *b, pt_rt *rt, const pt_fx *fx, int fd, const st
         img->n += (size_t)got;
         if (img->n > (size_t)st->st_size) {
             close(fd);
-            done_text(rt, fx->id, PT_S("The image changed while being read; read it again."), true);
+            pt_rt_kit_done(rt, fx->id, PT_S("The image changed while being read; read it again."), true);
             return;
         }
     }
@@ -354,11 +355,11 @@ static void read_image(builtins *b, pt_rt *rt, const pt_fx *fx, int fd, const st
     pt_buf_free(img);
     pt_buf_init(img, pt_sys_allocator());
     if (huge) {
-        done_text(rt, fx->id, pt_strz(msg), true);
+        pt_rt_kit_done(rt, fx->id, pt_strz(msg), true);
         return;
     }
     if (!kept) {
-        done_text(rt, fx->id,
+        pt_rt_kit_done(rt, fx->id,
                   PT_S("cannot keep the image: the session's store holds no blobs, or writing failed"), true);
         return;
     }
@@ -376,7 +377,7 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
 {
     builtins *b = (builtins *)ud;
     const pt_json *args = args_of(b, fx);
-    const char *rel = arg_str(b, args, "path"), *path, *mime;
+    const char *rel = pt_rt_kit_str(&b->k, args, "path"), *path, *mime;
     int64_t offset = pt_json_geti(args, "offset", 1), limit = pt_json_geti(args, "limit", READ_LIMIT);
     int64_t end_line;
     uint64_t line = 1, after = 0, lines;
@@ -392,7 +393,7 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
     pt_buf key;
     int fd;
     if (!rel) {
-        done_text(rt, fx->id, PT_S("path is required"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("path is required"), true);
         return;
     }
     path = resolve(b, rel);
@@ -417,14 +418,14 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
     }
     if (!S_ISREG(st.st_mode)) {
         close(fd);
-        done_text(rt, fx->id, PT_S("This is not a regular file; read only regular files."), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("This is not a regular file; read only regular files."), true);
         return;
     }
     pt_sha256_init(&sh);
-    pt_buf_reset(&b->out);
+    pt_buf_reset(&b->k.out);
     for (;;) {
-        ssize_t got = read(fd, b->io, CHUNK);
-        const char *p = b->io, *end;
+        ssize_t got = read(fd, b->k.io, RT_TOOL_IO);
+        const char *p = b->k.io, *end;
         if (got < 0 && errno == EINTR)
             continue;
         if (got < 0) {
@@ -434,7 +435,7 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
         }
         if (got == 0)
             break;
-        if (first && (mime = pt_rt_image_type((const unsigned char *)b->io, (size_t)got)) != NULL) {
+        if (first && (mime = pt_rt_image_type((const unsigned char *)b->k.io, (size_t)got)) != NULL) {
             if (lseek(fd, 0, SEEK_SET) != 0) {
                 close(fd);
                 fail(rt, fx->id, "cannot read", path);
@@ -444,8 +445,8 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
             return;
         }
         first = false;
-        pt_sha256_update(&sh, b->io, (size_t)got);
-        if (line == 1 && memchr(b->io, 0, (size_t)got))
+        pt_sha256_update(&sh, b->k.io, (size_t)got);
+        if (line == 1 && memchr(b->k.io, 0, (size_t)got))
             binary = true;
         end = p + got;
         while (p < end && !binary) {
@@ -456,22 +457,22 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
                 if (start) {
                     char num[24];
                     int k = snprintf(num, sizeof num, "%6llu\t", (unsigned long long)line);
-                    line_at = b->out.n;
-                    pt_buf_put(&b->out, num, (size_t)k);
+                    line_at = b->k.out.n;
+                    pt_buf_put(&b->k.out, num, (size_t)k);
                 }
-                if (b->out.n + len <= READ_BYTES) {
-                    pt_buf_put(&b->out, p, len);
+                if (b->k.out.n + len <= READ_BYTES) {
+                    pt_buf_put(&b->k.out, p, len);
                 } else if (line == (uint64_t)offset) {
                     /* The first line alone is too long: its start, ending
                      * on a whole character. */
-                    size_t take = READ_BYTES > b->out.n ? READ_BYTES - b->out.n : 0;
+                    size_t take = READ_BYTES > b->k.out.n ? READ_BYTES - b->k.out.n : 0;
                     while (take && ((unsigned char)p[take] & 0xC0) == 0x80)
                         take--;
-                    pt_buf_put(&b->out, p, take);
+                    pt_buf_put(&b->k.out, p, take);
                     cut_line = line;
                     full_at = line + 1;
                 } else { /* the output ends before this line */
-                    b->out.n = line_at;
+                    b->k.out.n = line_at;
                     full_at = line;
                 }
             } else if (start && line >= (uint64_t)end_line) {
@@ -487,51 +488,51 @@ static void t_read(void *ud, pt_rt *rt, const pt_fx *fx)
     pt_sha256_final(&sh, hash);
     lines = line - (start ? 1 : 0);
     if (binary) {
-        pt_buf_reset(&b->out);
-        pt_buf_putz(&b->out, "This is a binary file (");
-        pt_buf_u64(&b->out, (uint64_t)st.st_size);
-        pt_buf_putz(&b->out, " bytes); it is not shown.");
+        pt_buf_reset(&b->k.out);
+        pt_buf_putz(&b->k.out, "This is a binary file (");
+        pt_buf_u64(&b->k.out, (uint64_t)st.st_size);
+        pt_buf_putz(&b->k.out, " bytes); it is not shown.");
     } else if (!st.st_size) {
-        pt_buf_putz(&b->out, "(the file is empty)");
+        pt_buf_putz(&b->k.out, "(the file is empty)");
     } else if ((int64_t)lines < offset) {
-        pt_buf_reset(&b->out);
-        pt_buf_putz(&b->out, "(the file has ");
-        pt_buf_u64(&b->out, lines);
-        pt_buf_putz(&b->out, " lines)");
+        pt_buf_reset(&b->k.out);
+        pt_buf_putz(&b->k.out, "(the file has ");
+        pt_buf_u64(&b->k.out, lines);
+        pt_buf_putz(&b->k.out, " lines)");
     } else if (full_at || after) {
-        if (b->out.n && b->out.p[b->out.n - 1] != '\n')
-            pt_buf_putc(&b->out, '\n');
+        if (b->k.out.n && b->k.out.p[b->k.out.n - 1] != '\n')
+            pt_buf_putc(&b->k.out, '\n');
         if (cut_line) {
-            pt_buf_putz(&b->out, "… line ");
-            pt_buf_u64(&b->out, cut_line);
-            pt_buf_putz(&b->out, " is longer than 50 KiB; only its start is shown");
+            pt_buf_putz(&b->k.out, "… line ");
+            pt_buf_u64(&b->k.out, cut_line);
+            pt_buf_putz(&b->k.out, " is longer than 50 KiB; only its start is shown");
             if (cut_line < lines) {
-                pt_buf_putz(&b->out, ". Read on with offset ");
-                pt_buf_u64(&b->out, full_at);
+                pt_buf_putz(&b->k.out, ". Read on with offset ");
+                pt_buf_u64(&b->k.out, full_at);
             }
         } else if (full_at) {
-            pt_buf_putz(&b->out, "… output cut at 50 KiB before line ");
-            pt_buf_u64(&b->out, full_at);
-            pt_buf_putz(&b->out, " of ");
-            pt_buf_u64(&b->out, lines);
-            pt_buf_putz(&b->out, "; read on with offset ");
-            pt_buf_u64(&b->out, full_at);
+            pt_buf_putz(&b->k.out, "… output cut at 50 KiB before line ");
+            pt_buf_u64(&b->k.out, full_at);
+            pt_buf_putz(&b->k.out, " of ");
+            pt_buf_u64(&b->k.out, lines);
+            pt_buf_putz(&b->k.out, "; read on with offset ");
+            pt_buf_u64(&b->k.out, full_at);
         } else {
-            pt_buf_putz(&b->out, "… ");
-            pt_buf_u64(&b->out, after);
-            pt_buf_putz(&b->out, " more lines; read on with offset ");
-            pt_buf_i64(&b->out, end_line);
+            pt_buf_putz(&b->k.out, "… ");
+            pt_buf_u64(&b->k.out, after);
+            pt_buf_putz(&b->k.out, " more lines; read on with offset ");
+            pt_buf_i64(&b->k.out, end_line);
         }
     }
-    if (b->out.oom) {
-        done_text(rt, fx->id, PT_S("out of memory"), true);
+    if (b->k.out.oom) {
+        pt_rt_kit_done(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
     stamp(b, &st, hash);
     pt_buf_init(&key, pt_sys_allocator());
     stamp_key(b, path, &key);
     memset(&r, 0, sizeof r);
-    r.content = pt_buf_str(&b->out);
+    r.content = pt_buf_str(&b->k.out);
     r.whole = true;
     r.doc_key = pt_buf_str(&key);
     r.doc_value = pt_buf_str(&b->doc);
@@ -546,7 +547,7 @@ static void t_write(void *ud, pt_rt *rt, const pt_fx *fx)
     builtins *b = (builtins *)ud;
     const pt_json *args = args_of(b, fx);
     const pt_json *content = pt_json_get(args, "content");
-    const char *rel = arg_str(b, args, "path"), *path;
+    const char *rel = pt_rt_kit_str(&b->k, args, "path"), *path;
     pt_str text;
     unsigned char hash[32];
     struct stat st;
@@ -555,10 +556,10 @@ static void t_write(void *ud, pt_rt *rt, const pt_fx *fx)
     pt_buf key;
     char msg[4300];
     if (!rel || !content || content->type != PT_J_STR) {
-        done_text(rt, fx->id, PT_S("path and content are required"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("path and content are required"), true);
         return;
     }
-    text = pt_json_str(content, &b->ar);
+    text = pt_json_str(content, &b->k.ar);
     path = resolve(b, rel);
     existed = stat(path, &st) == 0;
     if (!mkdirs(path)) {
@@ -635,16 +636,16 @@ static bool fresh(builtins *b, const char *path, pt_str now, const char **why)
     char hex[64];
     pt_buf_init(&key, pt_sys_allocator());
     stamp_key(b, path, &key);
-    v = pt_doc(pt_rt_agent(b->rt), pt_buf_str(&key));
+    v = pt_doc(pt_rt_agent(b->k.rt), pt_buf_str(&key));
     pt_buf_free(&key);
     if (!v.n) {
         *why = "Read the file first (with read), then edit it.";
         return false;
     }
-    j = pt_json_parse(v, &b->ar, NULL);
+    j = pt_json_parse(v, &b->k.ar, NULL);
     hash_of(now.p, now.n, hash);
     pt_hex(hex, hash, 32);
-    if (!pt_str_eq(pt_json_gets(j, "hash", &b->ar), (pt_str){hex, 64})) {
+    if (!pt_str_eq(pt_json_gets(j, "hash", &b->k.ar), (pt_str){hex, 64})) {
         *why = "The file was modified since you last read it. Read it again, then edit it.";
         return false;
     }
@@ -670,8 +671,8 @@ static bool edits_of(builtins *b, const pt_json *list, pt_str *olds, pt_str *new
             snprintf(msg + at, cap - (size_t)at, "old and new are required");
             return false;
         }
-        olds[k] = pt_json_str(jo, &b->ar);
-        news[k] = pt_json_str(jn, &b->ar);
+        olds[k] = pt_json_str(jo, &b->k.ar);
+        news[k] = pt_json_str(jn, &b->k.ar);
         all[k] = pt_json_truthy(pt_json_get(e, "all"));
         if (!olds[k].n) {
             snprintf(msg + at, cap - (size_t)at, "old must not be empty; use write to create a file");
@@ -689,7 +690,7 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
 {
     builtins *b = (builtins *)ud;
     const pt_json *args = args_of(b, fx), *list = pt_json_get(args, "edits"), *e;
-    const char *rel = arg_str(b, args, "path"), *path, *why;
+    const char *rel = pt_rt_kit_str(&b->k, args, "path"), *path, *why;
     pt_str *olds, *news, file;
     bool *all;
     const span *sp;
@@ -704,20 +705,20 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
     pt_buf key;
     char msg[4300];
     if (!rel || !pt_json_is(list, PT_J_ARR) || !list->child) {
-        done_text(rt, fx->id, PT_S("path and at least one edit are required"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("path and at least one edit are required"), true);
         return;
     }
     for (e = list->child; e; e = e->next)
         nedits++;
-    olds = (pt_str *)pt_arena_alloc(&b->ar, nedits * sizeof *olds);
-    news = (pt_str *)pt_arena_alloc(&b->ar, nedits * sizeof *news);
-    all = (bool *)pt_arena_alloc(&b->ar, nedits * sizeof *all);
+    olds = (pt_str *)pt_arena_alloc(&b->k.ar, nedits * sizeof *olds);
+    news = (pt_str *)pt_arena_alloc(&b->k.ar, nedits * sizeof *news);
+    all = (bool *)pt_arena_alloc(&b->k.ar, nedits * sizeof *all);
     if (!olds || !news || !all) {
-        done_text(rt, fx->id, PT_S("out of memory"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
     if (!edits_of(b, list, olds, news, all, nedits, msg, sizeof msg)) {
-        done_text(rt, fx->id, pt_strz(msg), true);
+        pt_rt_kit_done(rt, fx->id, pt_strz(msg), true);
         return;
     }
     path = resolve(b, rel);
@@ -726,7 +727,7 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
         return;
     }
     if (!S_ISREG(st.st_mode)) {
-        done_text(rt, fx->id, PT_S("This is not a regular file; edit only regular files."), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("This is not a regular file; edit only regular files."), true);
         return;
     }
     /* Resolve symlink destinations once: editing replaces the target, not
@@ -743,7 +744,7 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
     file = (pt_str){src, n};
     if (!fresh(b, path, file, &why)) {
         free(src);
-        done_text(rt, fx->id, pt_strz(why), true);
+        pt_rt_kit_done(rt, fx->id, pt_strz(why), true);
         return;
     }
     /* Every old is matched against the file as read, never against
@@ -758,14 +759,14 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
                      found ? "old matches %llu times. Give more context so it matches once, or set all: true."
                            : "old does not match the file. Copy it exactly, with its whitespace.",
                      (unsigned long long)found);
-            done_text(rt, fx->id, pt_strz(msg), true);
+            pt_rt_kit_done(rt, fx->id, pt_strz(msg), true);
             return;
         }
         total += found;
     }
     if (b->spans.oom) {
         free(src);
-        done_text(rt, fx->id, PT_S("out of memory"), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
     sp = (const span *)b->spans.p;
@@ -779,39 +780,39 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
             snprintf(msg, sizeof msg, "edits %u and %u overlap. Merge them into one edit.",
                      (sp[i - 1].edit < sp[i].edit ? sp[i - 1].edit : sp[i].edit) + 1,
                      (sp[i - 1].edit < sp[i].edit ? sp[i].edit : sp[i - 1].edit) + 1);
-            done_text(rt, fx->id, pt_strz(msg), true);
+            pt_rt_kit_done(rt, fx->id, pt_strz(msg), true);
             return;
         }
         size -= sp[i].len;
         if (len > SIZE_MAX - size) {
             free(src);
-            done_text(rt, fx->id, PT_S("the edited file would be too large"), true);
+            pt_rt_kit_done(rt, fx->id, PT_S("the edited file would be too large"), true);
             return;
         }
         size += len;
     }
-    pt_buf_reset(&b->out);
-    pt_buf_reserve(&b->out, size);
+    pt_buf_reset(&b->k.out);
+    pt_buf_reserve(&b->k.out, size);
     for (i = 0, at = 0; i < nspans; i++) {
-        pt_buf_put(&b->out, src + at, sp[i].at - at);
-        pt_buf_puts(&b->out, news[sp[i].edit]);
+        pt_buf_put(&b->k.out, src + at, sp[i].at - at);
+        pt_buf_puts(&b->k.out, news[sp[i].edit]);
         at = sp[i].at + sp[i].len;
     }
-    pt_buf_put(&b->out, src + at, n - at);
+    pt_buf_put(&b->k.out, src + at, n - at);
     free(src);
-    if (b->out.oom) {
-        done_text(rt, fx->id, PT_S("out of memory"), true);
+    if (b->k.out.oom) {
+        pt_rt_kit_done(rt, fx->id, PT_S("out of memory"), true);
         return;
     }
     if (stat(path, &current) != 0 || current.st_size != st.st_size || current.st_mtime != st.st_mtime) {
-        done_text(rt, fx->id, PT_S("The file was modified while editing. Read it again, then edit it."), true);
+        pt_rt_kit_done(rt, fx->id, PT_S("The file was modified while editing. Read it again, then edit it."), true);
         return;
     }
-    if (!write_atomic(path, b->out.p, b->out.n, &st) || stat(path, &st) != 0) {
+    if (!write_atomic(path, b->k.out.p, b->k.out.n, &st) || stat(path, &st) != 0) {
         fail(rt, fx->id, "cannot write", path);
         return;
     }
-    hash_of(b->out.p, b->out.n, hash);
+    hash_of(b->k.out.p, b->k.out.n, hash);
     stamp(b, &st, hash);
     if (nedits > 1)
         snprintf(msg, sizeof msg, "Edited %s: %u edits replaced %llu occurrences.", rel, nedits,
@@ -873,12 +874,12 @@ static void builtins_free(void *ud)
 {
     builtins *b = (builtins *)ud;
     pt_rt_bash_free(b->bash); /* first: it uses io */
-    free(b->io);
-    free(b->unset);
-    pt_buf_free(&b->out);
+    free(b->k.io);
+    free(b->k.unset);
+    pt_buf_free(&b->k.out);
     pt_buf_free(&b->doc);
     pt_buf_free(&b->spans);
-    pt_arena_free(&b->ar);
+    pt_arena_free(&b->k.ar);
     pt_rt_search_free(b->search);
     pt_rt_web_free(b->web);
     free(b);
@@ -890,27 +891,27 @@ bool pt_rt_add_builtins(pt_rt *rt)
     const pt_ai_catalog *cat = rt->c.catalog ? rt->c.catalog : pt_ai_builtin_catalog();
     pt_rt_tool t[9], bt[2];
     uint32_t i, k, n = 0;
-    if (!b || !(b->io = (char *)malloc(CHUNK)) ||
-        !(b->unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *b->unset)) ||
+    if (!b || !(b->k.io = (char *)malloc(RT_TOOL_IO)) ||
+        !(b->k.unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *b->k.unset)) ||
         !(b->search = pt_rt_search_new(rt)) || !(b->web = pt_rt_web_new(rt)) ||
-        !(b->bash = pt_rt_bash_new(rt, b->io, CHUNK, b->unset))) {
+        !(b->bash = pt_rt_bash_new(&b->k))) {
         if (b) {
-            free(b->io);
-            free(b->unset);
+            free(b->k.io);
+            free(b->k.unset);
             pt_rt_search_free(b->search);
             pt_rt_web_free(b->web);
         }
         free(b);
         return false;
     }
-    b->rt = rt;
-    pt_buf_init(&b->out, pt_sys_allocator());
+    b->k.rt = rt;
+    pt_buf_init(&b->k.out, pt_sys_allocator());
     pt_buf_init(&b->doc, pt_sys_allocator());
     pt_buf_init(&b->spans, pt_sys_allocator());
-    pt_arena_init(&b->ar, pt_sys_allocator(), 4096);
+    pt_arena_init(&b->k.ar, pt_sys_allocator(), 4096);
     for (i = 0; i < cat->nproviders; i++)
         for (k = 0; k < 4 && cat->providers[i].key_env[k]; k++)
-            b->unset[n++] = cat->providers[i].key_env[k];
+            b->k.unset[n++] = cat->providers[i].key_env[k];
     rt->builtin.ud = b;
     rt->builtin.free = builtins_free;
     rt->builtin.idle = builtins_idle;
