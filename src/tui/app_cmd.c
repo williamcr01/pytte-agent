@@ -20,7 +20,7 @@ const app_cmd_def app_cmds[] = {
     {"ps", "", "background commands"},
     {"stop", "", "stop the background commands"},
     {"usage", "", "tokens used in this session, per model"},
-    {"thinking", " [mode]", "how thinking is shown: collapsed, full, hidden"},
+    {"thinking", " [mode]", "how thinking is shown: hidden, full"},
     {"login", " [provider] [key]", "save an API key to auth.json"},
     {"mcp", " [login|logout|restart name] [trust|untrust]", "MCP servers: their state, logins, trust"},
     {"settings", "", "user settings (saved)"},
@@ -31,7 +31,7 @@ const size_t app_ncmds = sizeof app_cmds / sizeof app_cmds[0];
 
 const char *const app_levels[] = {"off", "minimal", "low", "medium", "high", "xhigh", "max"};
 const size_t app_nlevels = sizeof app_levels / sizeof app_levels[0];
-const char *const app_th_names[] = {"collapsed", "full", "hidden"};
+const char *const app_th_names[] = {"hidden", "full"};
 /* one name for each TH_*: a missing or extra one does not build */
 typedef char app_th_names_cover_th[sizeof app_th_names / sizeof app_th_names[0] == NTH ? 1 : -1];
 static const char *const sym_names[] = {"auto", "unicode", "ascii"};
@@ -92,7 +92,7 @@ void app_apply_symbols(app *a)
 void app_apply_thinking(app *a)
 {
     int i;
-    a->thinking = TH_COLLAPSED;
+    a->thinking = TH_HIDDEN;
     for (i = 0; i < NTH; i++)
         if (strcmp(a->cfg->val[CFG_THINKING], app_th_names[i]) == 0)
             a->thinking = i;
@@ -242,7 +242,7 @@ void app_set_config(app *a)
     c.model = a->o.model ? pt_strz(a->o.model) : PT_STR_NULL;
     c.compact_model = a->o.compact_model ? pt_strz(a->o.compact_model) : PT_STR_NULL;
     c.reasoning = a->o.reasoning;
-    c.hide_thinking = a->thinking != TH_FULL; /* collapsed shows only how long */
+    c.hide_thinking = a->thinking != TH_FULL; /* hidden shows only how long */
     c.max_tokens = a->o.max_tokens;
     c.retry_base_ms = a->o.retry_base_ms;
     c.context_window = a->o.context_window;
@@ -696,7 +696,7 @@ void app_run_command(app *a, pt_str line)
     } else if (pt_str_eqz(cmd, "thinking")) {
         if (arg.n) {
             if (!valid_setting(app_find_setting(PT_S("thinking")), v)) {
-                app_out_z(a, TUI_RED, "modes: collapsed, full, hidden");
+                app_out_z(a, TUI_RED, "modes: hidden, full");
                 return;
             }
             if (!app_save_setting(a, CFG_THINKING, v))

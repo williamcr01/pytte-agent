@@ -19,7 +19,7 @@
 #include "cli/cli.h"
 #include "tui/tui.h"
 
-enum { TH_COLLAPSED, TH_FULL, TH_HIDDEN };
+enum { TH_HIDDEN, TH_FULL };
 enum { PH_WAIT, PH_THINK, PH_WRITE, PH_RETRY, PH_TOOL, PH_COMPACT };
 enum { LIVE_NONE, LIVE_TEXT, LIVE_THINK };
 enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
@@ -56,7 +56,7 @@ extern const size_t app_ncmds;
 extern const char *const app_levels[]; /* reasoning efforts, by PT_EFF_* bit */
 extern const size_t app_nlevels;
 #define NLEVELS app_nlevels
-#define NTH (TH_HIDDEN + 1)
+#define NTH (TH_FULL + 1)
 extern const char *const app_th_names[]; /* by TH_*, as configured: NTH of them */
 
 /* The settings menu: config index, short name, and the values to cycle

@@ -565,28 +565,28 @@ void app_group_close(app *a)
     pt_buf_reset(&a->group.buf);
 }
 
+/* Thinking in full, or hidden: only that it happened, and for how long. */
 static void out_thinking(app *a, pt_buf *out, pt_str text, int64_t ms, bool full)
 {
-    char line[80];
+    char line[80], took[32];
     if (full || a->thinking == TH_FULL) {
         tui_md m;
         memset(&m, 0, sizeof m);
         m.ascii = a->ascii;
         m.margin = MARGIN;
         out_md(a, out, &m, text, TUI_DIM);
-    } else if (a->thinking == TH_COLLAPSED) {
-        char took[32];
-        if (ms < 0) /* from the log, which does not time thinking */
-            took[0] = 0;
-        else if (ms < 1000)
-            snprintf(took, sizeof took, " for <1s");
-        else {
-            snprintf(took, sizeof took, " for ");
-            app_secs_short(took + 5, sizeof took - 5, ms);
-        }
-        snprintf(line, sizeof line, "%s thought%s", a->sy->think, took);
-        app_out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
+        return;
     }
+    if (ms < 0) /* from the log, which does not time thinking */
+        took[0] = 0;
+    else if (ms < 1000)
+        snprintf(took, sizeof took, " for <1s");
+    else {
+        snprintf(took, sizeof took, " for ");
+        app_secs_short(took + 5, sizeof took - 5, ms);
+    }
+    snprintf(line, sizeof line, "%s thought%s", a->sy->think, took);
+    app_out_text(a, out, TUI_DIM, NULL, 0, pt_strz(line), 0);
 }
 
 static pt_str error_message(app *a, pt_str raw)
@@ -771,7 +771,7 @@ void app_live_end(app *a)
 {
     if (a->view.kind != LIVE_NONE && a->view.live.n)
         live_line(a, pt_buf_str(&a->view.live));
-    if (a->view.kind == LIVE_THINK && a->thinking == TH_COLLAPSED && !a->group.n) { /* a group goes on over it */
+    if (a->view.kind == LIVE_THINK && a->thinking == TH_HIDDEN && !a->group.n) { /* a group goes on over it */
         begin_msg(a);
         out_thinking(a, &a->lines, PT_STR_NULL, pt_sys_now_ms() - a->view.think_at, false);
     }
@@ -830,7 +830,7 @@ static void on_ai(app *a, const pt_ai_event *ev)
 }
 
 /* Whether an assistant entry shows anything outside the full view: text,
- * thinking (in a group, collapsed thinking is left out), or that it was
+ * thinking (in a group, hidden thinking is left out), or that it was
  * cut off. With only calls, a group goes on over it. */
 static bool shows(app *a, const pt_entry_view *v)
 {
@@ -841,7 +841,7 @@ static bool shows(app *a, const pt_entry_view *v)
     for (i = 0; i < m->nblocks; i++)
         if ((m->blocks[i].kind == PT_BLOCK_TEXT) ||
             (m->blocks[i].kind == PT_BLOCK_THINKING && m->blocks[i].text.n &&
-             (a->thinking == TH_FULL || (a->thinking == TH_COLLAPSED && !a->group.n))))
+             (a->thinking == TH_FULL || !a->group.n)))
             return true;
     return false;
 }

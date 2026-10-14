@@ -115,7 +115,7 @@ void cli_config_load(cli_config *c, char *warn, size_t cap)
     for (k = 0; k < CFG_N; k++)
         c->src[k] = "default";
     cli_config_set(c, CFG_REASONING, pt_reasoning_name(DEFAULT_EFFORT), "default");
-    cli_config_set(c, CFG_THINKING, "collapsed", "default");
+    cli_config_set(c, CFG_THINKING, "hidden", "default");
     cli_config_set(c, CFG_SYMBOLS, "auto", "default");
     cli_config_set(c, CFG_PERMS, "ask", "default");
     cli_config_set(c, CFG_SKILLS, "on", "default");
