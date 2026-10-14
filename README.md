@@ -91,10 +91,13 @@ git worktree at `<repo>/.pytte/worktrees/<name>`, on a new branch
 [name]` (or `--worktree`) starts in one; `--worktree=<name>` or `--` keeps
 a one-word prompt from being taken for the name.
 
-`/login <provider>` asks for an API key (shown masked, kept out of the input
-history) and saves it to `~/.config/pytte/auth.json` (mode 0600), so no
-exported variable is needed. A key in the environment still comes first;
-`/login` alone shows where each provider's key comes from.
+`/login` offers two kinds: `/login api <provider>` asks for an API key
+(shown masked, kept out of the input history) and saves it to
+`~/.config/pytte/auth.json` (mode 0600), so no exported variable is needed;
+a key in the environment still comes first. `/login oauth openai-codex`
+signs in with a ChatGPT subscription in the browser, for the
+`openai-codex/...` models (`openai/...` is the API, with a key). See
+[docs/login.md](docs/login.md).
 
 Any server that speaks one of the supported APIs can be added as a provider
 in `~/.config/pytte/config.json` (only the user file; a project's file
@@ -120,7 +123,7 @@ Then `pytte -m groq/llama-3.3-70b-versatile`. A provider takes `base_url`
 (required), `api` (`openai-completions`, the default; `openai-responses`;
 `anthropic-messages`), `auth` (`bearer`, `x-api-key` or `none`), `key_env`
 (a variable name or a list of up to 4; by default the id in capitals plus
-`_API_KEY`, so `GROQ_API_KEY`; `/login groq` works too), `headers` (up to
+`_API_KEY`, so `GROQ_API_KEY`; `/login api groq` works too), `headers` (up to
 4), `name`, defaults for unlisted models (`context_window`, 128000 unless
 set; `max_tokens`; `reasoning`, which must be true for effort to be sent;
 `efforts`, the levels its models take, e.g. `["none", "low", "high"]`;

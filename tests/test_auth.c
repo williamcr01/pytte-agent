@@ -1,4 +1,4 @@
-/* API keys saved by /login: auth.json next to config.json. */
+/* API keys and logins saved by /login: auth.json next to config.json. */
 #define _POSIX_C_SOURCE 200809L
 #include "t.h"
 
@@ -67,6 +67,43 @@ static void test_load_and_save(void)
     CHECK(stat(path, &st) == 0 && (st.st_mode & 0777) == 0600);
 }
 
+/* Subscription logins share the file with keys. */
+static void test_logins(void)
+{
+    char err[300];
+    cli_login l, old;
+    size_t n;
+    char *text;
+    put("{\"anthropic\": {\"key\": \"sk-ant\"},\n"
+        " \"openai-codex\": {\"access\": \"a1\", \"refresh\": \"r1\", \"expires\": 1000, \"account_id\": \"acc\"}}\n");
+    CHECK(cli_auth_login("openai-codex", true, &l));
+    CHECK(strcmp(l.access, "a1") == 0 && strcmp(l.refresh, "r1") == 0 && strcmp(l.account_id, "acc") == 0);
+    CHECK(l.expires == 1000);
+    CHECK(!cli_auth_login("anthropic", false, &l));
+    old = l;
+    l.access = "a2";
+    l.refresh = "r2";
+    l.expires = 2000;
+    CHECK(cli_auth_login_save("openai-codex", &l, err, sizeof err));
+    CHECK(cli_auth_login("openai-codex", false, &l) && strcmp(l.access, "a2") == 0 && l.expires == 2000);
+    CHECK(strcmp(old.access, "a1") == 0); /* replaced: the old strings stay valid */
+    text = pt_sys_read_file(path, &n);
+    CHECK(text && strstr(text, "\"key\": \"sk-ant\"") && strstr(text, "\"refresh\": \"r2\"") &&
+          strstr(text, "\"expires\": 2000"));
+    free(text);
+    /* another pytte refreshed it: reload sees the file's */
+    put("{\"openai-codex\": {\"access\": \"a3\", \"refresh\": \"r3\", \"expires\": 3000}}\n");
+    CHECK(cli_auth_login("openai-codex", false, &l) && strcmp(l.access, "a2") == 0);
+    CHECK(cli_auth_login("openai-codex", true, &l) && strcmp(l.access, "a3") == 0 && !l.account_id[0]);
+    /* not saved: still used by this process */
+    put("{oops");
+    l.access = "a4";
+    CHECK(!cli_auth_login_save("openai-codex", &l, err, sizeof err) && err[0]);
+    CHECK(cli_auth_login("openai-codex", false, &l) && strcmp(l.access, "a4") == 0);
+    l.access = "two words";
+    CHECK(!cli_auth_login_save("openai-codex", &l, err, sizeof err));
+}
+
 int main(void)
 {
     char cmd[200];
@@ -79,6 +116,7 @@ int main(void)
     snprintf(path, sizeof path, "%s/pytte/auth.json", dir);
     RUN(test_valid);
     RUN(test_load_and_save);
+    RUN(test_logins);
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (system(cmd) != 0)
         fprintf(stderr, "cannot remove %s\n", dir);

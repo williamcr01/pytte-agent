@@ -384,6 +384,19 @@ static struct {
     auth_key *key;
 } auth[16];
 static int nauth;
+
+/* A login, kept like a key: a replaced one stays reachable. */
+typedef struct auth_login {
+    struct auth_login *older;
+    cli_login l; /* its strings point into data */
+    char data[1];
+} auth_login;
+
+static struct {
+    char provider[64];
+    auth_login *login;
+} logins[8];
+static int nlogins;
 static bool auth_loaded;
 static pthread_mutex_t auth_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -429,8 +442,70 @@ static bool auth_put(const char *provider, pt_str key)
     return true;
 }
 
-/* Under auth_lock: {"anthropic": {"key": "..."}, ...}. A file that cannot
- * be read or parsed gives no keys. */
+/* A login's token: printable ASCII without spaces, 1 to 16384 bytes
+ * (access tokens are JWTs, longer than keys). */
+static bool login_valid(pt_str s)
+{
+    size_t i;
+    if (!s.n || s.n > 16384)
+        return false;
+    for (i = 0; i < s.n; i++)
+        if ((unsigned char)s.p[i] <= ' ' || (unsigned char)s.p[i] >= 0x7f)
+            return false;
+    return true;
+}
+
+/* Under auth_lock. False when out of memory or slots, or the strings are
+ * not tokens. */
+static bool login_put(const char *provider, pt_str access, pt_str refresh, pt_str account, int64_t expires)
+{
+    auth_login *k;
+    char *d;
+    int i;
+    if (strlen(provider) >= sizeof logins[0].provider || !login_valid(access) || !login_valid(refresh) ||
+        (account.n && !login_valid(account)))
+        return false;
+    for (i = 0; i < nlogins && strcmp(logins[i].provider, provider) != 0; i++)
+        ;
+    if (i == nlogins && nlogins == (int)(sizeof logins / sizeof logins[0]))
+        return false;
+    if (!(k = (auth_login *)malloc(sizeof *k + access.n + refresh.n + account.n + 3)))
+        return false;
+    d = k->data;
+    k->l.access = d;
+    memcpy(d, access.p, access.n);
+    d += access.n;
+    *d++ = 0;
+    k->l.refresh = d;
+    memcpy(d, refresh.p, refresh.n);
+    d += refresh.n;
+    *d++ = 0;
+    k->l.account_id = d;
+    memcpy(d, account.p, account.n);
+    d[account.n] = 0;
+    k->l.expires = expires;
+    if (i == nlogins) {
+        snprintf(logins[nlogins].provider, sizeof logins[0].provider, "%s", provider);
+        logins[nlogins++].login = NULL;
+    }
+    k->older = logins[i].login;
+    logins[i].login = k;
+    return true;
+}
+
+/* Under auth_lock: a login's member of auth.json, when it holds one. */
+static void login_load(const char *provider, const pt_json *v, pt_arena *ar)
+{
+    const pt_json *access = pt_json_get(v, "access"), *refresh = pt_json_get(v, "refresh");
+    int64_t expires = pt_json_geti(v, "expires", 0);
+    if (!pt_json_is(access, PT_J_STR) || !pt_json_is(refresh, PT_J_STR))
+        return;
+    login_put(provider, pt_json_str(access, ar), pt_json_str(refresh, ar), pt_json_gets(v, "account_id", ar),
+              expires);
+}
+
+/* Under auth_lock: {"anthropic": {"key": "..."}, "openai-codex": {"access":
+ * ...}, ...}. A file that cannot be read or parsed gives no keys. */
 static void auth_load(void)
 {
     char path[4200];
@@ -449,12 +524,15 @@ static void auth_load(void)
         const pt_json *v = pt_json_is(m, PT_J_OBJ) ? pt_json_get(m, "key") : NULL;
         char provider[64];
         pt_str key;
-        if (!pt_json_is(v, PT_J_STR) || m->key.n >= sizeof provider || memchr(m->key.p, 0, m->key.n))
+        if (!pt_json_is(m, PT_J_OBJ) || m->key.n >= sizeof provider || memchr(m->key.p, 0, m->key.n))
+            continue;
+        snprintf(provider, sizeof provider, "%.*s", (int)m->key.n, m->key.p);
+        login_load(provider, m, &ar);
+        if (!pt_json_is(v, PT_J_STR))
             continue;
         key = pt_json_str(v, &ar);
         if (!cli_auth_valid(key))
             continue;
-        snprintf(provider, sizeof provider, "%.*s", (int)m->key.n, m->key.p);
         auth_put(provider, key);
     }
     pt_arena_free(&ar);
@@ -519,6 +597,105 @@ bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap)
         else
             err[0] = 0;
     }
+    pthread_mutex_unlock(&auth_lock);
+    pt_buf_free(&value);
+    pt_buf_free(&out);
+    free(text);
+    return ok;
+}
+
+bool cli_auth_login(const char *provider, bool reload, cli_login *out)
+{
+    bool ok = false;
+    int i;
+    pthread_mutex_lock(&auth_lock);
+    if (!auth_loaded)
+        auth_load();
+    else if (reload) { /* another pytte may have refreshed it */
+        char path[4200];
+        size_t n;
+        char *text;
+        cli_auth_path(path, sizeof path);
+        if ((text = pt_sys_read_file(path, &n))) {
+            pt_arena ar;
+            const pt_json *v;
+            pt_arena_init(&ar, pt_sys_allocator(), 0);
+            v = pt_json_get(pt_json_parse((pt_str){text, n}, &ar, NULL), provider);
+            for (i = 0; i < nlogins && strcmp(logins[i].provider, provider) != 0; i++)
+                ;
+            if (pt_json_is(v, PT_J_OBJ) &&
+                (i == nlogins || !pt_str_eqz(pt_json_gets(v, "access", &ar), logins[i].login->l.access)))
+                login_load(provider, v, &ar);
+            pt_arena_free(&ar);
+            free(text);
+        }
+    }
+    for (i = 0; i < nlogins; i++)
+        if (strcmp(logins[i].provider, provider) == 0) {
+            *out = logins[i].login->l;
+            ok = true;
+        }
+    pthread_mutex_unlock(&auth_lock);
+    return ok;
+}
+
+bool cli_auth_login_save(const char *provider, const cli_login *l, char *err, size_t cap)
+{
+    char path[4200], num[32];
+    size_t n = 0;
+    char *text;
+    pt_buf value, out;
+    bool ok = false;
+    if (strlen(provider) >= sizeof logins[0].provider || strchr(provider, '.')) {
+        snprintf(err, cap, "not a provider: %s", provider);
+        return false;
+    }
+    if (!login_valid(pt_strz(l->access)) || !login_valid(pt_strz(l->refresh))) {
+        snprintf(err, cap, "the login's tokens are not valid");
+        return false;
+    }
+    cli_auth_path(path, sizeof path);
+    pthread_mutex_lock(&auth_lock);
+    if (!auth_loaded)
+        auth_load();
+    errno = 0;
+    text = pt_sys_read_file(path, &n);
+    if (!text && errno != ENOENT) {
+        snprintf(err, cap, "cannot read %s: %s", path, strerror(errno));
+        pthread_mutex_unlock(&auth_lock);
+        return false;
+    }
+    pt_buf_init(&value, pt_sys_allocator());
+    pt_buf_init(&out, pt_sys_allocator());
+    pt_buf_putz(&value, "{\"access\": ");
+    pt_json_quote(&value, pt_strz(l->access));
+    pt_buf_putz(&value, ", \"refresh\": ");
+    pt_json_quote(&value, pt_strz(l->refresh));
+    snprintf(num, sizeof num, "%lld", (long long)l->expires);
+    pt_buf_putz(&value, ", \"expires\": ");
+    pt_buf_putz(&value, num);
+    if (l->account_id && l->account_id[0]) {
+        pt_buf_putz(&value, ", \"account_id\": ");
+        pt_json_quote(&value, pt_strz(l->account_id));
+    }
+    pt_buf_putc(&value, '}');
+    if (value.oom) {
+        snprintf(err, cap, "out of memory saving the login");
+    } else if (!cli_json_set(text ? (pt_str){text, n} : PT_S("{}\n"), provider, pt_buf_str(&value), &out, err,
+                             cap)) { /* never overwrite a file that does not parse */
+        char why[256];
+        snprintf(why, sizeof why, "%s", err);
+        snprintf(err, cap, "not saved, %s: %s", path, why);
+    } else if (cli_write_atomic(path, pt_buf_str(&out), err, cap)) {
+        ok = true;
+        err[0] = 0;
+    }
+    /* Used from now on even when not saved: a refresh may have replaced
+     * the refresh token, so the old login would not work again. */
+    if (!login_put(provider, pt_strz(l->access), pt_strz(l->refresh), pt_strz(l->account_id ? l->account_id : ""),
+                   l->expires) &&
+        ok)
+        snprintf(err, cap, "saved; restart pytte to use it");
     pthread_mutex_unlock(&auth_lock);
     pt_buf_free(&value);
     pt_buf_free(&out);

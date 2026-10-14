@@ -6,6 +6,7 @@ are where the details live.
 
 | Page | Covers |
 |---|---|
+| [login.md](login.md) | `/login`: API keys, Sign in with ChatGPT (`openai-codex`), auth.json, token refresh |
 | [bash.md](bash.md) | Shell commands: background sessions, how the model is told they ended, `-p` waiting for them |
 | [mcp.md](mcp.md) | MCP servers: config keys, trust, OAuth, prompts and resources, filled-in tool arguments |
 

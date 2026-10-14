@@ -272,6 +272,7 @@ typedef struct app {
     app_draft draft;
     pt_buf command;
     config_job *saving;
+    cli_oauth *login; /* a /login oauth waiting for the browser */
     bool pager_pending;
     tui_term *t;
     tui_keys keys;
@@ -353,6 +354,8 @@ void app_effort_label(const app *a, char *out, size_t cap);
 void app_apply_symbols(app *a);
 void app_apply_thinking(app *a);
 void app_finish_setting(app *a);
+/* A /login oauth that ended: say how. */
+void app_finish_login(app *a);
 bool app_save_setting(app *a, int k, const char *v);
 void app_update_model(app *a);
 void app_set_config(app *a);

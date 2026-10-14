@@ -753,32 +753,66 @@ static uint8_t openrouter_efforts(const pt_json *reasoning, pt_arena *ar)
     return mandatory ? bits : (uint8_t)(bits | PT_EFF_OFF);
 }
 
+/* A models.dev model (m, under its id) as a row of provider's; false when
+ * it is skipped: no tools, deprecated, realtime. */
+static bool dev_row(const pt_json *m, const char *provider, pt_model_entry *e, pt_arena *ar)
+{
+    const pt_json *limit = pt_json_get(m, "limit"), *cost = pt_json_get(m, "cost"), *x;
+    if (!pt_json_truthy(pt_json_get(m, "tool_call")) || pt_str_eqz(pt_json_gets(m, "status", ar), "deprecated") ||
+        pt_str_contains(m->key, PT_S("realtime")) ||
+        !new_row(e, m->key, pt_json_gets(m, "name", ar), pt_json_get(limit, "context"), pt_json_get(limit, "output")))
+        return false;
+    e->reasoning = pt_json_truthy(pt_json_get(m, "reasoning")) &&
+                   !(strcmp(provider, "anthropic") == 0 && old_claude(m->key));
+    e->images = has(pt_json_get(pt_json_get(m, "modalities"), "input"), "image", ar);
+    if ((x = pt_json_get(cost, "input")))
+        get_cost(x, &e->cost.input);
+    if ((x = pt_json_get(cost, "output")))
+        get_cost(x, &e->cost.output);
+    if ((x = pt_json_get(cost, "cache_read")))
+        get_cost(x, &e->cost.cache_read);
+    if ((x = pt_json_get(cost, "cache_write")))
+        get_cost(x, &e->cost.cache_write);
+    e->efforts = dev_efforts(pt_json_get(m, "reasoning_options"), ar);
+    return true;
+}
+
 /* models.dev's models of one provider, sorted, into rows. */
 static void from_models_dev(pt_buf *rows, const pt_json *dev, const char *provider, pt_arena *ar)
 {
     const pt_json *ms = pt_json_get(pt_json_get(dev, provider), "models"), *m;
-    for (m = pt_json_is(ms, PT_J_OBJ) ? ms->child : NULL; m; m = m->next) {
-        const pt_json *limit = pt_json_get(m, "limit"), *cost = pt_json_get(m, "cost"), *x;
-        pt_model_entry e;
-        if (!pt_json_truthy(pt_json_get(m, "tool_call")) || pt_str_eqz(pt_json_gets(m, "status", ar), "deprecated") ||
-            pt_str_contains(m->key, PT_S("realtime")) ||
-            !new_row(&e, m->key, pt_json_gets(m, "name", ar), pt_json_get(limit, "context"),
-                     pt_json_get(limit, "output")))
-            continue;
-        e.reasoning = pt_json_truthy(pt_json_get(m, "reasoning")) &&
-                      !(strcmp(provider, "anthropic") == 0 && old_claude(m->key));
-        e.images = has(pt_json_get(pt_json_get(m, "modalities"), "input"), "image", ar);
-        if ((x = pt_json_get(cost, "input")))
-            get_cost(x, &e.cost.input);
-        if ((x = pt_json_get(cost, "output")))
-            get_cost(x, &e.cost.output);
-        if ((x = pt_json_get(cost, "cache_read")))
-            get_cost(x, &e.cost.cache_read);
-        if ((x = pt_json_get(cost, "cache_write")))
-            get_cost(x, &e.cost.cache_write);
-        e.efforts = dev_efforts(pt_json_get(m, "reasoning_options"), ar);
-        pt_buf_put(rows, &e, sizeof e);
-    }
+    pt_model_entry e;
+    for (m = pt_json_is(ms, PT_J_OBJ) ? ms->child : NULL; m; m = m->next)
+        if (dev_row(m, provider, &e, ar))
+            pt_buf_put(rows, &e, sizeof e);
+    settle(rows, 0);
+}
+
+/* The models a ChatGPT subscription serves through the Codex backend. No
+ * source lists them, so like pi this is an explicit list, with the context
+ * window the backend allows; the rest comes from models.dev's openai model
+ * of the same id. Keep in step with CODEX in scripts/gen_models.py. */
+static const struct {
+    const char *id;
+    uint32_t context;
+} codex_models[] = {
+    {"gpt-5.3-codex-spark", 128000}, {"gpt-5.5", 272000},   {"gpt-5.6-luna", 272000},
+    {"gpt-5.6-sol", 272000},         {"gpt-5.6-terra", 272000}, {"gpt-6-astra", 272000},
+    {"gpt-6-luna", 272000},          {"gpt-6-sol", 272000}, {"gpt-6.1-sol", 272000},
+};
+enum { CODEX_MAX_TOKENS = 128000 };
+
+static void from_codex(pt_buf *rows, const pt_json *dev, pt_arena *ar)
+{
+    const pt_json *ms = pt_json_get(pt_json_get(dev, "openai"), "models"), *m;
+    pt_model_entry e;
+    size_t i;
+    for (i = 0; i < sizeof codex_models / sizeof codex_models[0]; i++)
+        if ((m = pt_json_get(ms, codex_models[i].id)) && dev_row(m, "openai-codex", &e, ar)) {
+            e.context_window = codex_models[i].context;
+            e.max_tokens = CODEX_MAX_TOKENS;
+            pt_buf_put(rows, &e, sizeof e);
+        }
     settle(rows, 0);
 }
 
@@ -870,6 +904,8 @@ bool cli_catalog_convert(pt_str dev_json, pt_str openrouter_json, const char *up
     section(out, &h.nsections, "anthropic", &rows, msg, cap);
     from_models_dev(&rows, dev, "openai", &ar);
     section(out, &h.nsections, "openai", &rows, msg, cap);
+    from_codex(&rows, dev, &ar);
+    section(out, &h.nsections, "openai-codex", &rows, msg, cap);
     from_openrouter(&rows, or, &ar);
     section(out, &h.nsections, "openrouter", &rows, msg, cap);
     /* Providers from config.json that models.dev knows by the same id. */

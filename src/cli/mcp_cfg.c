@@ -487,11 +487,9 @@ static void auth_save(void *ud, const char *server, const char *url, pt_str json
     file_put(path, url, json, err, sizeof err);
 }
 
-/* xdg-open, or open on macOS; detached, quiet. */
-static void open_url(void *ud, const char *url)
+void cli_open_url(const char *url)
 {
     pid_t pid;
-    (void)ud;
     if (!url || (strncmp(url, "https://", 8) && strncmp(url, "http://", 7)))
         return; /* only web pages */
     pid = fork();
@@ -516,6 +514,12 @@ static void open_url(void *ud, const char *url)
     if (pid > 0)
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR)
             ;
+}
+
+static void open_url(void *ud, const char *url)
+{
+    (void)ud;
+    cli_open_url(url);
 }
 
 void cli_mcp_host(pt_rt_mcp_host *h, void (*notify)(void *ud, const char *server, const char *msg), void *ud)

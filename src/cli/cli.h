@@ -49,7 +49,7 @@ bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *
 bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap);
 
 /* ---- config.c: API keys ----
- * Keys saved by /login live in auth.json next to config.json, by provider:
+ * Keys saved by /login api live in auth.json next to config.json, by provider:
  * {"anthropic": {"key": "..."}}. A key in the environment comes first.
  * These are safe to call from any thread. */
 
@@ -65,6 +65,47 @@ const char *cli_auth_key(const char *provider);
  * it could not be saved; true with a non-empty err when it was saved but
  * this process could not take it. */
 bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap);
+
+/* Subscription logins (/login oauth) live in auth.json too, by provider:
+ * {"openai-codex": {"access": "...", "refresh": "...", "expires": <ms since
+ * the epoch>, "account_id": "..."}}. */
+typedef struct cli_login {
+    const char *access, *refresh, *account_id;
+    int64_t expires; /* when access expires, in ms since the epoch */
+} cli_login;
+/* The provider's saved login; false when there is none. reload reads
+ * auth.json again first (another pytte may have refreshed it). The strings
+ * stay valid until the process exits. */
+bool cli_auth_login(const char *provider, bool reload, cli_login *out);
+/* Save a login, changing nothing else in auth.json. It is used from now on
+ * even when it could not be saved (false with err). */
+bool cli_auth_login_save(const char *provider, const cli_login *l, char *err, size_t cap);
+
+/* ---- oauth.c: subscription logins ----
+ * Sign in with ChatGPT, for openai-codex: the browser opens on OpenAI's
+ * sign-in page and comes back to a listener on localhost:1455; when it
+ * cannot (pytte over ssh), the address it ended on is pasted instead. */
+
+typedef struct cli_oauth cli_oauth;
+/* Start logging in to provider in the background and open the browser;
+ * url gets the sign-in page, to show. NULL with err. */
+cli_oauth *cli_oauth_begin(const char *provider, char *url, size_t ucap, char *err, size_t cap);
+/* False when the port was taken: only a pasted address finishes it. */
+bool cli_oauth_listening(const cli_oauth *l);
+/* Readable when the login has ended. */
+int cli_oauth_fd(const cli_oauth *l);
+/* Give the login the address the browser ended on (or the code). */
+bool cli_oauth_paste(cli_oauth *l, pt_str answer);
+/* Nonblocking: true once the login ended; ok says whether it worked and
+ * msg what happened. Then free it. */
+bool cli_oauth_done(cli_oauth *l, bool *ok, char *msg, size_t cap);
+/* Cancel it when still running, and release it. */
+void cli_oauth_free(cli_oauth *l);
+/* A login's credentials for a request: its access token, refreshed when
+ * it expires within 5 minutes (which blocks on the network for up to 30
+ * seconds), and its account. False with why when there is no login, or it
+ * expired and cannot be refreshed. Safe from any thread. */
+bool cli_oauth_credentials(const char *provider, pt_credentials *out, char *why, size_t cap);
 
 /* ---- providers.c: the model catalog ----
  * The built-in catalog, merged with what `pytte update-catalog` fetched
@@ -124,6 +165,9 @@ bool cli_mcp_trust(const cli_mcp *m, bool on, char *err, size_t cap);
 void cli_mcp_free(cli_mcp *m);
 void cli_trust_path(char *out, size_t cap);
 void cli_mcp_auth_path(char *out, size_t cap);
+/* Open a web page in the browser (xdg-open, or open on macOS), detached
+ * and quiet. Only http(s) addresses. */
+void cli_open_url(const char *url);
 /* The host's side for pt_rt_mcp_setup: tokens in mcp-auth.json, logins
  * in the browser (xdg-open, open), lines for the user through notify. */
 void cli_mcp_host(pt_rt_mcp_host *h, void (*notify)(void *ud, const char *server, const char *msg), void *ud);

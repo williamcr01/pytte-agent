@@ -527,7 +527,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "pytte-ai: note: %s is not in the catalog; using %s defaults\n", t.model.id,
                 t.provider->id);
     if (!pt_ai_find_key(t.provider, pt_sys_env, NULL, &cred, &which)) {
-        fprintf(stderr, "pytte-ai: no API key for %s: set %s\n", t.provider->id, t.provider->key_env[0]);
+        if (t.provider->auth == PT_AUTH_OAUTH)
+            fprintf(stderr, "pytte-ai: %s needs a login, which only pytte has\n", t.provider->id);
+        else
+            fprintf(stderr, "pytte-ai: no API key for %s: set %s\n", t.provider->id, t.provider->key_env[0]);
         return 1;
     }
     if (strcmp(t.provider->id, "faux") == 0) {

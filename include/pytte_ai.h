@@ -91,7 +91,9 @@ typedef struct pt_header {
     const char *name, *value;
 } pt_header;
 
-typedef enum { PT_AUTH_NONE, PT_AUTH_X_API_KEY, PT_AUTH_BEARER } pt_auth_style;
+/* PT_AUTH_OAUTH: a subscription login the host keeps (no API key in the
+ * environment); its access token is sent as a bearer token. */
+typedef enum { PT_AUTH_NONE, PT_AUTH_X_API_KEY, PT_AUTH_BEARER, PT_AUTH_OAUTH } pt_auth_style;
 
 /* Dialect quirks. 0 always means "inherit": a model's compat overrides its
  * provider's, which overrides the API's defaults. */
@@ -202,13 +204,15 @@ bool pt_ai_retarget(pt_ai_target *t, pt_str api_id);
 /* ---- auth ------------------------------------------------------------------ */
 
 typedef struct pt_credentials {
-    pt_str api_key;
+    pt_str api_key;    /* or a login's access token */
+    pt_str account_id; /* openai-codex: the ChatGPT account the token is for */
 } pt_credentials;
 
 /* Looks up an environment variable; returns NULL when unset. */
 typedef const char *(*pt_env_fn)(void *ud, const char *name);
 /* The first set variable of the provider's key_env list. On success *which
- * names it. False when none is set (and the provider needs a key). */
+ * names it. False when none is set (and the provider needs a key), and
+ * always for a login (PT_AUTH_OAUTH), which the host keeps. */
 bool pt_ai_find_key(const pt_provider *p, pt_env_fn env, void *ud, pt_credentials *out,
                     const char **which);
 

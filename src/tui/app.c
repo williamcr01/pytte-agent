@@ -233,7 +233,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     app_menu_update(a);
     app_paint(a);
     while (!a->quit) {
-        pt_waitfd fds[5];
+        pt_waitfd fds[6];
         int64_t now = pt_sys_now_ms();
         int bits;
         bool was = a->run.active;
@@ -242,14 +242,16 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         fds[2].fd = a->sess.opening ? cli_session_job_fd(a->sess.opening) : -1;
         fds[3].fd = a->menu.sessions && a->menu.sessions->pending ? pt_worker_fd(a->menu.sessions->worker) : -1;
         fds[4].fd = a->saving && a->saving->active ? pt_worker_fd(a->saving->worker) : -1;
+        fds[5].fd = a->login ? cli_oauth_fd(a->login) : -1;
         if (a->sess.opening) {
-            pt_sys_wait(fds, 5, timeout_ms(a, now));
+            pt_sys_wait(fds, 6, timeout_ms(a, now));
             app_finish_session(a);
         } else if (a->open)
-            pt_rt_step(a->s.rt, timeout_ms(a, now), fds, 5);
+            pt_rt_step(a->s.rt, timeout_ms(a, now), fds, 6);
         else
-            pt_sys_wait(fds, 5, timeout_ms(a, now));
+            pt_sys_wait(fds, 6, timeout_ms(a, now));
         app_finish_setting(a);
+        app_finish_login(a);
         app_show_notes(a);
         if (a->queue.expanded) {
             a->queue.expanded = false;
@@ -376,6 +378,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         pt_worker_free(a->menu.sessions->worker);
         free(a->menu.sessions);
     }
+    cli_oauth_free(a->login); /* a login still waiting is cancelled */
     tui_band_erase(&a->band);
     app_flush_out(a);
     if (a->code != 129 && kept[0] && !a->sess.discarded) { /* how to come back to it */

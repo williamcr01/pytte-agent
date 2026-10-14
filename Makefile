@@ -44,7 +44,7 @@ CURL_SRC := src/drv/http_curl.c
 # The TUI's parts; app*.c (the app and its loop) only go into pytte.
 TUI_SRC  := $(filter-out src/tui/app%,$(wildcard src/tui/*.c))
 CLI_SRC  := src/cli/config.c src/cli/providers.c src/cli/mcp_cfg.c
-APP_SRC  := $(wildcard src/tui/app*.c) src/cli/session.c src/cli/main.c src/cli/print.c src/cli/commands.c
+APP_SRC  := $(wildcard src/tui/app*.c) src/cli/session.c src/cli/oauth.c src/cli/main.c src/cli/print.c src/cli/commands.c
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
 LIB_OBJ  := $(LIB_SRC:%.c=$(BUILD)/obj/%.o)
@@ -70,16 +70,16 @@ $(BUILD)/bench/perf: tests/bench_perf.c $(LIB_SRC) src/tui/input.c src/tui/text.
 bench: $(BUILD)/bench/perf $(BUILD)/pytte
 	@for w in core conversation stream history layout editing; do ./$(BUILD)/bench/perf $$w 10 || exit 1; done
 
-$(BUILD)/bench/http: tests/bench_http.c $(LIB_SRC) $(SYS_SRC) $(CURL_SRC) src/cli/session.c $(CLI_SRC) $(wildcard include/*.h src/*/*.h) Makefile
+$(BUILD)/bench/http: tests/bench_http.c $(LIB_SRC) $(SYS_SRC) $(CURL_SRC) src/cli/session.c src/cli/oauth.c $(CLI_SRC) $(wildcard include/*.h src/*/*.h) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(WARN) $(BENCH_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) $(SYS_SRC) $(CURL_SRC) src/cli/session.c $(CLI_SRC) $(CURL_LDLIBS) -pthread $(LDFLAGS) -o $@
+	$(CC) $(CSTD) $(WARN) $(BENCH_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) $(SYS_SRC) $(CURL_SRC) src/cli/session.c src/cli/oauth.c $(CLI_SRC) $(CURL_LDLIBS) -pthread $(LDFLAGS) -o $@
 
 bench-http: $(BUILD)/bench/http
 	python3 scripts/bench_http.py --bin current=$(BUILD)/bench/http --directory-build current --output $(BUILD)/bench/http.json
 
-$(BUILD)/bench/http-defaults: tests/bench_http.c tests/http_curl_defaults.c $(LIB_SRC) $(SYS_SRC) $(CURL_SRC) src/cli/session.c $(CLI_SRC) $(wildcard include/*.h src/*/*.h) Makefile
+$(BUILD)/bench/http-defaults: tests/bench_http.c tests/http_curl_defaults.c $(LIB_SRC) $(SYS_SRC) $(CURL_SRC) src/cli/session.c src/cli/oauth.c $(CLI_SRC) $(wildcard include/*.h src/*/*.h) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(WARN) $(BENCH_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) $(SYS_SRC) tests/http_curl_defaults.c src/cli/session.c $(CLI_SRC) $(CURL_LIBS) -pthread $(LDFLAGS) -o $@
+	$(CC) $(CSTD) $(WARN) $(BENCH_CFLAGS) $(CPPFLAGS) $(CURL_CFLAGS) $< $(filter-out src/base/arena.c,$(LIB_SRC)) $(SYS_SRC) tests/http_curl_defaults.c src/cli/session.c src/cli/oauth.c $(CLI_SRC) $(CURL_LIBS) -pthread $(LDFLAGS) -o $@
 
 $(BUILD)/bench/tui-dns.so: tests/http_tui_dns.c Makefile
 	@mkdir -p $(dir $@)
