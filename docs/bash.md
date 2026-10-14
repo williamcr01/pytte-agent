@@ -21,8 +21,10 @@ There are no config keys. The model sets these per call:
 
 ## Behavior
 
-- **Each call starts fresh.** `cd` and `export` do not carry over, and
-  stdin is empty, so a command cannot stop to ask for input.
+- **Each call starts fresh.** Commands start in the working directory,
+  which the system prompt names. A `cd` or `export` inside one call
+  doesn't carry over to the next, and stdin is empty, so a command cannot
+  stop to ask for input.
 - **Going to the background.** If the command is still running after
   `yield` seconds, the call returns the output so far followed by
   `[still running as session N; you will be told when it ends]`. At most

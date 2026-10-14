@@ -619,8 +619,8 @@ void pt_rt_bash_tools(bash *b, pt_rt_tool t[2])
     t[0].def.name = PT_S("bash");
     t[0].def.description = PT_S(
         "Run a command line in the user's shell, in the session's directory, and return its output "
-        "(stdout and stderr together). Each call starts fresh: cd and export do not carry over. stdin "
-        "is empty, so nothing can prompt. A command still running after yield seconds keeps running "
+        "(stdout and stderr together). Commands start in the working directory. A cd or export inside "
+        "one call doesn't carry over to the next. stdin is empty, so nothing can prompt. A command still running after yield seconds keeps running "
         "in the background as a session; pass a small yield to start a server or a watcher. You are "
         "told when a session ends, with what it printed, so do not poll to wait for one: work on, "
         "or end your turn saying what you wait for, and you will be woken when it ends.");

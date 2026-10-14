@@ -175,7 +175,7 @@ and written, for replaying a display bug.
 
 Prompt files and skills: `SYSTEM.md` replaces the built-in system prompt and
 `APPEND_SYSTEM.md` adds to it; each is read from `<project>/.pytte/`, else
-`~/.config/pytte/`. Skills are `skills/<name>/SKILL.md` (frontmatter `name`
+`~/.config/pytte/`. A `Working directory: <path>` line follows either way. Skills are `skills/<name>/SKILL.md` (frontmatter `name`
 and `description`) in `~/.agents/`, `~/.config/pytte/`, `<project>/.agents/`
 or `<project>/.pytte/`; a project skill replaces a user skill of the same
 name. The model sees each skill's name, description and path, and reads the

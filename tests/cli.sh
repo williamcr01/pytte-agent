@@ -146,8 +146,8 @@ if command -v jq >/dev/null; then
     epoch() { (cd "$p" && "$pa" log --json | jq -se "map(select(.kind == \"epoch\")) | .[$1].data | $2" >/dev/null); }
     user() { (cd "$p" && "$pa" log --json | jq -se "map(select(.kind == \"user\")) | .[-1].data.content | $1" >/dev/null); }
     run -m faux/faux --script "$hello" --append-system-prompt "flag append" hi
-    check "the project's SYSTEM.md replaces the user's, then the appends" \
-        epoch 0 '.system | startswith("project system\n\nuser append\n\nflag append\n\n# Skills")'
+    check "the project's SYSTEM.md replaces the user's, then the appends and the working directory" \
+        epoch 0 '.system | startswith("project system\n\nuser append\n\nWorking directory: '"$p"'\n\nflag append\n\n# Skills")'
     check "...the project's skill wins, and manual ones are not listed" \
         epoch 0 '.skills | map(.name + ": " + .description) == ["mine: only the user'"'"'s", "shared: from the project"]'
     run -m faux/faux --script "$hello" 'use $deploy, then $shared. $5 is $nope'
@@ -168,7 +168,7 @@ if command -v jq >/dev/null; then
     skill "$p/.pytte" fresh "added later"
     PYTTE_PERMISSION_MODE=auto run -c --context-window 8000 --script "$old" "page it"
     check "a compaction reads the prompt files and skills again, keeping the flags" \
-        epoch -1 '(.n == 2) and (.system | startswith("project system\n\nchanged append\n\nflag append")) and (.skills | map(.name) | index("fresh"))'
+        epoch -1 '(.n == 2) and (.system | startswith("project system\n\nchanged append\n\nWorking directory: '"$p"'\n\nflag append")) and (.skills | map(.name) | index("fresh"))'
     r=$XDG_STATE_HOME/repo
     mkdir -p "$r/.git" "$r/src/tui"
     echo "above the repo" >"$XDG_STATE_HOME/AGENTS.md"
