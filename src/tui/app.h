@@ -277,6 +277,7 @@ typedef struct app {
     tui_keys keys;
     tui_band band;
     tui_frame frame;
+    int above; /* the band's rows above the input last paint, blanks included */
     tui_input in;
     int rows, cols;
     app_caps caps;

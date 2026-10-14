@@ -31,9 +31,14 @@ typedef struct pty {
     bool eof;
     int status;
     pt_buf scratch;
+    /* With watch: the cursor's row in each finished frame, and whether it
+     * ever went up (the input jumped). */
+    bool watch, rose;
+    int row;
 } pty;
 
 static char state_dir[256], config_dir[256], self_bin[4096];
+static bool has(pty *p, const char *text);
 static const char *bin;
 
 static void put(int fd, const char *p, size_t n)
@@ -274,6 +279,31 @@ static void pty_start(pty *p, int rows, int cols, const char *const *args)
     close(info[0]);
 }
 
+/* Feed bytes to the emulator a frame at a time (a frame ends with the end
+ * of a synchronized update), checking where each leaves the cursor. */
+static void watch_frames(pty *p, const char *buf, size_t n)
+{
+    static const char end[] = "\x1b[?2026l";
+    size_t at = 0;
+    while (at < n) {
+        size_t k = at;
+        while (k < n && !(n - k >= sizeof end - 1 && memcmp(buf + k, end, sizeof end - 1) == 0))
+            k++;
+        k = k < n ? k + sizeof end - 1 : n;
+        vt_write(p->v, buf + at, k - at);
+        at = k;
+        if (p->v->sync || p->v->hidden)
+            continue;
+        if (p->v->r < p->row && !p->rose) {
+            p->rose = true;
+            has(p, "");
+            fprintf(stderr, "    the input went up from row %d to %d; the screen:\n%s\n", p->row, p->v->r,
+                    p->scratch.p);
+        }
+        p->row = p->v->r;
+    }
+}
+
 /* Feed what pytte wrote to the emulator, and the emulator's replies back,
  * for up to ms. */
 static void pump(pty *p, int ms)
@@ -293,7 +323,10 @@ static void pump(pty *p, int ms)
             p->eof = true;
             break;
         }
-        vt_write(p->v, buf, (size_t)n);
+        if (p->watch)
+            watch_frames(p, buf, (size_t)n);
+        else
+            vt_write(p->v, buf, (size_t)n);
         if (p->v->replies.n) {
             put(p->fd, p->v->replies.p, p->v->replies.n);
             pt_buf_reset(&p->v->replies);
@@ -650,6 +683,41 @@ static void test_interrupt_and_queue(void)
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
     pty_free(&p);
+}
+
+/* The input stays where it is while a run comes and goes: rows above it
+ * (the open group, the live tail, queued inputs, the activity) leave
+ * blank rows behind until the transcript fills them, so the cursor's row
+ * never goes up. On a fresh screen and on a full one. */
+static void test_steady_input(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/steady.json", "--permission-mode", "auto", NULL};
+    int full;
+    for (full = 0; full < 2; full++) {
+        pty_start(&p, 24, 80, args);
+        CHECK(wait_for(&p, "/help for commands", 3000));
+        if (full) { /* answered at once: no run */
+            int i;
+            for (i = 0; i < 12; i++)
+                keys(&p, "/status\r");
+            CHECK(wait_idle(&p, 3000));
+        }
+        pump(&p, 100);
+        p.watch = true;
+        p.row = p.v->r;
+        keys(&p, "build and test\r");
+        CHECK(wait_for(&p, "        step 6\n", 5000)); /* the running call's output, in the band */
+        keys(&p, "and then?\r");
+        CHECK(wait_for(&p, "queued · and then?", 2000));
+        CHECK(wait_for(&p, "› and then?", 10000));
+        CHECK(wait_idle(&p, 8000));
+        CHECK(!p.rose);
+        p.watch = false;
+        keys(&p, "\x04");
+        CHECK(finish(&p, 3000) == 0);
+        pty_free(&p);
+    }
 }
 
 /* Calls in a row form a group (section 16.2): a header that counts them,
@@ -1356,6 +1424,7 @@ int main(int argc, char **argv)
     RUN(test_kill9);
     RUN(test_suspend_and_signals);
     RUN(test_interrupt_and_queue);
+    RUN(test_steady_input);
     RUN(test_approval);
     RUN(test_tool_rendering);
     RUN(test_background);
