@@ -5,8 +5,8 @@
 
 #include <unistd.h>
 
-static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "…", "•"};
-static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", "*"};
+static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "…", "•", "↑", "↓"};
+static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", "*", "in", "out"};
 
 const app_cmd_def app_cmds[] = {
     {"model", " [id]", "set the model of this session"},

@@ -32,6 +32,7 @@ enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
  * question. Prose sits two columns in, beside them. */
 typedef struct syms {
     const char *prompt, *think, *note, *ok, *fail, *ask, *sel, *bar, *more, *dot;
+    const char *up, *down; /* tokens read and written */
 } syms;
 
 
@@ -189,6 +190,10 @@ typedef struct app_run {
     run_call calls[RUN_MAX]; /* in the order they started */
     int ncalls;
     uint32_t nbg; /* background commands still running, in the footer */
+    /* Tokens the run read and wrote, by the provider's count: the requests
+     * done, and the one streaming, whose output is guessed from its bytes
+     * until its count arrives. */
+    uint64_t tok_in, tok_out, req_in, req_out, req_bytes;
 } app_run;
 
 /* The open group of finished calls: in the band until something else is shown. */
@@ -315,6 +320,8 @@ int app_tool_of(pt_str name);
 void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args);
 void app_secs_short(char *out, size_t cap, int64_t ms);
 int64_t app_run_clock(const app *a, int64_t now);
+void app_run_restart(app *a, int64_t now);
+uint64_t app_run_out(const app *a);
 const char *app_blink(const app *a, int64_t now);
 bool app_starts(pt_str s, const char *z);
 bool app_runs_oom(const app *a);

@@ -745,6 +745,7 @@ static void test_background(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "go\r");
     CHECK(wait_for(&p, "· 1 in background (/ps)", 3000)); /* the footer */
+    CHECK(wait_for(&p, "s · ↑ ", 3000) && has(&p, " ↓ ")); /* the run's tokens, beside its clock */
     CHECK(wait_for(&p, "Done.", 20000));
     /* the second poll ran for what was left of the 8.5 s: its time
      * (" · 2s" when idle) depends on scheduling */

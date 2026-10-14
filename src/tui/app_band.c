@@ -81,10 +81,12 @@ static void status_row(app *a, int64_t now, int total, int sel)
 }
 
 /* Above the input while a run is active: the blinking dot, what the run is
- * doing, and its clock ("• thinking · 12s"). Only the clock moves. */
+ * doing, its clock and the tokens it read and wrote, once there are some
+ * ("• thinking · 12s · ↑ 12k ↓ 340"). */
 static void activity_row(app *a, int64_t now)
 {
-    char what[120], el[32];
+    char what[120], el[32], tin[16], tout[16], tok[64] = "";
+    uint64_t in = a->run.tok_in + a->run.req_in, out = app_run_out(a);
     if (a->ask.shown)
         snprintf(what, sizeof what, "waiting for you");
     else if (a->open && pt_rt_materials_waiting(a->s.rt))
@@ -102,6 +104,11 @@ static void activity_row(app *a, int64_t now)
                                           : a->run.phase == PH_COMPACT ? "compacting"
                                                                    : "working");
     app_secs_short(el, sizeof el, app_run_clock(a, now));
+    if (in || out) {
+        app_tokens_short(tin, sizeof tin, in);
+        app_tokens_short(tout, sizeof tout, out);
+        snprintf(tok, sizeof tok, " · %s %s %s %s", a->sy->up, tin, a->sy->down, tout);
+    }
     pt_buf_reset(&a->tmp);
     tui_style(&a->tmp, ACCENT | TUI_BOLD);
     pt_buf_putz(&a->tmp, app_blink(a, now));
@@ -111,6 +118,7 @@ static void activity_row(app *a, int64_t now)
     tui_style(&a->tmp, TUI_DIM);
     pt_buf_putz(&a->tmp, " · ");
     pt_buf_putz(&a->tmp, el);
+    pt_buf_putz(&a->tmp, tok);
     tui_style(&a->tmp, 0);
     row(a, pt_buf_str(&a->tmp));
 }
