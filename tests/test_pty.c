@@ -469,8 +469,9 @@ static void test_chat(void)
     CHECK(wait_for(&p, "› hi there", 2000));
     keys(&p, "\r");
     CHECK(wait_for(&p, "Hello from the faux provider! Nothing here touched the network.", 5000));
-    CHECK(wait_for(&p, "∴ thought", 2000));
+    CHECK(wait_for(&p, "∴ thought", 2000)); /* hidden by default: only that it happened */
     CHECK(wait_idle(&p, 3000));
+    CHECK(!has(&p, "A greeting."));
     CHECK(wait_for(&p, "network.\n\n· worked for ", 1000)); /* the spinner's time, kept */
     CHECK(wait_for(&p, "  ask · faux · ", 1000) && wait_for(&p, "/100k\n", 1000)); /* context used, of the window */
     keys(&p, "\x1b[100;5u"); /* Ctrl-D, kitty style */
@@ -603,7 +604,7 @@ static void test_resize_while_streaming(void)
     pty_start(&p, 24, 80, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "list the files\r");
-    CHECK(wait_for(&p, "The user wants a listing", 3000));
+    CHECK(wait_for(&p, "Let me look", 3000));
     for (i = 0; i < 40; i++) {
         memset(&ws, 0, sizeof ws);
         ws.ws_row = 24;
@@ -613,7 +614,7 @@ static void test_resize_while_streaming(void)
         pump(&p, 25 + (i * 13) % 30);
     }
     CHECK(wait_idle(&p, 10000));
-    CHECK(count(&p, "The user wants a listing") == 0); /* the live tail of the thinking */
+    CHECK(count(&p, "The user wants a listing") == 0); /* hidden thinking is never drawn, not even its live tail */
     CHECK(count(&p, "› list the files") == 1);
     CHECK(count(&p, "Let me look at the files first.") == 1);
     keys(&p, "\x04");
@@ -919,7 +920,7 @@ static void test_commands(void)
     CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");
     CHECK(wait_for(&p, "› /thinking ", 1000));
-    CHECK(wait_for(&p, "collapsed", 1000));
+    CHECK(wait_for(&p, "hidden", 1000));
     keys(&p, "full\r");
     CHECK(wait_for(&p, "\n· switched thinking: full\n", 1000));
     CHECK(!has(&p, "› /thinking")); /* a command is not echoed, only what it did */
@@ -1235,7 +1236,7 @@ static void test_blocked_settings(void)
         close(fd);
     }
     CHECK(wait_for(&p, "saved thinking: hidden", DURABLE_MS));
-    keys(&p, "\x03\x14\x14\x04"); /* Rapid changes are flushed on quit. */
+    keys(&p, "\x03\x14\x14\x14\x04"); /* Rapid changes are flushed on quit. */
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
     pty_free(&p);

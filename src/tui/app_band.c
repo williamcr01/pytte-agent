@@ -261,7 +261,7 @@ static void build_frame(app *a, int64_t now)
         pt_buf_putc(live_rows, '\n');
         app_group_render(a, live_rows, true);
     }
-    if (a->view.kind != LIVE_NONE && a->view.live.n) {
+    if (a->view.live.n && (a->view.kind == LIVE_TEXT || (a->view.kind == LIVE_THINK && a->thinking == TH_FULL))) {
         tui_md copy = a->view.md;
         if (!a->view.started) /* where the message's blank line will be */
             pt_buf_putc(live_rows, '\n');

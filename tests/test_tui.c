@@ -533,7 +533,7 @@ static pt_str set(const char *src, const char *key, const char *value, bool *ok)
 static void test_config_set(void)
 {
     bool ok;
-    CHECK_STR(set("{\n  \"model\": \"x\",\n  \"tui\": {\"thinking\": \"collapsed\"}\n}\n", "tui.thinking", "\"full\"", &ok),
+    CHECK_STR(set("{\n  \"model\": \"x\",\n  \"tui\": {\"thinking\": \"hidden\"}\n}\n", "tui.thinking", "\"full\"", &ok),
               "{\n  \"model\": \"x\",\n  \"tui\": {\n    \"thinking\": \"full\"\n  }\n}\n");
     CHECK(ok);
     CHECK_STR(set("{\"model\": \"x\"}", "tui.pager", "\"less\"", &ok),
