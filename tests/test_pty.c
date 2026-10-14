@@ -359,11 +359,14 @@ static bool wait_for_joined(pty *p, const char *text, int ms)
 
 /* Until no run is active (the activity line is gone). */
 /* A run is active: the activity row above the input shows its clock. Its
- * dot blinks, so the row starts with "• " or two spaces. */
+ * dot blinks, so the row starts with "• " or two spaces. An input that
+ * waits (for the session to open, or for its MCP fetches) is work still
+ * to come: its row says "queued · " or "fetching · ". */
 static bool busy(pty *p)
 {
     static const char *const what[] = {"working · ", "thinking · ", "writing · ", "compacting · ",
-                                       "waiting for you · ", "running ", "retrying in "};
+                                       "waiting for you · ", "running ", "retrying in ", "queued · ",
+                                       "fetching · "};
     char row[64];
     size_t i;
     for (i = 0; i < sizeof what / sizeof what[0]; i++) {
@@ -1171,6 +1174,7 @@ static void test_early_input(void)
     CHECK(p.v->kitty == 0);
     keys(&p, "early prompt\rremaining draft");
     CHECK(wait_for(&p, "› remaining draft", 1000));
+    CHECK(has(&p, "  queued · early prompt")); /* sent while the session opens: shown waiting */
     /* A late CPR is dropped; late kitty negotiation still enables keys. */
     keys(&p, "\x1b[1;1R\x1b[?0u\x1b[?1;2c");
     CHECK(p.v->kitty == 1 && has(&p, "› remaining draft"));

@@ -271,7 +271,9 @@ static void build_frame(app *a, int64_t now)
     }
     nask = a->ask.shown ? 5 : 0;
     act = a->run.active ? 1 : 0;
-    nq = a->run.active || (a->queue.n && a->queue.items[0].xid && a->queue.items[0].got < a->queue.items[0].want)
+    /* what waits: for the run, for the session to open, or for its fetches */
+    nq = a->run.active || a->sess.opening ||
+                 (a->queue.n && a->queue.items[0].xid && a->queue.items[0].got < a->queue.items[0].want)
              ? (int)(a->queue.n > 3 ? 4 : a->queue.n)
              : 0;
     nmenu = a->menu.kind == MENU_SETTINGS ? (int)NSETTINGS : a->menu.kind != MENU_NONE ? a->menu.n : 0;
