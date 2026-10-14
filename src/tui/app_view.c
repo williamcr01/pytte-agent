@@ -238,6 +238,26 @@ int64_t app_run_clock(const app *a, int64_t now)
     return (a->run.wait_at ? a->run.wait_at : now) - a->run.at;
 }
 
+/* A run starts: its clock and its token counts from zero. */
+void app_run_restart(app *a, int64_t now)
+{
+    a->run.at = now;
+    a->run.wait_at = 0;
+    a->run.tok_in = a->run.tok_out = a->run.req_in = a->run.req_out = a->run.req_bytes = 0;
+}
+
+/* The tokens the run wrote: the streaming request's guessed at about
+ * four bytes a token until the provider counts them. */
+static uint64_t req_out(const app *a)
+{
+    return a->run.req_out ? a->run.req_out : a->run.req_bytes / 4;
+}
+
+uint64_t app_run_out(const app *a)
+{
+    return a->run.tok_out + req_out(a);
+}
+
 /* The activity mark blinks with the clock, lighting as its seconds change;
  * it stays lit while the clock stands still. */
 const char *app_blink(const app *a, int64_t now)
@@ -791,6 +811,20 @@ static void live_begin(app *a, int kind)
 
 static void on_ai(app *a, const pt_ai_event *ev)
 {
+    if (ev->kind == PT_EV_START)
+        a->run.req_in = a->run.req_out = a->run.req_bytes = 0;
+    if (ev->msg) { /* the counts so far: most providers send them at the start or the end */
+        const pt_usage *u = &ev->msg->usage;
+        a->run.req_in = u->input + u->cache_read + u->cache_write;
+        a->run.req_out = u->output;
+    }
+    if (ev->kind == PT_EV_TEXT_DELTA || ev->kind == PT_EV_THINKING_DELTA || ev->kind == PT_EV_TOOLCALL_DELTA)
+        a->run.req_bytes += ev->delta.n;
+    if (ev->kind == PT_EV_DONE || ev->kind == PT_EV_ERROR) { /* the request is done: its counts are kept */
+        a->run.tok_in += a->run.req_in;
+        a->run.tok_out += req_out(a);
+        a->run.req_in = a->run.req_out = a->run.req_bytes = 0;
+    }
     switch (ev->kind) {
     case PT_EV_START:
         a->view.streamed = true;
@@ -976,8 +1010,7 @@ void app_on_event(void *ud, const pt_event *ev)
             app_out_blank(&a->lines);
             app_out_z(a, TUI_DIM, line);
         }
-        a->run.at = pt_sys_now_ms(); /* a queued input runs next */
-        a->run.wait_at = 0;
+        app_run_restart(a, pt_sys_now_ms()); /* a queued input runs next */
         break;
     case PT_E_FATAL:
         app_group_close(a);

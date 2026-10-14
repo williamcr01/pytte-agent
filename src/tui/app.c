@@ -278,8 +278,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         if (a->run.active != was) {
             set_dirty(a);
             if (a->run.active) {
-                a->run.at = now;
-                a->run.wait_at = 0;
+                app_run_restart(a, now);
                 a->run.phase = PH_WAIT;
             }
         }
