@@ -3,6 +3,7 @@
 
 Sources, like pi's generator:
   anthropic, openai   https://models.dev/api.json
+  openai-codex        CODEX below, described by models.dev's openai models
   openrouter          https://openrouter.ai/api/v1/models
 
 Only models that can call tools are kept. The output is committed, so builds
@@ -30,6 +31,24 @@ COMPAT = {
     "anthropic/claude-opus-4-8": ".mid_conversation_system = PT_YES",
 }
 
+
+# The models a ChatGPT subscription serves through the Codex backend. No
+# source lists them, so like pi this is an explicit list (no aliases): id ->
+# the context window the backend allows (its own limit, smaller than the
+# API's). The rest comes from models.dev's openai entry of the same id.
+# Keep in step with CODEX in src/cli/providers.c.
+CODEX = {
+    "gpt-5.3-codex-spark": 128000,
+    "gpt-5.5": 272000,
+    "gpt-5.6-luna": 272000,
+    "gpt-5.6-sol": 272000,
+    "gpt-5.6-terra": 272000,
+    "gpt-6-astra": 272000,
+    "gpt-6-luna": 272000,
+    "gpt-6-sol": 272000,
+    "gpt-6.1-sol": 272000,
+}
+CODEX_MAX_TOKENS = 128000
 
 
 def reasoning(provider, mid, listed):
@@ -103,6 +122,16 @@ def from_models_dev(data, provider):
     return rows
 
 
+def from_codex(openai_rows):
+    by_id = {r["id"]: r for r in openai_rows}
+    rows = []
+    for mid, context in CODEX.items():
+        if mid not in by_id:
+            sys.exit("gen_models: CODEX names a model models.dev does not list: %s" % mid)
+        rows.append(dict(by_id[mid], provider="openai-codex", context=context, output=CODEX_MAX_TOKENS))
+    return rows
+
+
 def from_openrouter(data):
     rows = []
     for m in data["data"]:
@@ -139,7 +168,8 @@ def c_str(s):
 
 # Index macros into providers[] in src/ai/providers.c, and the string caps
 # of pt_model_entry in include/pytte_ai.h.
-PROVIDER = {"anthropic": "PROV_ANTHROPIC", "openai": "PROV_OPENAI", "openrouter": "PROV_OPENROUTER"}
+PROVIDER = {"anthropic": "PROV_ANTHROPIC", "openai": "PROV_OPENAI", "openai-codex": "PROV_OPENAI_CODEX",
+            "openrouter": "PROV_OPENROUTER"}
 ID_CAP, NAME_CAP = 52, 48
 
 
@@ -157,9 +187,10 @@ def row(r):
 
 def main():
     dev = fetch("https://models.dev/api.json")
-    rows = from_models_dev(dev, "anthropic") + from_models_dev(dev, "openai")
+    openai = from_models_dev(dev, "openai")
+    rows = from_models_dev(dev, "anthropic") + openai + from_codex(openai)
     rows += from_openrouter(fetch("https://openrouter.ai/api/v1/models"))
-    rows.sort(key=lambda r: (["anthropic", "openai", "openrouter"].index(r["provider"]), r["id"]))
+    rows.sort(key=lambda r: (list(PROVIDER).index(r["provider"]), r["id"]))
     missing = set(COMPAT) - {r["provider"] + "/" + r["id"] for r in rows}
     if missing:
         sys.exit("gen_models: COMPAT names models the sources no longer list: %s" % sorted(missing))
@@ -169,7 +200,7 @@ def main():
                 " * cost (micro-dollars per million tokens: input, output, cache read,\n"
                 " * cache write), compat, efforts (0: unknown). */\n")
         f.writelines(row(r) for r in rows)
-    counts = {p: sum(r["provider"] == p for r in rows) for p in ("anthropic", "openai", "openrouter")}
+    counts = {p: sum(r["provider"] == p for r in rows) for p in PROVIDER}
     print("gen_models: wrote %s: %s" % (OUT, counts))
 
 

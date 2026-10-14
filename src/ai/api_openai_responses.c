@@ -1,6 +1,10 @@
 /* api: openai-responses (POST /responses, streaming). OpenAI's own API: it
  * takes tools and reasoning together, streams reasoning summaries, and
- * carries reasoning between turns as encrypted items (store: false). */
+ * carries reasoning between turns as encrypted items (store: false).
+ *
+ * api: openai-codex-responses is the same API as ChatGPT's Codex backend
+ * serves it to a subscription (POST /codex/responses): a login's token and
+ * its account in headers, instructions required, no max_output_tokens. */
 #include "ai.h"
 
 /* ---- request ---- */
@@ -64,8 +68,8 @@ static void write_assistant(pt_jw *w, const pt_msg *m, pt_arena *a)
     }
 }
 
-static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_opts *o,
-                  const pt_credentials *cred, pt_http_req *out, pt_arena *a)
+static bool build_any(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_opts *o,
+                      const pt_credentials *cred, pt_http_req *out, pt_arena *a, bool codex)
 {
     pt_buf b;
     pt_jw w;
@@ -76,7 +80,8 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     pt_buf_init(&b, a->al);
     pt_jw_init(&w, &b);
 
-    max_tokens = o->max_tokens ? o->max_tokens : pt_ai_auto_max_tokens(t, ctx, o->input_estimate);
+    /* The Codex backend refuses max_output_tokens. */
+    max_tokens = codex ? 0 : o->max_tokens ? o->max_tokens : pt_ai_auto_max_tokens(t, ctx, o->input_estimate);
 
     pt_jw_obj(&w);
     pt_jw_key(&w, "model");
@@ -85,12 +90,14 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     pt_jw_bool(&w, true);
     pt_jw_key(&w, "store"); /* the transcript is ours; nothing is kept server-side */
     pt_jw_bool(&w, false);
-    if (ctx->nmsgs && ctx->msgs[0].role == PT_ROLE_SYSTEM) {
+    if (ctx->nmsgs && ctx->msgs[0].role == PT_ROLE_SYSTEM)
         first = 1;
-        if (ctx->msgs[0].text.n) {
-            pt_jw_key(&w, "instructions");
-            pt_jw_str(&w, ctx->msgs[0].text);
-        }
+    if (first && ctx->msgs[0].text.n) {
+        pt_jw_key(&w, "instructions");
+        pt_jw_str(&w, ctx->msgs[0].text);
+    } else if (codex) { /* it requires them */
+        pt_jw_key(&w, "instructions");
+        pt_jw_strz(&w, "You are a helpful assistant.");
     }
     if (max_tokens) {
         pt_jw_key(&w, "max_output_tokens");
@@ -206,15 +213,32 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
             pt_jw_obj_end(&w);
         }
         pt_jw_arr_end(&w);
+        if (codex) {
+            pt_jw_key(&w, "tool_choice");
+            pt_jw_strz(&w, "auto");
+            pt_jw_key(&w, "parallel_tool_calls");
+            pt_jw_bool(&w, true);
+        }
     }
     pt_jw_obj_end(&w);
 
-    if (!pt_req_init(out, t, o, "/responses", 4, a)) {
+    if (!pt_req_init(out, t, o, codex ? "/codex/responses" : "/responses", 8, a)) {
         pt_buf_free(&b);
         return false;
     }
     pt_req_header(out, "content-type", "application/json");
     pt_req_header(out, "accept", "text/event-stream");
+    if (codex) {
+        pt_req_header(out, "OpenAI-Beta", "responses=experimental");
+        pt_req_header(out, "originator", "pytte");
+        if (cred && cred->account_id.n)
+            pt_req_header(out, "chatgpt-account-id", pt_arena_cstr(a, cred->account_id));
+        if (o->session_id.n) {
+            const char *sid = pt_arena_cstr(a, o->session_id);
+            pt_req_header(out, "session-id", sid);
+            pt_req_header(out, "x-client-request-id", sid);
+        }
+    }
     if (cred && cred->api_key.n) {
         pt_buf auth;
         pt_buf_init(&auth, a->al);
@@ -225,6 +249,18 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
     }
     pt_req_extra_headers(out, t, o);
     return pt_req_body(out, &b, a);
+}
+
+static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_opts *o,
+                  const pt_credentials *cred, pt_http_req *out, pt_arena *a)
+{
+    return build_any(t, ctx, o, cred, out, a, false);
+}
+
+static bool build_codex(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_opts *o,
+                        const pt_credentials *cred, pt_http_req *out, pt_arena *a)
+{
+    return build_any(t, ctx, o, cred, out, a, true);
 }
 
 /* ---- stream ---- */
@@ -421,8 +457,41 @@ static void classify_error(int status, pt_str body, pt_ai_error *out, pt_arena *
     pt_openai_error(pt_json_get(d, "error"), body, status, out, a);
 }
 
+/* The Codex backend's usage limits: {"error": {"type": "usage_limit_reached",
+ * "plan_type": "plus", "resets_at": <unix seconds>}}. Retrying does not
+ * help until the window resets. */
+static void classify_codex(int status, pt_str body, pt_ai_error *out, pt_arena *a)
+{
+    pt_json *d = pt_json_parse(body, a, NULL);
+    const pt_json *err = pt_json_get(d, "error");
+    pt_str code = pt_json_gets(err, "code", a), type = pt_json_gets(err, "type", a);
+    pt_openai_error(err, body, status, out, a);
+    if (pt_str_contains(code, PT_S("usage_limit")) || pt_str_contains(type, PT_S("usage_limit")) ||
+        pt_str_contains(code, PT_S("usage_not_included")) || pt_str_contains(type, PT_S("usage_not_included"))) {
+        pt_str plan = pt_json_gets(err, "plan_type", a);
+        pt_buf m;
+        pt_buf_init(&m, a->al);
+        pt_buf_putz(&m, "you have hit your ChatGPT usage limit");
+        if (plan.n) {
+            pt_buf_putz(&m, " (");
+            pt_buf_puts(&m, plan);
+            pt_buf_putz(&m, " plan)");
+        }
+        out->cls = PT_ERR_FATAL;
+        out->message = pt_arena_dup(a, pt_buf_str(&m));
+        pt_buf_free(&m);
+    }
+}
+
 const pt_api_vt pt_api_openai_responses = {
     "openai-responses", build, sizeof(state), feed, finish, classify_error,
+    {.system_role = PT_SYSROLE_DEVELOPER, .mid_conversation_system = PT_YES, .thinking_display = PT_YES},
+    PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH,
+    64,
+};
+
+const pt_api_vt pt_api_openai_codex = {
+    "openai-codex-responses", build_codex, sizeof(state), feed, finish, classify_codex,
     {.system_role = PT_SYSROLE_DEVELOPER, .mid_conversation_system = PT_YES, .thinking_display = PT_YES},
     PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH,
     64,

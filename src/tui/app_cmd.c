@@ -21,7 +21,7 @@ const app_cmd_def app_cmds[] = {
     {"stop", "", "stop the background commands"},
     {"usage", "", "tokens used in this session, per model"},
     {"thinking", " [mode]", "how thinking is shown: hidden, full"},
-    {"login", " [provider] [key]", "save an API key to auth.json"},
+    {"login", " [api|oauth] [provider] [key]", "save an API key, or sign in with a subscription"},
     {"mcp", " [login|logout|restart name] [trust|untrust]", "MCP servers: their state, logins, trust"},
     {"settings", "", "user settings (saved)"},
     {"help", "", "commands and keys"},
@@ -359,44 +359,135 @@ static void cmd_help(app *a)
           "interrupt or quit · ctrl-d quit · ctrl-t thinking · ctrl-o details · ctrl-z suspend · ctrl-l redraw");
 }
 
-/* "/login": where each provider's key comes from. "/login <provider>":
- * ready for the key. "/login <provider> <key>": save it. */
+/* Where each provider's key comes from (oauth false), or whether each
+ * login is there (oauth true). */
+static void login_status(app *a, bool oauth)
+{
+    const pt_ai_catalog *cat = cli_catalog();
+    char msg[400];
+    uint32_t i;
+    for (i = 0; i < cat->nproviders; i++) {
+        const pt_provider *q = &cat->providers[i];
+        if (q->auth == PT_AUTH_NONE || (q->auth == PT_AUTH_OAUTH) != oauth)
+            continue;
+        if (oauth) {
+            cli_login l;
+            if (!cli_auth_login(q->id, false, &l))
+                snprintf(msg, sizeof msg, "%s: not logged in", q->id);
+            else if (l.expires <= pt_sys_now_ms())
+                snprintf(msg, sizeof msg, "%s: logged in (refreshed when next used)", q->id);
+            else
+                snprintf(msg, sizeof msg, "%s: logged in", q->id);
+        } else {
+            const char *env = q->key_env[0] ? getenv(q->key_env[0]) : NULL;
+            snprintf(msg, sizeof msg, "%s: %s%s", q->id,
+                     env && *env ? "from " : cli_auth_key(q->id) ? "saved in auth.json" : "no key",
+                     env && *env ? q->key_env[0] : "");
+        }
+        app_out_z(a, TUI_DIM, msg);
+    }
+}
+
+/* "/login oauth": whether each login is there. "/login oauth <provider>":
+ * sign in in the browser. "/login oauth <provider> <address>": the
+ * address the browser ended on, for a login waiting for it. */
+static void login_oauth(app *a, const pt_provider *p, pt_str answer)
+{
+    char msg[4400], err[600], url[4096];
+    if (answer.n) {
+        if (!a->login)
+            snprintf(msg, sizeof msg, "no login is waiting: /login oauth %s starts one", p->id);
+        else if (!cli_oauth_paste(a->login, answer))
+            snprintf(msg, sizeof msg, "that is not an address the login can take");
+        else
+            return; /* it says how it went */
+        app_out_z(a, TUI_RED, msg);
+        return;
+    }
+    cli_oauth_free(a->login); /* a second /login starts over */
+    if (!(a->login = cli_oauth_begin(p->id, url, sizeof url, err, sizeof err))) {
+        app_out_z(a, TUI_RED, err);
+        return;
+    }
+    app_out_z(a, TUI_DIM, "sign in with your ChatGPT account in the browser; if it did not open, go to:");
+    app_out_z(a, 0, url);
+    if (!cli_oauth_listening(a->login))
+        snprintf(msg, sizeof msg,
+                 "port 1455 is in use, so the browser cannot come back here: when it ends on a page that "
+                 "does not load, paste its address after /login oauth %s",
+                 p->id);
+    else
+        snprintf(msg, sizeof msg,
+                 "waiting for the browser (5 minutes); if it ends on a page that does not load (pytte on "
+                 "another machine), paste its address after /login oauth %s",
+                 p->id);
+    app_out_z(a, TUI_DIM, msg);
+}
+
+void app_finish_login(app *a)
+{
+    char msg[700];
+    bool ok;
+    if (!a->login || !cli_oauth_done(a->login, &ok, msg, sizeof msg))
+        return;
+    cli_oauth_free(a->login);
+    a->login = NULL;
+    app_out_z(a, ok ? TUI_DIM : TUI_RED, msg);
+}
+
+/* "/login": api or oauth. "/login api": where each provider's key comes
+ * from. "/login api <provider>": ready for the key. "/login api <provider>
+ * <key>": save it. "/login oauth ...": login_oauth. */
 static void cmd_login(app *a, pt_str arg)
 {
     const pt_ai_catalog *cat = cli_catalog();
     const pt_provider *p = NULL;
-    pt_str name = arg, key = PT_STR_NULL;
-    long sp = pt_str_find(arg, ' ');
+    pt_str how = pt_str_trim(arg), name = PT_STR_NULL, key = PT_STR_NULL;
+    long sp = pt_str_find(how, ' ');
     char msg[4400], err[600], path[4200];
+    bool oauth;
     uint32_t i;
     if (sp >= 0) {
-        name.n = (size_t)sp;
-        key = pt_str_trim((pt_str){arg.p + sp + 1, arg.n - (size_t)sp - 1});
-    }
-    for (i = 0; i < cat->nproviders; i++)
-        if (cat->providers[i].auth != PT_AUTH_NONE && pt_str_eqz(name, cat->providers[i].id))
-            p = &cat->providers[i];
-    if (!arg.n) {
-        for (i = 0; i < cat->nproviders; i++) {
-            const pt_provider *q = &cat->providers[i];
-            const char *env = q->key_env[0] ? getenv(q->key_env[0]) : NULL;
-            if (q->auth == PT_AUTH_NONE)
-                continue;
-            snprintf(msg, sizeof msg, "%s: %s%s", q->id,
-                     env && *env ? "from " : cli_auth_key(q->id) ? "saved in auth.json" : "no key",
-                     env && *env ? q->key_env[0] : "");
-            app_out_z(a, TUI_DIM, msg);
+        name = pt_str_trim((pt_str){how.p + sp + 1, how.n - (size_t)sp - 1});
+        how.n = (size_t)sp;
+        if ((sp = pt_str_find(name, ' ')) >= 0) {
+            key = pt_str_trim((pt_str){name.p + sp + 1, name.n - (size_t)sp - 1});
+            name.n = (size_t)sp;
         }
-        app_out_z(a, TUI_DIM, "/login <provider> saves a key; a key in the environment comes first");
+    }
+    if (!how.n) {
+        login_status(a, false);
+        login_status(a, true);
+        app_out_z(a, TUI_DIM,
+                  "/login api <provider> saves an API key (one in the environment comes first); "
+                  "/login oauth <provider> signs in with a subscription");
         return;
     }
+    if (!pt_str_eqz(how, "api") && !pt_str_eqz(how, "oauth")) {
+        app_out_z(a, TUI_RED, "/login api <provider> [key], or /login oauth <provider>");
+        return;
+    }
+    oauth = pt_str_eqz(how, "oauth");
+    if (!name.n) {
+        login_status(a, oauth);
+        return;
+    }
+    for (i = 0; i < cat->nproviders; i++)
+        if (cat->providers[i].auth != PT_AUTH_NONE && (cat->providers[i].auth == PT_AUTH_OAUTH) == oauth &&
+            pt_str_eqz(name, cat->providers[i].id))
+            p = &cat->providers[i];
     if (!p) {
-        snprintf(msg, sizeof msg, "not a provider: %.*s", (int)(name.n > 100 ? 100 : name.n), name.p);
+        snprintf(msg, sizeof msg, "%s: %.*s", oauth ? "no subscription login for" : "no API key for",
+                 (int)(name.n > 100 ? 100 : name.n), name.p);
         app_out_z(a, TUI_RED, msg);
         return;
     }
+    if (oauth) {
+        login_oauth(a, p, key);
+        return;
+    }
     if (!key.n) {
-        snprintf(msg, sizeof msg, "/login %s ", p->id);
+        snprintf(msg, sizeof msg, "/login api %s ", p->id);
         tui_input_set(&a->in, pt_strz(msg));
         snprintf(msg, sizeof msg, "paste the %s API key and press enter", p->name);
         app_out_z(a, TUI_DIM, msg);

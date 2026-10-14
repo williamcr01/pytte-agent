@@ -977,10 +977,12 @@ static void test_commands(void)
     keys(&p, "/nope\r");
     CHECK(wait_for(&p, "unknown command /nope", 1000));
     /* /login: the key is masked, saved to auth.json, and kept out of the history */
-    keys(&p, "/login anthr\t");
-    CHECK(wait_for(&p, "› /login anthropic ", 1000));
+    keys(&p, "/login ");
+    CHECK(wait_for(&p, "sign in with a subscription (ChatGPT)", 1000)); /* api or oauth */
+    keys(&p, "api anthr\t");
+    CHECK(wait_for(&p, "› /login api anthropic ", 1000));
     keys(&p, "sk-test-123");
-    CHECK(wait_for(&p, "› /login anthropic ***********", 1000));
+    CHECK(wait_for(&p, "› /login api anthropic ***********", 1000));
     CHECK(!has(&p, "sk-test"));
     keys(&p, "\r");
     CHECK(wait_for(&p, "saved the Anthropic key to ", DURABLE_MS));
@@ -992,8 +994,14 @@ static void test_commands(void)
     cfg = pt_sys_read_file(path, &n);
     CHECK(!cfg || !strstr(cfg, "sk-test"));
     free(cfg);
-    keys(&p, "/login\r");
+    keys(&p, "/login api\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
     CHECK(wait_for(&p, "anthropic: saved in auth.json", 1000));
+    keys(&p, "/login oauth\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "openai-codex: not logged in", 1000));
     /* thinking is shown in full now */
     keys(&p, "hi\r");
     CHECK(wait_for(&p, "A greeting. Answer briefly.", 5000));

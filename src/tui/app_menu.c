@@ -18,7 +18,7 @@ int app_find_setting(pt_str name)
 bool app_menu_takes_arg(pt_str cmd)
 {
     return pt_str_eqz(cmd, "model") || pt_str_eqz(cmd, "effort") || pt_str_eqz(cmd, "thinking") ||
-           pt_str_eqz(cmd, "resume") || pt_str_eqz(cmd, "settings");
+           pt_str_eqz(cmd, "resume") || pt_str_eqz(cmd, "settings") || pt_str_eqz(cmd, "login");
 }
 
 static void add_item(app *a, const char *label, size_t ln, const char *desc)
@@ -147,16 +147,27 @@ static void add_mentions(app *a, pt_str q)
 
 static const char *const mcp_subs[] = {"login", "logout", "restart", "trust", "untrust"};
 
-/* "/login <provider> <key>": where the key starts, or 0. The key is shown
- * masked and never reaches the input history or a saved draft. */
+/* "/login api|oauth <provider> <key>": where the key (or the address a
+ * login's browser ended on) starts, or 0. It is shown masked and never
+ * reaches the input history or a saved draft. */
 size_t app_secret_at(pt_str d)
 {
-    long sp;
+    size_t at = 7;
+    int words;
     if (!pt_str_starts(d, PT_S("/login ")))
         return 0;
-    sp = pt_str_find((pt_str){d.p + 7, d.n - 7}, ' ');
-    return sp < 0 ? 0 : 7 + (size_t)sp + 1;
+    for (words = 0; words < 2; words++) {
+        long sp = pt_str_find((pt_str){d.p + at, d.n - at}, ' ');
+        if (sp < 0)
+            return 0;
+        at += (size_t)sp + 1;
+    }
+    return at;
 }
+
+static const char *const login_subs[] = {"api", "oauth"};
+static const char *const login_descs[] = {"save an API key, billed by the provider",
+                                          "sign in with a subscription (ChatGPT)"};
 
 /* The word being typed: after the last space or newline. */
 static pt_str last_word(pt_str d)
@@ -286,12 +297,26 @@ void app_menu_update(app *a)
                     add_item(a, app_levels[i], strlen(app_levels[i]), NULL);
         } else if (pt_str_eqz(cmd, "thinking")) {
             add_list(a, app_th_names, NTH, arg);
-        } else if (pt_str_eqz(cmd, "login") && pt_str_find(arg, ' ') < 0) {
-            const pt_ai_catalog *cat = cli_catalog();
-            uint32_t i;
-            for (i = 0; i < cat->nproviders; i++)
-                if (cat->providers[i].auth != PT_AUTH_NONE && pt_str_starts(pt_strz(cat->providers[i].id), arg))
-                    add_item(a, cat->providers[i].id, strlen(cat->providers[i].id), cat->providers[i].name);
+        } else if (pt_str_eqz(cmd, "login")) {
+            long sp2 = pt_str_find(arg, ' ');
+            if (sp2 < 0) {
+                size_t i;
+                for (i = 0; i < 2; i++)
+                    if (pt_str_starts(pt_strz(login_subs[i]), arg))
+                        add_item(a, login_subs[i], strlen(login_subs[i]), login_descs[i]);
+            } else {
+                pt_str how = {arg.p, (size_t)sp2}, name = {arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1};
+                bool oauth = pt_str_eqz(how, "oauth");
+                const pt_ai_catalog *cat = cli_catalog();
+                uint32_t i;
+                for (i = 0; (oauth || pt_str_eqz(how, "api")) && pt_str_find(name, ' ') < 0 && i < cat->nproviders;
+                     i++) {
+                    const pt_provider *q = &cat->providers[i];
+                    if (q->auth != PT_AUTH_NONE && (q->auth == PT_AUTH_OAUTH) == oauth &&
+                        pt_str_starts(pt_strz(q->id), name))
+                        add_item(a, q->id, strlen(q->id), q->name);
+                }
+            }
         } else if (pt_str_eqz(cmd, "mcp")) {
             long sp2 = pt_str_find(arg, ' ');
             if (sp2 < 0) {
@@ -349,7 +374,8 @@ bool app_complete(app *a)
     } else { /* replace the last word */
         pt_buf_put(&nd, d.p, (size_t)(last_word(d).p - d.p));
         pt_buf_puts(&nd, label);
-        if ((label.n && (label.p[0] == '$' || label.p[0] == '@')) || pt_str_starts(d, PT_S("/login ")) ||
+        if ((label.n && (label.p[0] == '$' || label.p[0] == '@')) ||
+            (pt_str_starts(d, PT_S("/login ")) && !pt_str_starts(d, PT_S("/login oauth "))) ||
             (pt_str_starts(d, PT_S("/mcp ")) && pt_str_find((pt_str){d.p + 5, d.n - 5}, ' ') < 0 &&
              !pt_str_eqz(label, "trust") && !pt_str_eqz(label, "untrust"))) /* then the key, the name */
             pt_buf_putc(&nd, ' ');

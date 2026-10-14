@@ -393,7 +393,10 @@ static int64_t sys_now(void *ud)
 static bool credentials(void *ud, const pt_provider *p, pt_credentials *out)
 {
     const char *which, *key;
+    char why[300];
     (void)ud;
+    if (p->auth == PT_AUTH_OAUTH) /* the core says to log in when false */
+        return cli_oauth_credentials(p->id, out, why, sizeof why);
     if (pt_ai_find_key(p, pt_sys_env, NULL, out, &which))
         return true;
     if (!(key = cli_auth_key(p->id)))

@@ -112,7 +112,9 @@ static const char dev[] =
     "  \"limit\": {\"context\": 2000000}},"
     "\"claude-old\": {\"tool_call\": true, \"status\": \"deprecated\"},"
     "\"claude-notools\": {\"tool_call\": false}}},"
-    " \"openai\": {\"models\": {\"gpt-realtime\": {\"tool_call\": true}}},"
+    " \"openai\": {\"models\": {\"gpt-realtime\": {\"tool_call\": true},"
+    "  \"gpt-5.5\": {\"name\": \"GPT-5.5\", \"tool_call\": true, \"reasoning\": true,"
+    "   \"limit\": {\"context\": 1050000, \"output\": 128000}, \"cost\": {\"input\": 5, \"output\": 30}}}},"
     " \"groq\": {\"models\": {\"from-dev\": {\"name\": \"From models.dev\", \"tool_call\": true}}}}";
 static const char openrouter[] =
     "{\"data\": [{\"id\": \"x/y\", \"name\": \"Y\", \"context_length\": 1000,"
@@ -138,7 +140,7 @@ static void test_convert(void)
     char msg[300];
     pt_buf_init(&out, pt_sys_allocator());
     update(&out, msg, sizeof msg);
-    CHECK_STR(pt_strz(msg), "anthropic 5, openai 0, openrouter 3, groq 1");
+    CHECK_STR(pt_strz(msg), "anthropic 5, openai 1, openai-codex 1, openrouter 3, groq 1");
     load("{\"groq\": {\"base_url\": \"https://api.groq.com/openai/v1\"}}");
     CHECK_STR(pt_strz(warn), "");
     CHECK(resolve("anthropic/claude-opus-4-5", &t) && t.known);
@@ -151,6 +153,11 @@ static void test_convert(void)
     CHECK(resolve("openrouter/x/y", &t) && t.known && t.model.reasoning && t.model.context_window == 1000);
     CHECK(t.model.cost.input == 3000000 && t.model.cost.output == 15000000);
     CHECK(resolve("openrouter/x/router", &t) && !t.known);
+    /* a subscription's models: models.dev's openai model, the backend's window */
+    CHECK(resolve("openai/gpt-5.5", &t) && t.known && t.model.context_window == 1050000);
+    CHECK(resolve("openai-codex/gpt-5.5", &t) && t.known && t.model.context_window == 272000);
+    CHECK(t.model.max_tokens == 128000 && t.model.cost.output == 30000000 && t.model.reasoning);
+    CHECK(strcmp(pt_ai_api_id(t.api), "openai-codex-responses") == 0);
     /* efforts: what the source lists; toggle and not mandatory allow off */
     CHECK(resolve("anthropic/claude-opus-4-6", &t) &&
           t.model.efforts == (PT_EFF_LOW | PT_EFF_MEDIUM | PT_EFF_HIGH | PT_EFF_MAX));

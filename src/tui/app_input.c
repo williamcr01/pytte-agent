@@ -472,11 +472,12 @@ static void enter(app *a)
     } else if (a->menu.kind == MENU_ARG && a->menu.n) {
         bool skill = a->menu.of_skills || a->menu.of_mentions;
         pt_str label = app_item_label(a, a->menu.sel);
-        bool sub = pt_str_starts(d, PT_S("/mcp ")) && (pt_str_eqz(label, "login") || pt_str_eqz(label, "logout") ||
-                                                      pt_str_eqz(label, "restart"));
+        bool sub = (pt_str_starts(d, PT_S("/mcp ")) && (pt_str_eqz(label, "login") || pt_str_eqz(label, "logout") ||
+                                                       pt_str_eqz(label, "restart"))) ||
+                   (pt_str_starts(d, PT_S("/login ")) && pt_str_find((pt_str){d.p + 7, d.n - 7}, ' ') < 0);
         app_complete(a);
         if (skill || sub)
-            return; /* a $skill or @mention picked: the message goes on; /mcp login: then the name */
+            return; /* a $skill or @mention picked: the message goes on; /mcp login, /login api: then the name */
     }
     app_submit(a);
 }

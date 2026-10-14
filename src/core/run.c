@@ -94,7 +94,7 @@ bool pt_run_resolve(pt_agent *a, pt_str ref, pt_ai_target *out, pt_arena *ar)
     return true;
 }
 
-/* The provider's API key; a missing one stops the agent without a commit,
+/* The provider's API key (or login); a missing one stops the agent without a commit,
  * so the run can continue once it is set (or with another model). */
 bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
 {
@@ -103,12 +103,20 @@ bool pt_run_credentials(pt_agent *a, const pt_provider *p, pt_credentials *cred)
     if (!a->o.credentials || a->o.credentials(a->o.ud, p, cred))
         return true;
     pt_buf_init(&m, a->al);
-    pt_buf_putz(&m, "no API key for ");
-    pt_buf_putz(&m, p->id);
+    if (p->auth == PT_AUTH_OAUTH) {
+        pt_buf_putz(&m, "not logged in to ");
+        pt_buf_putz(&m, p->id);
+        pt_buf_putz(&m, ", or the login expired: run /login oauth ");
+        pt_buf_putz(&m, p->id);
+    } else {
+        pt_buf_putz(&m, "no API key for ");
+        pt_buf_putz(&m, p->id);
+    }
     if (p->key_env[0]) {
         pt_buf_putz(&m, ": set ");
         pt_buf_putz(&m, p->key_env[0]);
-        pt_buf_putz(&m, " or run /login");
+        pt_buf_putz(&m, " or run /login api ");
+        pt_buf_putz(&m, p->id);
     }
     pt_core_fail(a, PT_FATAL_CONFIG, "", pt_buf_str(&m));
     pt_buf_free(&m);

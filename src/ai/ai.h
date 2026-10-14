@@ -35,6 +35,7 @@ struct pt_api_vt {
 extern const pt_api_vt pt_api_anthropic;
 extern const pt_api_vt pt_api_openai;
 extern const pt_api_vt pt_api_openai_responses;
+extern const pt_api_vt pt_api_openai_codex;
 extern const pt_api_vt pt_api_faux;
 
 /* ---- what APIs use while streaming ---- */

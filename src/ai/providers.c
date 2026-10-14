@@ -2,7 +2,7 @@
 #include "ai.h"
 
 /* The order of providers[]: what the model table's rows name. */
-enum { PROV_ANTHROPIC, PROV_OPENAI, PROV_OPENROUTER, PROV_FAUX };
+enum { PROV_ANTHROPIC, PROV_OPENAI, PROV_OPENAI_CODEX, PROV_OPENROUTER, PROV_FAUX };
 
 static const pt_provider providers[] = {
     {
@@ -31,6 +31,19 @@ static const pt_provider providers[] = {
                    .reasoning_delta = PT_NO,
                    .thinking_display = PT_YES},
         .context_window = 128000,
+        .reasoning = true,
+    },
+    {
+        /* OpenAI's models through a ChatGPT subscription (Plus, Pro):
+         * the Codex backend, logged in with /login oauth. */
+        .id = "openai-codex",
+        .name = "OpenAI Codex (ChatGPT subscription)",
+        .base_url = "https://chatgpt.com/backend-api",
+        .api = "openai-codex-responses",
+        .auth = PT_AUTH_OAUTH,
+        .compat = {.thinking_display = PT_YES},
+        .context_window = 272000,
+        .max_tokens = 128000,
         .reasoning = true,
     },
     {
@@ -76,7 +89,7 @@ const pt_ai_catalog *pt_ai_builtin_catalog(void)
 }
 
 static const pt_api_vt *const apis[] = {&pt_api_anthropic, &pt_api_openai, &pt_api_openai_responses,
-                                        &pt_api_faux};
+                                        &pt_api_openai_codex, &pt_api_faux};
 
 const pt_api_vt *pt_ai_api(pt_str id)
 {

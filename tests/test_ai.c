@@ -173,7 +173,7 @@ static void test_anthropic_request(void)
     pt_ai_target t = target("anthropic/claude-opus-5-5");
     pt_ai_context c = conversation();
     pt_ai_opts o;
-    pt_credentials cred = {PT_S("sk-ant-test")};
+    pt_credentials cred = {PT_S("sk-ant-test"), PT_STR_NULL};
     pt_http_req r;
     pt_json *b;
     memset(&o, 0, sizeof o);
@@ -262,7 +262,7 @@ static void test_openai_request(void)
     CHECK(pt_ai_retarget(&t, PT_S("openai-completions")));
     pt_ai_context c = conversation();
     pt_ai_opts o;
-    pt_credentials cred = {PT_S("sk-test")};
+    pt_credentials cred = {PT_S("sk-test"), PT_STR_NULL};
     pt_http_req r;
     pt_json *b;
     memset(&o, 0, sizeof o);
@@ -313,7 +313,7 @@ static void test_efforts(void)
     pt_ai_target t;
     pt_ai_context c = conversation();
     pt_ai_opts o;
-    pt_credentials cred = {PT_S("sk-test")};
+    pt_credentials cred = {PT_S("sk-test"), PT_STR_NULL};
     pt_http_req r;
     pt_json *b;
     memset(&o, 0, sizeof o);
@@ -385,7 +385,7 @@ static void test_responses_request(void)
     pt_ai_target t = target("openai/gpt-5");
     pt_ai_context c = conversation();
     pt_ai_opts o;
-    pt_credentials cred = {PT_S("sk-test")};
+    pt_credentials cred = {PT_S("sk-test"), PT_STR_NULL};
     pt_http_req r;
     pt_json *b;
     pt_str item = PT_S("{\"id\":\"rs_1\",\"type\":\"reasoning\",\"summary\":[],\"encrypted_content\":\"ENC\"}");
@@ -448,6 +448,55 @@ static void test_responses_request(void)
     CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
     b = body_of(&r);
     CHECK(pt_json_get(b, "reasoning") == NULL && pt_json_get(b, "include") == NULL);
+}
+
+/* A ChatGPT subscription: the Codex backend's endpoint and headers, no
+ * max_output_tokens, instructions always. */
+static void test_codex_request(void)
+{
+    pt_ai_target t = target("openai-codex/gpt-5.5");
+    pt_ai_context c = conversation();
+    pt_ai_opts o;
+    pt_credentials cred = {PT_S("eyJ.token"), PT_S("acct-1")};
+    pt_http_req r;
+    pt_json *b;
+    memset(&o, 0, sizeof o);
+    o.session_id = PT_S("sess-1");
+    CHECK(t.known && strcmp(pt_ai_api_id(t.api), "openai-codex-responses") == 0);
+    CHECK(t.provider->auth == PT_AUTH_OAUTH && t.model.context_window == 272000);
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK(strcmp(r.url, "https://chatgpt.com/backend-api/codex/responses") == 0);
+    CHECK(header(&r, "authorization") && strcmp(header(&r, "authorization"), "Bearer eyJ.token") == 0);
+    CHECK(header(&r, "chatgpt-account-id") && strcmp(header(&r, "chatgpt-account-id"), "acct-1") == 0);
+    CHECK(header(&r, "OpenAI-Beta") && strcmp(header(&r, "OpenAI-Beta"), "responses=experimental") == 0);
+    CHECK(header(&r, "session-id") && strcmp(header(&r, "session-id"), "sess-1") == 0);
+    b = body_of(&r);
+    CHECK_STR(jget(b, "store"), "false");
+    CHECK_STR(jget(b, "stream"), "true");
+    CHECK_STR(jget(b, "instructions"), "You are pytte.");
+    CHECK(pt_json_get(b, "max_output_tokens") == NULL);
+    CHECK_STR(jget(b, "include.0"), "reasoning.encrypted_content");
+    CHECK_STR(jget(b, "tool_choice"), "auto");
+    CHECK_STR(jget(b, "prompt_cache_key"), "sess-1");
+    /* no system prompt: the backend still needs instructions */
+    c.msgs++;
+    c.nmsgs--;
+    CHECK(pt_ai_build(&t, &c, &o, &cred, &r, &A));
+    CHECK_STR(jget(body_of(&r), "instructions"), "You are a helpful assistant.");
+}
+
+/* The Codex backend's usage limit is not worth retrying. */
+static void test_codex_errors(void)
+{
+    pt_ai_target t = target("openai-codex/gpt-5.5");
+    pt_ai_error e;
+    t.api->classify_error(
+        429, PT_S("{\"error\":{\"type\":\"usage_limit_reached\",\"message\":\"limit\",\"plan_type\":\"plus\"}}"), &e,
+        &A);
+    CHECK(e.cls == PT_ERR_FATAL);
+    CHECK_STR(e.message, "you have hit your ChatGPT usage limit (plus plan)");
+    t.api->classify_error(429, PT_S("{\"error\":{\"type\":\"rate_limit_exceeded\",\"message\":\"slow\"}}"), &e, &A);
+    CHECK(e.cls == PT_ERR_RETRYABLE);
 }
 
 /* A tool result's image: in the result for Anthropic and Responses, in a
@@ -768,6 +817,8 @@ int main(void)
     RUN(test_anthropic_folding_and_bad_args);
     RUN(test_openai_request);
     RUN(test_responses_request);
+    RUN(test_codex_request);
+    RUN(test_codex_errors);
     RUN(test_efforts);
     RUN(test_images);
     RUN(test_tool_ids);
