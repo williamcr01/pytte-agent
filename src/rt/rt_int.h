@@ -152,6 +152,17 @@ typedef struct search search;
 search *pt_rt_search_new(pt_rt *rt);
 void pt_rt_search_free(search *s);
 void pt_rt_search_tools(search *s, pt_rt_tool t[3]);
+/* tools_bash.c: bash and bash_poll, with their processes. io (io_n
+ * bytes) and unset are borrowed, and outlive it. */
+typedef struct bash bash;
+bash *pt_rt_bash_new(pt_rt *rt, char *io, size_t io_n, const char **unset);
+void pt_rt_bash_free(bash *b); /* stops its processes */
+void pt_rt_bash_tools(bash *b, pt_rt_tool t[2]);
+/* The agent is idle: submit a note for background commands that ended
+ * unread; true when it did. */
+bool pt_rt_bash_idle(bash *b);
+uint32_t pt_rt_bash_backgrounds(const bash *b, pt_rt_background *out, uint32_t max);
+uint32_t pt_rt_bash_stop_all(bash *b);
 /* tools_web.c: web_fetch, with its state */
 typedef struct web web;
 web *pt_rt_web_new(pt_rt *rt);
