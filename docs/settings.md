@@ -1,7 +1,8 @@
 # Settings
 
 pytte's settings are the model, effort, how thinking is shown, symbols,
-the pager, the permission mode, the compaction model and automatic skills.
+the pager, the permission mode, the compaction model, automatic skills and
+which tools are on.
 In the TUI, `/settings` opens a menu of them; a change applies to the
 running session at once and is saved for later sessions. `/model` and
 `/effort` switch the model or effort without saving.
@@ -18,6 +19,7 @@ running session at once and is saved for later sessions. `/model` and
 | `permissions` | `permissions.mode` | `ask`, `auto`, `read-only` | `ask` | `--permission-mode`, `PYTTE_PERMISSION_MODE` |
 | `compact-model` | `compaction.model` | a model ref, or `none` | `none`: the session's model | `--compact-model`, `PYTTE_COMPACT_MODEL` |
 | `skills` | `skills.auto` | `on`, `off` (or `true`, `false`) | `on` | |
+| `tools` | `tools.<name>` | `true`, `false` per tool | all on but `web_fetch` | `/tools`; see [tools.md](tools.md) |
 
 They are read, each later one winning: the built-in default, the user file
 `~/.config/pytte/config.json`, the project file `.pytte/config.json`, the
@@ -29,7 +31,8 @@ at a time, keeping every other key in it.
 - **Every change applies now.** Picking a value in `/settings` (or
   `/settings <name> <value>`) changes the running session and saves it. A
   setting that skills read when an epoch starts (`skills`) takes effect
-  from the next session or `/compact`, and the saved line says so.
+  from the next session or `/compact`, and the saved line says so. The
+  `tools` row opens the tools list ([tools.md](tools.md)).
 - **One line per change.** `saved effort: high` appears once the value is
   on disk; an invalid value is refused with the values that are allowed
   (`not a value for thinking: some (hidden, full)`) and nothing is saved.

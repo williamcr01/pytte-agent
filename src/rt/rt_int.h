@@ -123,8 +123,10 @@ struct pt_rt {
     char session[64]; /* c.session's copy */
     /* tools */
     pt_rt_tool *tools;
-    pt_tool_def *defs;
+    pt_tool_def *defs, *on; /* every tool's, and those of the tools on (pt_rt_tool_defs) */
     uint32_t ntools, tcap;
+    char **off; /* names of the tools turned off, registered or not */
+    uint32_t noff, ocap;
     pt_rt_tool fallback; /* def.name: the prefix it claims; empty: none */
     rt_call *calls;
     uint32_t ncalls, ccap, cinit;

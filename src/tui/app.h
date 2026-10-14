@@ -22,7 +22,7 @@
 enum { TH_HIDDEN, TH_FULL };
 enum { PH_WAIT, PH_THINK, PH_WRITE, PH_RETRY, PH_TOOL, PH_COMPACT };
 enum { LIVE_NONE, LIVE_TEXT, LIVE_THINK };
-enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
+enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS, MENU_TOOLS };
 
 #define MAX_ITEMS 400
 #define DOUBLE_MS 1000
@@ -34,6 +34,7 @@ typedef struct syms {
     const char *prompt, *think, *note, *ok, *fail, *ask, *sel, *bar, *more, *dot;
     const char *up, *down; /* tokens read and written */
     const char *join;      /* between calls of one round on a row */
+    const char *on, *off;  /* a tool turned on or off (/tools) */
 } syms;
 
 
@@ -60,7 +61,9 @@ extern const size_t app_nlevels;
 extern const char *const app_th_names[]; /* by TH_*, as configured: NTH of them */
 
 /* The settings menu: config index, short name, and the values to cycle
- * through (none: edited as a command). */
+ * through (none: edited as a command). SET_TOOLS: the tools, which open
+ * their own menu. */
+#define SET_TOOLS CFG_N
 typedef struct app_setting {
     int k;
     const char *name;
@@ -144,6 +147,14 @@ typedef struct config_job {
     unsigned pending;
     char next[CFG_N][512];
     const char *wins[CFG_N]; /* where a value that wins at the next start comes from: "env", "project" */
+    /* Tools turned on or off, waiting to be saved: one entry per tool, its
+     * newest state. key SET_TOOLS: the worker writes tool. */
+    struct tool_save {
+        char name[128];
+        bool on, now; /* now: the session had sent nothing, so its first request gets it */
+        const char *wins;
+    } tq[CLI_TOOLS_MAX], tool;
+    uint32_t ntq;
 } config_job;
 
 /* The session this TUI shows, and how it got there. */
@@ -373,6 +384,11 @@ uint32_t app_bg_running(app *a);
 void app_mcp_note(void *ud, const char *server, const char *msg);
 void app_show_notes(app *a);
 void app_run_command(app *a, pt_str line);
+/* /tools: the registered tools, on or off */
+void app_tools_list(app *a);
+void app_tool_set(app *a, pt_str name, bool on);
+void app_tools_open(app *a);
+uint32_t app_tools_on(app *a, uint32_t *all);
 bool app_mcp_known(app *a, pt_str name);
 
 /* app_session.c: opening, switching and closing sessions; drafts, history, the pager */

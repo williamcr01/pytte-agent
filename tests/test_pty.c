@@ -823,7 +823,7 @@ static void test_background_note(void)
     CHECK(has(&p, "It runs in the background.\n\n"
                   "· worked for "));
     CHECK(has(&p, "· worked for 1s\n\n"
-                  "· session 8 ended with exit code 0: sleep 2; echo built; echo '- not a session'\n\n"
+                  "· session 9 ended with exit code 0: sleep 2; echo built; echo '- not a session'\n\n"
                   "  It printed built."));
     CHECK(!has(&p, "[pytte]"));          /* the note is not shown as typed */
     CHECK(!has(&p, "· not a session")); /* nor its output */
@@ -852,28 +852,28 @@ static void test_background(void)
     CHECK(wait_for(&p, "Done.", 20000));
     /* a poll returns at once; the end is told in the next result */
     CHECK(has(&p, "Starting it.\n\n"
-                  "✓ bash  echo first; sleep 2; echo second; exit 3 · still running as session 8\n"
-                  "✓ poll  session 8 · still running\n"
+                  "✓ bash  echo first; sleep 2; echo second; exit 3 · still running as session 9\n"
+                  "✓ poll  session 9 · still running\n"
                   "✓ bash  sleep 2.5"));
-    CHECK(has(&p, "✗ poll  session 8 · exit 3\n"
+    CHECK(has(&p, "✗ poll  session 9 · exit 3\n"
                   "        second\n"
-                  "✗ poll  session 8 · failed ▪ bash echo up; sleep 100 · still running as session 22\n"));
+                  "✗ poll  session 9 · failed ▪ bash echo up; sleep 100 · still running as session 23\n"));
     /* one round, which ends in either order */
-    CHECK(has(&p, "✓ poll  session 22 (stop) ▪ bash echo left; sleep 100 · still running as session 27\n") ||
-          has(&p, "✓ bash  echo left; sleep 100 · still running as session 27 ▪ poll session 22 (stop)\n"));
+    CHECK(has(&p, "✓ poll  session 23 (stop) ▪ bash echo left; sleep 100 · still running as session 28\n") ||
+          has(&p, "✓ bash  echo left; sleep 100 · still running as session 28 ▪ poll session 23 (stop)\n"));
     CHECK(!has(&p, "[still running"));
     CHECK(wait_idle(&p, 3000));
     /* one left running: the footer counts it, /ps lists it, /stop ends it */
     CHECK(wait_for(&p, "· 1 in background (/ps)", 2000));
     keys(&p, "/ps\r");
-    CHECK(wait_for(&p, "session 27 · running ", 2000));
+    CHECK(wait_for(&p, "session 28 · running ", 2000));
     CHECK(has(&p, "· echo left; sleep 100"));
     keys(&p, "/stop\r");
     CHECK(wait_for(&p, "stopping 1 background command\n", 2000));
     pump(&p, 300);
     CHECK(!has(&p, "in background (/ps)"));
     keys(&p, "/ps\r");
-    CHECK(wait_for(&p, "session 27 · ended (exit 143), not read yet · echo left; sleep 100", 2000));
+    CHECK(wait_for(&p, "session 28 · ended (exit 143), not read yet · echo left; sleep 100", 2000));
     keys(&p, "/stop\r");
     CHECK(wait_for(&p, "no background commands running", 2000));
     keys(&p, "\x04");
@@ -1013,10 +1013,10 @@ static void test_commands(void)
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
     CHECK(wait_for(&p, "  › /model     switch the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/17", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "enter run · esc close · 1/18", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "  › /quit", 1000));
-    CHECK(wait_for(&p, "17/17", 1000));
+    CHECK(wait_for(&p, "18/18", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");
@@ -1134,6 +1134,66 @@ static void test_commands(void)
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
     pty_free(&p);
+}
+
+/* /tools: a menu of the tools, on or off; web_fetch starts off, bash_poll
+ * goes with bash. */
+static void test_tools(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
+    char path[300], *cfg;
+    size_t n;
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    unlink(path);
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "/tools\r");
+    CHECK(wait_for(&p, "↑↓ select · space turns on or off · esc close · 7 of 8 on", 1000));
+    CHECK(wait_for(&p, "● read ", 1000));
+    CHECK(has(&p, "○ web_fetch"));
+    CHECK(!has(&p, "bash_poll")); /* listed as bash */
+    keys(&p, "\x1b[A "); /* up from the top: the last, web_fetch */
+    CHECK(wait_for(&p, "\n· saved web_fetch: on\n", DURABLE_MS)); /* nothing sent yet: the first request gets it */
+    CHECK(wait_for(&p, "8 of 8 on", 1000));
+    CHECK(wait_for(&p, "● web_fetch", 1000));
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(cfg && strstr(cfg, "\"tools\": {\n    \"web_fetch\": true\n  }"));
+    free(cfg);
+    keys(&p, "\x1b");
+    pump(&p, 100);
+    CHECK(!has(&p, "space turns on or off"));
+    keys(&p, "hi\r");
+    CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "/tools web_fetch off\r");
+    CHECK(wait_for(&p, "saved web_fetch: off (refused now; the model forgets it at the next session or /compact)",
+                   DURABLE_MS));
+    keys(&p, "/tools web_fetch\r");
+    CHECK(wait_for(&p, "web_fetch: off (user)", 1000));
+    keys(&p, "/tools read maybe\r");
+    CHECK(wait_for(&p, "not a value for read: maybe (on, off)", 1000));
+    keys(&p, "/tools nope on\r");
+    CHECK(wait_for(&p, "no tool named nope; /tools lists them", 1000));
+    keys(&p, "/tools bash_poll off\r");
+    CHECK(wait_for(&p, "bash_poll goes with bash", 1000));
+    keys(&p, "/tools we");
+    CHECK(wait_for(&p, "  › web_fetch  off", 1000)); /* the state beside each */
+    keys(&p, "\x15"); /* clear the draft */
+    /* /settings shows how many are on, and opens the menu */
+    keys(&p, "/settings\r\x1b[A");
+    CHECK(wait_for(&p, "tools         7 of 8 on", 1000));
+    CHECK(wait_for(&p, "enter open · esc close", 1000));
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "space turns on or off", 1000));
+    keys(&p, "\x1b"); /* alone: before ctrl-d, it would read as alt */
+    pump(&p, 100);
+    CHECK(!has(&p, "space turns on or off"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    unlink(path);
 }
 
 /* With no model chosen, sessions opened in the TUI get theirs as at start:
@@ -1551,6 +1611,7 @@ int main(int argc, char **argv)
     RUN(test_commands);
     RUN(test_skills);
     RUN(test_session_model);
+    RUN(test_tools);
     RUN(test_fork_worktree);
     RUN(test_history_pager_draft);
     RUN(test_sigterm);
