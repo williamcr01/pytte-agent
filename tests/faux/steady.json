@@ -1,0 +1,23 @@
+{
+  "chunk": 6,
+  "delay_ms": 15,
+  "turns": [
+    {
+      "content": [
+        {"type": "thinking", "text": "Build it, then test it."},
+        {"type": "text", "text": "Building first."},
+        {"type": "tool_call", "name": "bash", "args": {"command": "for i in 1 2 3 4 5 6; do echo step $i; done; sleep 1"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "name": "bash", "args": {"command": "echo testing; sleep 1"}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "Both passed. The build printed six steps and the tests ran clean, so there is nothing left to fix here."}
+      ]
+    }
+  ]
+}

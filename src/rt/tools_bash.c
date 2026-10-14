@@ -4,8 +4,10 @@
  * A bash call that runs past its yield time ends with the output so far,
  * and its process goes on in the background, named by the call's task ID
  * (unique in the session, so a name from before a restart never finds a
- * new process). bash_poll reads what it printed since, waits for more,
- * or stops it. Background processes die with this process. */
+ * new process). When it ends, the model is told: in the next tool result
+ * while it works, else in a note that starts a turn, so it need not poll.
+ * bash_poll reads what it printed since, at once, or stops it.
+ * Background processes die with this process. */
 #define _POSIX_C_SOURCE 200809L
 #include "rt/rt_int.h"
 
@@ -13,10 +15,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define YIELD_S 10        /* seconds a bash call waits before it goes to the background */
-#define POLL_S 10         /* seconds a bash_poll waits for the process to end */
-#define POLL_MIN_S 5      /* ...at least, as in Codex: polling in a loop costs a request each */
+#define YIELD_S 120       /* seconds a bash call waits before it goes to the background */
 #define HELD_MAX (1 << 20) /* output kept while no call reads it: the newest bytes */
+#define NOTE_TAIL 8192    /* output an idle note carries per session: the newest bytes */
 #define BACKGROUND_MAX 16 /* processes in the background; past it, bash calls wait */
 
 typedef struct job job;
@@ -42,6 +43,7 @@ struct job {
     bool timed_out, stopped, eof, ended;
     bool background; /* it went to the background once */
     bool noted;      /* its end is told, or need not be */
+    bool noting;     /* in the idle note being written */
     bool polled;  /* the reading call is a bash_poll */
     bool told;    /* a bash_poll asked it to stop: not an error */
     pt_buf held;  /* output while in the background */
@@ -136,9 +138,7 @@ static void job_report(job *j)
     memset(&r, 0, sizeof r);
     if (!j->ended) {
         j->background = true;
-        k += (size_t)snprintf(note, sizeof note,
-                              j->polled ? "\n[still running as session %u]"
-                                        : "\n[still running as session %u; bash_poll reads on]",
+        k += (size_t)snprintf(note, sizeof note, "\n[still running as session %u; you will be told when it ends]",
                               j->session);
         snprintf(details, sizeof details, "{\"session\":%u,\"ms\":%lld}", j->session, (long long)ms);
     } else {
@@ -370,7 +370,7 @@ static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
 {
     bash *b = (bash *)ud;
     const pt_json *args = pt_rt_kit_args(b->k, fx);
-    int64_t session = pt_json_geti(args, "session", 0), wait = pt_json_geti(args, "wait", POLL_S);
+    int64_t session = pt_json_geti(args, "session", 0);
     bool stop = pt_json_truthy(pt_json_get(args, "stop"));
     char msg[200];
     size_t k = 0; /* held bytes before the first whole line */
@@ -401,54 +401,143 @@ static void t_bash_poll(void *ud, pt_rt *rt, const pt_fx *fx)
     if (j->held.n > k)
         pt_rt_tool_output(rt, fx->id, j->held.p + k, j->held.n - k);
     pt_buf_reset(&j->held);
-    if (j->ended) {
-        job_report(j);
-    } else if (stop) { /* ends within two seconds */
+    if (stop && !j->ended) { /* ends within two seconds */
         j->stopped = j->told = true;
         stop_job(j);
     } else {
-        wait = wait < POLL_MIN_S ? POLL_MIN_S : wait > 86400 ? 86400 : wait;
-        j->yield = pt_rt_timer(rt, j->read_at + wait * 1000, on_yield, j);
+        job_report(j);
     }
 }
 
+/* "session N ended with exit code S: command" */
+static void put_ended(pt_buf *t, const job *j)
+{
+    char line[400];
+    snprintf(line, sizeof line, "session %u ended with %s %d: %.300s%s", j->session,
+             j->timed_out ? "a timeout, exit code" : "exit code", j->status, j->command,
+             strlen(j->command) > 300 ? "…" : "");
+    pt_buf_putz(t, line);
+}
+
+static bool unread_end(const job *j)
+{
+    return j->background && j->ended && !j->noted && !j->fx;
+}
+
+/* What an idle note shows of held: all of it, or its newest NOTE_TAIL
+ * bytes from a whole line (else a whole character). cut: some is left
+ * out, so the session stays for bash_poll to read whole. */
+static pt_str note_tail(const job *j, bool *cut)
+{
+    pt_str s = pt_buf_str(&j->held);
+    const char *nl;
+    *cut = j->dropped || s.n > NOTE_TAIL;
+    if (!*cut)
+        return s;
+    if (s.n > NOTE_TAIL) {
+        s.p += s.n - NOTE_TAIL;
+        s.n = NOTE_TAIL;
+    }
+    if ((nl = (const char *)memchr(s.p, '\n', s.n)) != NULL && nl + 1 < s.p + s.n) {
+        s.n -= (size_t)(nl + 1 - s.p);
+        s.p = nl + 1;
+    }
+    while (s.n && ((unsigned char)*s.p & 0xC0) == 0x80) {
+        s.p++;
+        s.n--;
+    }
+    return s;
+}
+
 /* Idle, with background commands ended and unread: submit a note that
- * starts a turn, so the model reads them and carries on without the
- * user asking. It is an input like any other, committed before it runs,
- * so a crash cannot lose or repeat it. */
+ * starts a turn, with what they printed, so the model carries on without
+ * the user asking or a poll. It is an input like any other, committed
+ * before it runs, so a crash cannot lose or repeat it. A session shown
+ * whole is read and gone; one cut short stays for bash_poll. */
 bool pt_rt_bash_idle(bash *b)
 {
     pt_buf *t = &b->k->out;
     pt_input in;
-    char line[400], req[48];
-    job *j;
+    char line[200], req[48];
+    job *j, *next;
     uint32_t n = 0, first = 0;
-    bool ok;
+    bool ok, cut;
     pt_buf_reset(t);
     pt_buf_putz(t, "[pytte] Background commands you started have ended (the user did not write this "
                    "message):\n");
     for (j = b->jobs; j; j = j->next) {
-        if (!j->background || !j->ended || j->noted || j->fx)
+        if (!unread_end(j))
             continue;
-        j->noted = true;
+        j->noted = j->noting = true;
         if (!n++ || j->session < first)
             first = j->session;
-        snprintf(line, sizeof line, "- session %u ended with %s %d: %.300s%s\n", j->session,
-                 j->timed_out ? "a timeout, exit code" : "exit code", j->status, j->command,
-                 strlen(j->command) > 300 ? "…" : "");
-        pt_buf_putz(t, line);
+        pt_buf_putz(t, "- ");
+        put_ended(t, j);
+        pt_buf_putc(t, '\n');
     }
     if (!n)
         return false;
-    pt_buf_putz(t, "Read what they printed with bash_poll, then carry on with what they were for. If "
-                   "nothing is left to do, say so in a sentence.");
+    for (j = b->jobs; j; j = j->next) {
+        pt_str tail;
+        if (!j->noting)
+            continue;
+        tail = note_tail(j, &cut);
+        if (!tail.n && !cut) {
+            snprintf(line, sizeof line, "\nSession %u printed nothing.\n", j->session);
+            pt_buf_putz(t, line);
+            continue;
+        }
+        if (cut)
+            snprintf(line, sizeof line,
+                     "\nSession %u printed (its last %zu bytes; bash_poll reads what came before):\n<output>\n",
+                     j->session, tail.n);
+        else
+            snprintf(line, sizeof line, "\nSession %u printed:\n<output>\n", j->session);
+        pt_buf_putz(t, line);
+        pt_buf_puts(t, tail);
+        if (tail.n && tail.p[tail.n - 1] != '\n')
+            pt_buf_putc(t, '\n');
+        pt_buf_putz(t, "</output>\n");
+    }
+    pt_buf_putz(t, "\nCarry on with what they were for. If nothing is left to do, say so in a sentence.");
     snprintf(req, sizeof req, "background:%u", first);
     memset(&in, 0, sizeof in);
     in.text = pt_buf_str(t);
     in.req = pt_strz(req);
     in.note = true;
     ok = !t->oom && pt_submit(pt_rt_agent(b->k->rt), &in);
+    for (j = b->jobs; j; j = next) {
+        next = j->next;
+        if (!j->noting)
+            continue;
+        j->noting = false;
+        note_tail(j, &cut);
+        if (ok && !cut)
+            job_free(j);
+    }
     return ok;
+}
+
+void pt_rt_bash_ended(bash *b, pt_buf *out)
+{
+    job *j;
+    for (j = b->jobs; j; j = j->next) {
+        if (!unread_end(j))
+            continue;
+        j->noted = true;
+        pt_buf_putz(out, "\n[pytte: background ");
+        put_ended(out, j);
+        pt_buf_putz(out, "; bash_poll reads its output]");
+    }
+}
+
+bool pt_rt_bash_running(const bash *b)
+{
+    const job *j;
+    for (j = b->jobs; j; j = j->next)
+        if (j->background && !j->ended)
+            return true;
+    return false;
 }
 
 uint32_t pt_rt_bash_backgrounds(const bash *b, pt_rt_background *out, uint32_t max)
@@ -490,12 +579,11 @@ static const char bash_schema[] =
     "\"command\":{\"type\":\"string\",\"description\":\"The command line\"},"
     "\"timeout\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"Stop it after this many seconds (default: never)\"},"
     "\"yield\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Return after this many seconds if it still runs, "
-    "leaving it in the background (default 10; 0: wait for it to end)\"}},"
+    "leaving it in the background (default 120; 0: wait for it to end)\"}},"
     "\"required\":[\"command\"],\"additionalProperties\":false}";
 static const char bash_poll_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"session\":{\"type\":\"integer\",\"minimum\":1,\"description\":\"The session a bash call left running\"},"
-    "\"wait\":{\"type\":\"integer\",\"minimum\":0,\"description\":\"Seconds to wait for it to end (default 10, at least 5)\"},"
     "\"stop\":{\"type\":\"boolean\",\"description\":\"Stop it (SIGTERM, then SIGKILL after 2s)\"}},"
     "\"required\":[\"session\"],\"additionalProperties\":false}";
 
@@ -531,19 +619,20 @@ void pt_rt_bash_tools(bash *b, pt_rt_tool t[2])
     t[0].def.name = PT_S("bash");
     t[0].def.description = PT_S(
         "Run a command line in the user's shell, in the session's directory, and return its output "
-        "(stdout and stderr together). Each call starts fresh: cd and export do not carry over. stdin "
-        "is empty, so nothing can prompt. A command still running after yield seconds keeps running "
-        "in the background as a session: work on, then read it with bash_poll.");
+        "(stdout and stderr together). Commands start in the working directory. A cd or export inside "
+        "one call doesn't carry over to the next. stdin is empty, so nothing can prompt. A command still running after yield seconds keeps running "
+        "in the background as a session; pass a small yield to start a server or a watcher. You are "
+        "told when a session ends, with what it printed, so do not poll to wait for one: work on, "
+        "or end your turn saying what you wait for, and you will be woken when it ends.");
     t[0].def.schema = PT_S(bash_schema);
     t[0].def.parallel = true;
     t[0].run = t_bash;
     t[0].cancel = bash_cancel;
     t[1].def.name = PT_S("bash_poll");
     t[1].def.description = PT_S(
-        "Read what a background bash session printed since it was last read, waiting up to wait "
-        "seconds for it to end; or stop it. Its result says whether it still runs. Before you end "
-        "your turn, poll the sessions you started until they end, unless they are meant to keep "
-        "running (a server, a watcher); then say that they still run.");
+        "Read what a background bash session printed since it was last read, at once, and whether "
+        "it still runs; or stop it. Use it to check on progress or to read output the end notice "
+        "left out. It does not wait: you are told when a session ends.");
     t[1].def.schema = PT_S(bash_poll_schema);
     t[1].def.replay = PT_REPLAY_SAFE;
     t[1].def.parallel = true;

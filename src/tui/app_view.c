@@ -512,20 +512,22 @@ bool app_runs_oom(const app *a)
 {
     int i;
     for (i = 0; i < RUN_MAX; i++)
-        if (a->run.calls[i].id.oom || a->run.calls[i].head.oom || a->run.calls[i].out.oom)
+        if (a->run.calls[i].id.oom || a->run.calls[i].head.oom)
             return true;
     return false;
 }
 
 /* The group: whole for the scrollback; live, for the band, with its
  * newest rows only, without details, and the running calls last, marked
- * by the blinking dot (the newest with the end of its output). */
+ * by the blinking dot, each one row with how many lines it has printed.
+ * Output is not shown there: rows that came and went would move the
+ * input. */
 void app_group_render(app *a, pt_buf *out, bool live)
 {
     bool running = live && a->run.ncalls;
     int i, first = 0;
     const char *mark = app_blink(a, pt_sys_now_ms());
-    char more[48];
+    char more[48], n[16];
     if (!a->group.n && !running)
         return;
     if (live && a->group.n > GROUP_LIVE) {
@@ -545,32 +547,25 @@ void app_group_render(app *a, pt_buf *out, bool live)
         if (!live)
             group_details(a, out, g);
     }
-    for (i = 0; running && i < a->run.ncalls; i++)
-        group_row(a, out, mark, ACCENT | TUI_BOLD, pt_buf_str(&a->run.calls[i].head));
-    if (running) { /* the end of the newest one's output */
-        const run_call *r = &a->run.calls[a->run.ncalls - 1];
-        pt_str o = pt_buf_str(&r->out), rows;
-        size_t at = o.n;
-        int lines = 0;
-        while (at && o.p[at - 1] == '\n')
-            at--;
-        o.n = at;
-        while (at && lines <= TOOL_LIVE)
-            lines += o.p[--at] == '\n';
-        if (at < o.n && o.p[at] == '\n')
-            at++;
-        while (at < o.n && ((unsigned char)o.p[at] & 0xC0) == 0x80)
-            at++;
-        if (!o.n)
-            return;
-        pt_buf_reset(&a->diff);
-        out_rail(a, &a->diff, detail_pad + 1, 0, TUI_DIM, (pt_str){o.p + at, o.n - at}, 0);
-        rows = pt_buf_str(&a->diff); /* its last TOOL_LIVE rows */
-        at = rows.n;
-        for (lines = 0; at && lines <= TOOL_LIVE; at--)
-            if (rows.p[at - 1] == '\n' && ++lines > TOOL_LIVE)
-                break;
-        pt_buf_put(out, rows.p + at, rows.n - at);
+    for (i = 0; running && i < a->run.ncalls; i++) {
+        const run_call *r = &a->run.calls[i];
+        uint64_t lines = r->lines + r->open;
+        pt_str head = pt_buf_str(&r->head);
+        pt_buf_reset(&a->wrap);
+        if (lines) { /* the count stays in view: the gist gives way */
+            char count[40];
+            int room;
+            app_tokens_short(n, sizeof n, lines);
+            snprintf(count, sizeof count, " · %s line%s", n, lines == 1 ? "" : "s");
+            room = width(a) - 2 - tui_width(pt_strz(count), true);
+            pt_buf_put(&a->wrap, head.p, tui_fit(head, room > 0 ? room : 0, false));
+            tui_style(&a->wrap, TUI_DIM);
+            pt_buf_putz(&a->wrap, count);
+            tui_style(&a->wrap, 0);
+        } else {
+            pt_buf_puts(&a->wrap, head);
+        }
+        group_row(a, out, mark, ACCENT | TUI_BOLD, pt_buf_str(&a->wrap));
     }
 }
 
@@ -678,15 +673,20 @@ void app_out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->summary, 0);
         if (full && v->files.n)
             out_rail(a, out, a->sy->bar, TUI_DIM, TUI_DIM, v->files, 0);
-    } else if (is_note(v) && !full) { /* its "- session ..." lines */
+    } else if (is_note(v) && !full) { /* its "- session ..." lines, up to the output after them */
         pt_str text = m->text;
         size_t at = 0, e;
+        bool listed = false;
         app_out_blank(out);
         while (at < text.n) {
             for (e = at; e < text.n && text.p[e] != '\n'; e++)
                 ;
-            if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ')
+            if (e - at > 2 && text.p[at] == '-' && text.p[at + 1] == ' ') {
                 app_out_note(a, out, TUI_DIM, (pt_str){text.p + at + 2, e - at - 2});
+                listed = true;
+            } else if (listed && e == at) {
+                break;
+            }
             at = e + 1;
         }
     } else if (strcmp(v->kind, "user") == 0) { /* as it looked at the prompt */
@@ -962,7 +962,8 @@ void app_on_event(void *ud, const pt_event *ev)
             snprintf(r->name, sizeof r->name, "%.*s", (int)(ev->name.n > 60 ? 60 : ev->name.n), ev->name.p);
             pt_buf_reset(&r->id);
             pt_buf_puts(&r->id, ev->call_id);
-            pt_buf_reset(&r->out);
+            r->lines = 0;
+            r->open = false;
             pt_buf_reset(&r->head);
             app_phrase(a, &r->head, ev->name, ev->args);
         }
@@ -970,22 +971,16 @@ void app_on_event(void *ud, const pt_event *ev)
     case PT_E_TOOL_OUTPUT: {
         run_call *r = NULL;
         int i;
+        size_t k;
         for (i = 0; i < a->run.ncalls && !r; i++)
             if (a->run.calls[i].task == ev->task)
                 r = &a->run.calls[i];
         if (!r)
             break;
-        if (ev->data.n >= TOOL_KEEP) {
-            pt_buf_reset(&r->out);
-            pt_buf_put(&r->out, ev->data.p + ev->data.n - TOOL_KEEP, TOOL_KEEP);
-        } else {
-            if (r->out.n + ev->data.n > 2 * TOOL_KEEP) { /* keep the end: amortized O(n) */
-                size_t k = TOOL_KEEP - ev->data.n;
-                memmove(r->out.p, r->out.p + r->out.n - k, k);
-                r->out.n = k;
-            }
-            pt_buf_puts(&r->out, ev->data);
-        }
+        for (k = 0; k < ev->data.n; k++)
+            r->lines += ev->data.p[k] == '\n';
+        if (ev->data.n)
+            r->open = ev->data.p[ev->data.n - 1] != '\n';
         break;
     }
     case PT_E_RETRY:

@@ -796,6 +796,10 @@ pt_rt_result pt_rt_run(pt_rt *rt)
         pt_rt_result r;
         drain(rt);
         r = status(rt);
+        /* Idle with background commands running: wait for them, so the
+         * note that one ended wakes the model, as it would in a TUI. */
+        if (r == PT_RT_IDLE && rt->builtin.running && rt->builtin.running(rt->builtin.ud))
+            r = PT_RT_BUSY;
         if (r != PT_RT_BUSY)
             return r;
         if (rt->c.stop && rt->c.stop(rt->c.stop_ud))

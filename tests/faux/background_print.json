@@ -1,0 +1,47 @@
+{
+  "turns": [
+    {
+      "content": [
+        {"type": "text", "text": "Starting it."},
+        {"type": "tool_call", "id": "bg", "name": "bash", "args": {"command": "echo first; sleep 2; echo second; exit 3", "yield": 1}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "now", "name": "bash_poll", "args": {"session": 8}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "busy", "name": "bash", "args": {"command": "sleep 2.5", "yield": 0}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "end", "name": "bash_poll", "args": {"session": 8}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "gone", "name": "bash_poll", "args": {"session": 8}},
+        {"type": "tool_call", "id": "up", "name": "bash", "args": {"command": "echo up; sleep 100", "yield": 1}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "stop", "name": "bash_poll", "args": {"session": 22, "stop": true}},
+        {"type": "tool_call", "id": "left", "name": "bash", "args": {"command": "echo left; sleep 100", "yield": 1}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "tool_call", "id": "halt", "name": "bash_poll", "args": {"session": 27, "stop": true}}
+      ]
+    },
+    {
+      "content": [
+        {"type": "text", "text": "Done."}
+      ]
+    }
+  ]
+}

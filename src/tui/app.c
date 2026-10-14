@@ -106,9 +106,7 @@ static void startup_free(app *a)
     for (i = 0; i < RUN_MAX; i++) {
         pt_buf_free(&a->run.calls[i].id);
         pt_buf_free(&a->run.calls[i].head);
-        pt_buf_free(&a->run.calls[i].out);
     }
-    pt_buf_free(&a->diff);
     pt_buf_free(&a->group.buf);
     pt_buf_free(&a->menu.buf);
     pt_buf_free(&a->hist.pending);
@@ -157,9 +155,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     for (slot = 0; slot < RUN_MAX; slot++) {
         pt_buf_init(&a->run.calls[slot].id, pt_sys_allocator());
         pt_buf_init(&a->run.calls[slot].head, pt_sys_allocator());
-        pt_buf_init(&a->run.calls[slot].out, pt_sys_allocator());
     }
-    pt_buf_init(&a->diff, pt_sys_allocator());
     pt_buf_init(&a->group.buf, pt_sys_allocator());
     pt_buf_init(&a->menu.buf, pt_sys_allocator());
     pt_buf_init(&a->hist.pending, pt_sys_allocator());
@@ -410,9 +406,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     for (slot = 0; slot < RUN_MAX; slot++) {
         pt_buf_free(&a->run.calls[slot].id);
         pt_buf_free(&a->run.calls[slot].head);
-        pt_buf_free(&a->run.calls[slot].out);
     }
-    pt_buf_free(&a->diff);
     pt_buf_free(&a->group.buf);
     pt_buf_free(&a->menu.buf);
     pt_buf_free(&a->hist.pending);

@@ -449,6 +449,10 @@ bool pt_rt_build_prompt(pt_rt *rt, pt_str cwd, pt_str prompt, pt_buf *system, pt
         put_part(system, (pt_str){file, n});
         free(file);
     }
+    if (cwd.n) {
+        pt_buf_putz(system, "\n\nWorking directory: ");
+        pt_buf_puts(system, cwd);
+    }
     put_agents(rt, cwd, system);
     put_part(system, append);
     pt_arena_free(&ar);

@@ -246,7 +246,7 @@ static void ask_rows(app *a, int n)
 /* Build the band (16.2.2) within its height budget. */
 static void build_frame(app *a, int64_t now)
 {
-    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, st, gap, act, i, first, top, nask;
+    int avail = a->rows - 2, w = width(a), show, live_n = 0, nmenu, nq, st, gap, act, i, first, top, nask, pad = 0;
     size_t secret = app_secret_at(pt_buf_str(&a->in.text));
     int total = a->menu.kind == MENU_SETTINGS ? (int)NSETTINGS : a->menu.n;
     int sel = a->menu.kind == MENU_SETTINGS ? a->menu.set_sel : a->menu.sel;
@@ -326,6 +326,23 @@ static void build_frame(app *a, int64_t now)
         }
     }
     tui_input_layout(&a->in, w > 3 ? w - 2 : 1, show);
+    /* Rows above the input leave blanks behind (a call's output that ends,
+     * the activity, a queued input that runs), so the input does not jump
+     * up: they go only as the scrollback takes their place, at this commit.
+     * Not after a resize or a redraw, which start the band over. */
+    if (!tiny && a->band.h && !a->band.clear) {
+        int committed = 0, room = avail - (live_n + nask + nq + gap + act + show + nmenu + st);
+        for (i = 0; (size_t)i < a->lines.n; i++)
+            committed += a->lines.p[i] == '\n';
+        if (a->lines.n && a->lines.p[a->lines.n - 1] != '\n')
+            committed++;
+        pad = a->above - committed - (live_n + nask + nq + gap + act);
+        if (pad > room)
+            pad = room;
+        if (pad < 0)
+            pad = 0;
+    }
+    a->above = live_n + nask + nq + gap + act + pad;
     /* live tail: its last rows */
     {
         pt_str all = pt_buf_str(live_rows);
@@ -364,8 +381,10 @@ static void build_frame(app *a, int64_t now)
         }
         row(a, pt_buf_str(&a->tmp));
     }
-    /* the input box after a blank row and the activity, the prompt's mark
-     * on its first row */
+    /* the input box after the blanks, a blank row and the activity, the
+     * prompt's mark on its first row */
+    for (i = 0; i < pad; i++)
+        blank_row(a);
     if (gap)
         blank_row(a);
     if (act)
@@ -445,7 +464,7 @@ void app_paint(app *a)
     build_frame(a, now);
     if (a->in.text.oom || a->in.kill.oom || a->in.saved.oom || a->frame.rows.oom || a->lines.oom ||
         a->view.live.oom || a->tmp.oom || a->tmp2.oom || a->wrap.oom || a->menu.buf.oom || a->group.buf.oom ||
-        app_runs_oom(a) || a->live_rows.oom || a->diff.oom) {
+        app_runs_oom(a) || a->live_rows.oom) {
         if (!a->quit)
             fprintf(stderr, "pytte: out of memory drawing the terminal\n");
         a->code = 1;

@@ -1,0 +1,7 @@
+{
+  "turns": [
+    {"content": [{"type": "tool_call", "id": "bg", "name": "bash", "args": {"command": "sleep 1.5; echo late", "yield": 1}}]},
+    {"content": [{"type": "text", "text": "Waiting for it."}]},
+    {"content": [{"type": "text", "text": "It printed late."}]}
+  ]
+}
