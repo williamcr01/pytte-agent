@@ -198,7 +198,7 @@ static pt_str short_path(app *a, pt_str g)
     return g;
 }
 
-/* A call on one row: the tool's name, dim, in a column, then the gist of
+/* A call on one row: the tool's name, blue, in a column, then the gist of
  * its arguments; in a command, the programs stand out and the rest is dim.
  * gist, if not NULL: where in out the gist starts. */
 void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist)
@@ -209,7 +209,7 @@ void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist)
     size_t k;
     if (!cmd)
         g = short_path(a, g);
-    tui_style(out, TUI_DIM);
+    tui_style(out, TUI_BLUE);
     if (ti >= 0)
         name = pt_strz(tools[ti].shown);
     w = (int)(name.n > 60 ? 60 : name.n);
