@@ -42,8 +42,6 @@ typedef struct syms {
 
 #define BLINK_MS 500 /* the activity mark: on for the first half of each second of the clock */
 #define TOOL_FAIL 3  /* rows of a failed tool's output kept in the scrollback */
-#define TOOL_LIVE 5  /* rows of a running tool's output in the band */
-#define TOOL_KEEP 4096 /* bytes of it kept for that */
 #define RUN_MAX 8      /* running calls the band shows; more still run */
 
 /* The slash commands, for the menu and /help (app_cmd.c). */
@@ -90,11 +88,13 @@ typedef struct grow {
     uint8_t cat, bad;
 } grow;
 
-/* A call that is running: its row, and the end of its output. */
+/* A call that is running: its row, and how many lines it has printed. */
 typedef struct run_call {
     uint32_t task;
     char name[64];
-    pt_buf id, head, out;
+    pt_buf id, head;
+    uint64_t lines; /* ended lines of output */
+    bool open;      /* and one more is under way */
 } run_call;
 
 /* An input that names an MCP prompt (/server:prompt) or resources
@@ -286,7 +286,7 @@ typedef struct app {
     int thinking;
     /* output: styled lines for the scrollback, committed at the next paint */
     pt_buf lines;
-    pt_buf tmp, tmp2, wrap, live_rows, diff; /* scratch, reused */
+    pt_buf tmp, tmp2, wrap, live_rows; /* scratch, reused */
     pt_arena ar;
     app_view view;
     app_run run;

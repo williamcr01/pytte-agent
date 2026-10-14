@@ -707,7 +707,7 @@ static void test_steady_input(void)
         p.watch = true;
         p.row = p.v->r;
         keys(&p, "build and test\r");
-        CHECK(wait_for(&p, "        step 6\n", 5000)); /* the running call's output, in the band */
+        CHECK(wait_for(&p, "· 6 lines\n", 5000)); /* the running call, in the band */
         keys(&p, "and then?\r");
         CHECK(wait_for(&p, "queued · and then?", 2000));
         CHECK(wait_for(&p, "› and then?", 10000));
@@ -722,7 +722,7 @@ static void test_steady_input(void)
 
 /* Calls in a row form a group (section 16.2): a header that counts them,
  * then a row each; a failure keeps its last lines, an edit shows its diff.
- * The open group, with the running call and its output tail, is in the
+ * The open group, with the running calls one row each, is in the
  * band. */
 static void test_tool_rendering(void)
 {
@@ -737,10 +737,9 @@ static void test_tool_rendering(void)
                    "✓ bash  echo 31\n"
                    "✗ bash  echo one; echo two; echo 'band.c:88: error'; echo 'make: Error 1'; exit 2 · exit 2\n",
                    3000));
-    CHECK(wait_for(&p, /* the running call last, by the spinner, with the end of its output */
-                   " bash  echo started; sleep 1; echo finished\n"
-                   "        started\n",
-                   3000));
+    CHECK(wait_for(&p, /* the running call last, by the spinner, one row: how much it printed, not what */
+                   " bash  echo started; sleep 1; echo finished · 1 line\n", 3000));
+    CHECK(!has(&p, "        started"));
     CHECK(wait_for(&p, "Fixed.", 5000));
     CHECK(has(&p, "  Looking.\n\n"
                   "✓ bash  echo 31\n"
