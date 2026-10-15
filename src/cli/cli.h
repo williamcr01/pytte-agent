@@ -13,7 +13,7 @@
 
 /* ---- config.c: settings (section 19) ---- */
 
-enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_PERMS, CFG_COMPACT_MODEL, CFG_SKILLS, CFG_N };
+enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_PERMS, CFG_COMPACT_MODEL, CFG_SKILLS, CFG_SEARCH_BACKEND, CFG_N };
 
 /* A tool turned on or off by a config file: "tools": {"web_fetch": true}. */
 #define CLI_TOOLS_MAX 64
@@ -94,6 +94,15 @@ const char *cli_auth_key(const char *provider);
  * it could not be saved; true with a non-empty err when it was saved but
  * this process could not take it. */
 bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap);
+
+/* Search API keys (/login search) are kept like provider keys, under the
+ * backend's name ("exa", "parallel"). */
+extern const char *const cli_search_backends[2];
+/* The environment variable that holds a backend's key (EXA_API_KEY). */
+const char *cli_search_env(const char *backend);
+/* The backend's key into out: its environment variable first, then
+ * auth.json. False when there is none. Also pt_rt_cfg.search_key. */
+bool cli_search_key(void *ud, const char *backend, char *out, size_t cap);
 
 /* Subscription logins (/login oauth) live in auth.json too, by provider:
  * {"openai-codex": {"access": "...", "refresh": "...", "expires": <ms since
@@ -224,6 +233,7 @@ typedef struct cli_opts {
     uint32_t nmcp;
     pt_rt_mcp_host mcp_host;
     char tools_off[CLI_TOOLS_OFF_CAP]; /* the tools turned off: cli_tools_off */
+    const char *search_backend; /* search.backend; NULL or empty: the first with a key */
 } cli_opts;
 
 typedef struct cli_open_job cli_open_job;

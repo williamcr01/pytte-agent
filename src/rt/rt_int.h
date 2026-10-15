@@ -1,6 +1,6 @@
 /* Inside the runtime: shared by rt.c (the loop), tools.c (the registry,
  * calls and the gate), prompt.c, mcp*.c and the builtin tools
- * (tools_builtin.c, tools_bash.c, tools_search.c, tools_web.c). */
+ * (tools_builtin.c, tools_bash.c, tools_search.c, tools_web.c, tools_websearch.c). */
 #ifndef PT_RT_INT_H
 #define PT_RT_INT_H
 
@@ -196,6 +196,11 @@ typedef struct web web;
 web *pt_rt_web_new(pt_rt *rt);
 void pt_rt_web_free(web *w);
 void pt_rt_web_tool(web *w, pt_rt_tool *t);
+/* tools_websearch.c: web_search, with its state */
+typedef struct wsearch wsearch;
+wsearch *pt_rt_wsearch_new(pt_rt *rt);
+void pt_rt_wsearch_free(wsearch *w);
+void pt_rt_wsearch_tool(wsearch *w, pt_rt_tool *t);
 /* tools_builtin.c: images by their first bytes (NULL: not one providers
  * take), and their size in pixels from the header */
 #define PT_RT_IMAGE_MAX 3932160u /* bytes: 5 MB in base64, Anthropic's limit */
