@@ -294,6 +294,7 @@ typedef struct app {
     pt_buf command;
     config_job *saving;
     cli_oauth *login; /* a /login oauth waiting for the browser */
+    bool web_prompt;  /* asked "Turn on web_search and web_fetch?": the next line answers */
     bool pager_pending;
     tui_term *t;
     tui_keys keys;
@@ -377,6 +378,9 @@ void app_apply_thinking(app *a);
 void app_finish_setting(app *a);
 /* A /login oauth that ended: say how. */
 void app_finish_login(app *a);
+/* The answer to the question after a search key is saved (y or n). True
+ * when text was an answer; any other text drops the question. */
+bool app_web_answer(app *a, pt_str text);
 bool app_save_setting(app *a, int k, const char *v);
 void app_update_model(app *a);
 void app_set_config(app *a);
