@@ -32,12 +32,12 @@ typedef struct entry {
     pt_str raw;
 } entry;
 
-typedef enum { TASK_RUN, TASK_TOOL, TASK_COMPACT } task_kind;
+typedef enum { TASK_RUN, TASK_TOOL, TASK_COMPACT, TASK_REWIND } task_kind;
 typedef enum { ST_PENDING, ST_RUNNING, ST_WAITING, ST_DONE } task_status;
 /* run: prepare, request, retry, tools, compact_wait; tool: call, approve,
- * execute; compact: prepare, request, retry */
+ * execute; compact: prepare, request, retry; rewind: restore */
 typedef enum {
-    PH_PREPARE, PH_REQUEST, PH_RETRY, PH_TOOLS, PH_CALL, PH_APPROVE, PH_EXECUTE, PH_COMPACT
+    PH_PREPARE, PH_REQUEST, PH_RETRY, PH_TOOLS, PH_CALL, PH_APPROVE, PH_EXECUTE, PH_COMPACT, PH_RESTORE
 } task_phase;
 
 typedef struct run_live run_live;
@@ -70,13 +70,16 @@ typedef struct task {
     uint32_t keep;      /* compact: the first entry kept as it is; 0: none */
     int64_t until;                                     /* retry */
     pt_str model; pt_reasoning reasoning; uint32_t max_tokens; /* request params */
-    uint32_t entry;     /* run tools, tool: the assistant entry with the calls */
+    uint32_t entry;     /* run tools, tool: the assistant entry with the calls; rewind: the user entry */
     uint32_t *calls, ncalls; /* run tools: its tool tasks, in call order */
     bool *parallel;     /* run tools: per call, whether it may run alongside others */
     pt_str call_id;     /* tool */
     pt_str args;        /* tool: arguments a gate rewrote; empty: as called */
     pt_str prompt;      /* tool approve */
     pt_replay replay;   /* tool execute */
+    pt_str snap_path, snap_blob; /* tool execute: the file saved before the call (blob empty: it did not exist) */
+    pt_restore *files;  /* rewind: what to put back, in order */
+    uint32_t nfiles;
     uint32_t compact;   /* run compact_wait: the compact task */
     bool abort;         /* an abort was requested (section 8.4) */
     pt_str outcome, reason; uint32_t result;           /* done */
@@ -90,6 +93,10 @@ typedef struct task {
     bool recovered; /* the record was loaded, not committed by this process */
     bool asked;     /* approve: the question went out */
     bool gated;     /* call: the gate answered (gate, gate_text) */
+    bool snapping;  /* call: the file is being saved (snap_fx is the SNAPSHOT) */
+    bool snapped;   /* call: it was saved (snap_path, snap_blob; or snap_err) */
+    pt_str snap_err; /* call: why it could not be */
+    uint32_t next;  /* rewind: the file being restored */
     pt_gate_kind gate;
     pt_buf gate_text;
     struct task *next_free;
@@ -119,7 +126,7 @@ typedef struct doc {
 /* The epoch's frozen tools: what the model is offered, and how they run. */
 typedef struct tool_meta {
     pt_replay replay;
-    bool parallel, read_only;
+    bool parallel, read_only, snapshot;
     const pt_json *schema; /* parsed, in the epoch arena */
 } tool_meta;
 
@@ -152,12 +159,19 @@ typedef struct queued_fx {
     pt_buf bytes; /* LIVE snapshots */
 } queued_fx;
 
-typedef enum { AFTER_NONE, AFTER_RETRY, AFTER_RUN_DONE, AFTER_COMPACT } after_kind;
+typedef enum { AFTER_NONE, AFTER_RETRY, AFTER_RUN_DONE, AFTER_COMPACT, AFTER_REWIND } after_kind;
 
 /* The session writes the host requested, applied at the next step. */
 typedef struct session_reqs {
     bool create, open, close;
     bool compact;       /* pt_compact: commit a compact task when no run is active */
+    struct {            /* pt_rewind: commit a rewind task when no run is active */
+        bool set;
+        uint32_t entry;
+        pt_restore *files;
+        uint32_t n;
+        pt_arena ar;
+    } rewind;
     pt_session_cfg cfg; /* create's */
     pt_arena ar;        /* the strings of cfg, and of claims (below) */
 } session_reqs;
@@ -358,6 +372,13 @@ bool pt_compact_settle(pt_agent *a, task *t);
 /* Abort a compaction: done(aborted) into the open commit; returns the
  * effect to cancel after the commit is queued, or 0. */
 uint32_t pt_compact_abort(pt_agent *a, task *t);
+
+/* ---- task_rewind.c ---- */
+/* Commit the requested rewind (a->req.rewind) as a task. */
+bool pt_rewind_write(pt_agent *a);
+bool pt_rewind_step(pt_agent *a, task *t);
+/* A RESTORE ended; false when fx is not one. */
+bool pt_rewind_done(pt_agent *a, uint32_t fx, const char *error);
 
 /* ---- task_tool.c ---- */
 bool pt_tool_step(pt_agent *a, task *t);

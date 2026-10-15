@@ -304,7 +304,10 @@ static void commit_landed(pt_agent *a, const char *error)
         pt_core_live_del(a, a->commit.live_del);
     if (a->commit.after != AFTER_NONE) {
         memset(&ev, 0, sizeof ev);
-        ev.kind = a->commit.after == AFTER_RETRY ? PT_E_RETRY : a->commit.after == AFTER_COMPACT ? PT_E_COMPACT : PT_E_RUN_DONE;
+        ev.kind = a->commit.after == AFTER_RETRY     ? PT_E_RETRY
+                  : a->commit.after == AFTER_COMPACT ? PT_E_COMPACT
+                  : a->commit.after == AFTER_REWIND  ? PT_E_REWIND
+                                                     : PT_E_RUN_DONE;
         ev.task = a->commit.task;
         ev.outcome = a->commit.outcome;
         ev.error = a->commit.error;
@@ -412,6 +415,10 @@ void pt_core_write_tool_defs(pt_jw *w, const pt_tool_def *defs, uint32_t n)
         pt_jw_bool(w, d->parallel);
         if (d->read_only) {
             pt_jw_key(w, "read_only");
+            pt_jw_bool(w, true);
+        }
+        if (d->snapshot) {
+            pt_jw_key(w, "snapshot");
             pt_jw_bool(w, true);
         }
         pt_jw_key(w, "source");
@@ -682,6 +689,11 @@ static bool step(pt_agent *a)
             return true;
         }
     }
+    if (a->req.rewind.set) {
+        a->req.rewind.set = false;
+        if (!active_run(a) && pt_rewind_write(a))
+            return true;
+    }
     if (!active_run(a) && (q = first_queued(a))) {
         build_place(a, q);
         return true;
@@ -708,7 +720,9 @@ static bool step(pt_agent *a)
             exclusive = exclusive || !par;
             if (!t->fx && pt_tool_step(a, t))
                 return true;
-        } else if (!t->fx && (t->kind == TASK_COMPACT ? pt_compact_step(a, t) : pt_run_step(a, t))) {
+        } else if (!t->fx && (t->kind == TASK_COMPACT   ? pt_compact_step(a, t)
+                              : t->kind == TASK_REWIND ? pt_rewind_step(a, t)
+                                                       : pt_run_step(a, t))) {
             return true;
         }
         if (a->fatal || a->commit.out)
@@ -757,7 +771,7 @@ bool pt_idle(const pt_agent *a)
 {
     uint32_t i;
     if (a->fatal || a->commit.out || a->fxq.len || a->req.create || a->req.open || a->req.close ||
-        a->subs.n || a->req.compact || !a->loaded)
+        a->subs.n || a->req.compact || a->req.rewind.set || !a->loaded)
         return false;
     if (a->closing)
         return a->closed;
@@ -793,7 +807,7 @@ void pt_fx_done(pt_agent *a, uint32_t fx, const char *error)
         commit_landed(a, error);
         return;
     }
-    if (pt_run_http_done(a, fx, error))
+    if (pt_run_http_done(a, fx, error) || pt_rewind_done(a, fx, error))
         return;
     for (i = 0; i < a->ntasks; i++) /* a retry sleep */
         if (a->tasks[i]->fx == fx && a->tasks[i]->phase == PH_RETRY) {
@@ -830,6 +844,7 @@ pt_agent *pt_new(const pt_opts *o)
     pt_arena_init(&a->scratch, a->al, 8192);
     pt_arena_init(&a->objects, a->al, 1024);
     pt_arena_init(&a->req.ar, a->al, 1024);
+    pt_arena_init(&a->req.rewind.ar, a->al, 1024);
     pt_arena_init(&a->subs.ar, a->al, 1024);
     pt_arena_init(&a->commit.ar, a->al, 1024);
     pt_buf_init(&a->commit.buf, a->al);
@@ -892,6 +907,7 @@ void pt_free(pt_agent *a)
     pt_arena_free(&a->scratch);
     pt_arena_free(&a->objects);
     pt_arena_free(&a->req.ar);
+    pt_arena_free(&a->req.rewind.ar);
     pt_arena_free(&a->subs.ar);
     pt_arena_free(&a->commit.ar);
     a->al.fn(a->al.ud, a, sizeof *a, 0);
@@ -1091,6 +1107,41 @@ bool pt_compact(pt_agent *a)
     if (a->fatal || active_run(a) || a->req.compact || !pt_compact_possible(a))
         return false;
     a->req.compact = true;
+    a->idle_sent = false;
+    return true;
+}
+
+bool pt_rewind(pt_agent *a, uint32_t user_entry, const pt_restore *files, uint32_t n)
+{
+    uint32_t i;
+    pt_restore *copy;
+    if (a->fatal || active_run(a) || a->req.rewind.set || !a->loaded || !user_entry || !n || a->closing) {
+        pt_core_seterr(a, "a rewind needs an idle session", PT_STR_NULL);
+        return false;
+    }
+    pt_arena_reset(&a->req.rewind.ar);
+#if SIZE_MAX <= UINT32_MAX
+    if (n > SIZE_MAX / sizeof *copy) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
+        return false;
+    }
+#endif
+    if (!(copy = (pt_restore *)pt_arena_alloc(&a->req.rewind.ar, sizeof *copy * n))) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
+        return false;
+    }
+    for (i = 0; i < n; i++) {
+        copy[i].path = pt_arena_dup(&a->req.rewind.ar, files[i].path);
+        copy[i].blob = files[i].blob.n ? pt_arena_dup(&a->req.rewind.ar, files[i].blob) : PT_STR_NULL;
+    }
+    if (a->req.rewind.ar.oom) {
+        pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
+        return false;
+    }
+    a->req.rewind.entry = user_entry;
+    a->req.rewind.files = copy;
+    a->req.rewind.n = n;
+    a->req.rewind.set = true;
     a->idle_sent = false;
     return true;
 }

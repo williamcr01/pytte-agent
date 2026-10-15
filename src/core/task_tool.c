@@ -8,7 +8,9 @@
  *   error result ◄┘
  *
  * call checks the arguments against the epoch's frozen schema, then asks
- * the host's gate. The intent to execute is committed before the effect
+ * the host's gate. A tool that changes a file (tool_meta.snapshot) has the
+ * file saved before its intent is committed (section 8.6): the intent
+ * names the blob. The intent to execute is committed before the effect
  * starts; the result, its entry and the task's end are one commit. */
 #include "core/core.h"
 
@@ -278,11 +280,38 @@ static bool call_phase(pt_agent *a, task *t, const pt_block *call)
     return pt_core_queue(a, &fx, PT_STR_NULL);
 }
 
+/* Ask the host to save the file the call is about to change; the step
+ * that comes after the answer commits the intent again, with the blob. */
+static bool snapshot_ask(pt_agent *a, task *t, const pt_block *call, pt_str args)
+{
+    pt_fx fx;
+    memset(&fx, 0, sizeof fx);
+    fx.kind = PT_FX_SNAPSHOT;
+    fx.id = pt_core_new_fx(a);
+    fx.task = t->id;
+    fx.name = call->name;
+    fx.args = args.n ? args : call->args;
+    fx.call_id = t->call_id;
+    t->fx = fx.id;
+    t->snapping = true;
+    return pt_core_queue(a, &fx, PT_STR_NULL);
+}
+
 static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_str prompt, uint32_t attempt,
                          const input *consumed)
 {
     task nt = *t;
     int k;
+    if (ph == PH_EXECUTE && attempt == 1 && !t->snapped) {
+        const pt_block *call = find_call(a, t);
+        k = call ? pt_core_find_tool(a, call->name) : -1;
+        if (k >= 0 && a->tool_meta[k].snapshot)
+            return snapshot_ask(a, t, call, args);
+    }
+    if (t->snap_err.n) {
+        const pt_block *call = find_call(a, t);
+        return finish_text(a, t, call, "Not run: the file could not be saved for /rewind first: ", t->snap_err);
+    }
     pt_core_commit_begin(a, t->id);
     if (consumed) {
         input in = *consumed;
@@ -307,8 +336,7 @@ static bool gated(pt_agent *a, task *t, const pt_block *call)
 {
     pt_str text = pt_buf_str(&t->gate_text);
     int k = pt_core_find_tool(a, call->name);
-    t->gated = false;
-    switch (t->gate) {
+    switch (t->gate) { /* t->gated stays until the phase changes: a snapshot comes in between */
     case PT_GATE_DENY:
         return finish_text(a, t, call, text.n ? "Permission denied: " : "Permission denied.", text);
     case PT_GATE_ASK:
@@ -341,6 +369,33 @@ void pt_fx_gate(pt_agent *a, uint32_t fx, const pt_gate *g)
             a->idle_sent = false;
             return;
         }
+    }
+}
+
+/* The host saved the file (or could not). The task goes on in its own
+ * step, which commits the intent. */
+void pt_fx_snapshot(pt_agent *a, uint32_t fx, const pt_snapshot *s, const char *error)
+{
+    uint32_t i;
+    if (a->fatal)
+        return;
+    for (i = 0; i < a->ntasks; i++) {
+        task *t = a->tasks[i];
+        if (t->kind != TASK_TOOL || !t->snapping || t->fx != fx)
+            continue;
+        t->fx = 0;
+        t->snapping = false;
+        t->snapped = true;
+        if (error) {
+            t->snap_err = pt_arena_dup(&t->a, pt_strz(error));
+        } else {
+            t->snap_path = pt_arena_dup(&t->a, s->path);
+            t->snap_blob = pt_arena_dup(&t->a, s->blob);
+        }
+        if (t->a.oom)
+            pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
+        a->idle_sent = false;
+        return;
     }
 }
 
