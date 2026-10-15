@@ -8,6 +8,7 @@ are where the details live.
 |---|---|
 | [login.md](login.md) | `/login`: API keys, Sign in with ChatGPT (`openai-codex`), auth.json, token refresh |
 | [bash.md](bash.md) | Shell commands: background sessions, how the model is told they ended, `-p` waiting for them |
+| [input.md](input.md) | Sending while the agent works: Enter steers at the next turn boundary, Alt+Enter queues a follow-up |
 | [mcp.md](mcp.md) | MCP servers: config keys, trust, OAuth, prompts and resources, filled-in tool arguments |
 
 ## Writing a page
