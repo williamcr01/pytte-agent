@@ -911,6 +911,47 @@ static void test_approval(void)
     pty_free(&p);
 }
 
+/* Answer 4 runs the call and saves its rule to the user config; the rule
+ * applies at once, and /permissions lists it. */
+static void test_always_allow(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/tools.json", NULL};
+    char path[400], *cfg, *before;
+    size_t n, nb;
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    before = pt_sys_read_file(path, &nb);
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "go\r");
+    CHECK(wait_for(&p, "  › 1  yes", 3000));
+    CHECK(has(&p, "4  yes, and always allow bash(echo:*) (saved to the config)"));
+    keys(&p, "4");
+    CHECK(wait_for(&p, "saved the rule to permissions.allow of the user config", 3000));
+    CHECK(wait_for(&p, "✓ bash  echo hi-from-bash; echo second-line\n", 3000));
+    CHECK(wait_for(&p, "? bash  touch should-not-exist", 3000)); /* no rule covers it */
+    keys(&p, "\x1b[27u");
+    CHECK(wait_for(&p, "All done with tools.", 3000));
+    CHECK(wait_idle(&p, 3000));
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(cfg && strstr(cfg, "\"permissions\"") && strstr(cfg, "\"bash(echo:*)\""));
+    free(cfg);
+    keys(&p, "/permissions\r");
+    CHECK(wait_for(&p, "allow bash(echo:*) · user config", 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    unlink(path); /* the next tests start without the rule */
+    if (before) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            put(fd, before, nb);
+            close(fd);
+        }
+        free(before);
+    }
+}
+
 /* A long call is asked about whole, wrapped, up to ASK_LINES rows, the
  * last saying how many more there are; its row is cut, and says so. */
 static void test_long_approval(void)
@@ -1041,10 +1082,10 @@ static void test_commands(void)
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
     CHECK(wait_for(&p, "  › /model     set the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/17", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "enter run · esc close · 1/18", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "  › /quit", 1000));
-    CHECK(wait_for(&p, "17/17", 1000));
+    CHECK(wait_for(&p, "18/18", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");
@@ -1495,6 +1536,7 @@ int main(int argc, char **argv)
     RUN(test_interrupt_and_queue);
     RUN(test_steady_input);
     RUN(test_approval);
+    RUN(test_always_allow);
     RUN(test_long_approval);
     RUN(test_tool_rendering);
     RUN(test_short_paths);
