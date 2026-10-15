@@ -1,0 +1,17 @@
+{
+  "turns": [
+    {"content": [
+      {"type": "tool_call", "name": "write", "args": {"path": "a.txt", "content": "one\n"}},
+      {"type": "tool_call", "name": "write", "args": {"path": "b.txt", "content": "bee\n"}}
+    ]},
+    {"content": [{"type": "text", "text": "Two files."}]},
+    {"content": [
+      {"type": "tool_call", "name": "write", "args": {"path": "a.txt", "content": "two\n"}},
+      {"type": "tool_call", "name": "write", "args": {"path": "c.txt", "content": "sea\n"}}
+    ]},
+    {"content": [
+      {"type": "tool_call", "name": "edit", "args": {"path": "a.txt", "edits": [{"old": "two", "new": "three"}]}}
+    ]},
+    {"content": [{"type": "text", "text": "Changed them."}]}
+  ]
+}
