@@ -521,11 +521,25 @@ static bool interrupt(app *a)
     return true;
 }
 
-/* Answer the question: 0 yes, 1 yes and allow alike, 2 no. */
+/* Answer the question: 0 yes, 1 yes and allow alike this session, 2 no,
+ * 3 yes and save a rule to the user config. */
 static void answer(app *a, int choice)
 {
+    char rule[200], err[600];
     if (choice == 1 && !pt_rt_allow(a->s.rt, a->ask.view.name, pt_strz(a->ask.prefix)))
         app_out_z(a, TUI_RED, "out of memory: allowed this once only");
+    if (choice == 3) {
+        if (!app_ask_rule(a, rule, sizeof rule)) {
+            app_out_z(a, TUI_RED, "no rule fits this call: choose another answer");
+            return;
+        }
+        if (!pt_rt_rule_add(a->s.rt, false, pt_strz(rule), PT_RULE_USER))
+            app_out_z(a, TUI_RED, "out of memory: allowed this once only");
+        else if (!cli_perms_allow_save(pt_strz(rule), err, sizeof err))
+            app_out_z(a, TUI_RED, err); /* it still applies to this session */
+        else
+            app_out_z(a, TUI_DIM, "saved the rule to permissions.allow of the user config");
+    }
     if (!pt_approve(a->s.a, a->ask.view.task, choice != 2, PT_STR_NULL))
         app_out_z(a, TUI_RED, pt_error(a->s.a));
     a->ask.task = 0;
@@ -538,14 +552,14 @@ static bool ask_key(app *a, const tui_ev *ev)
     if (!app_asking(a))
         return false;
     if (ev->kind == TE_TEXT) {
-        if (ev->text.n == 1 && ev->text.p[0] >= '1' && ev->text.p[0] <= '3')
+        if (ev->text.n == 1 && ev->text.p[0] >= '1' && ev->text.p[0] <= '4')
             answer(a, ev->text.p[0] - '1');
         return true; /* typing waits for the answer */
     }
     if (ev->kind != TE_KEY || (ev->mods && ev->key != TK_ENTER))
         return false;
     if (ev->key == TK_UP || ev->key == TK_DOWN)
-        a->ask.sel = (a->ask.sel + (ev->key == TK_UP ? 2 : 1)) % 3;
+        a->ask.sel = (a->ask.sel + (ev->key == TK_UP ? 3 : 1)) % 4;
     else if (ev->key == TK_ENTER)
         answer(a, a->ask.sel);
     else if (ev->key == TK_ESC)

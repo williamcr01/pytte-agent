@@ -192,9 +192,24 @@ bool app_asking(app *a)
     return true;
 }
 
+bool app_ask_rule(const app *a, char *out, size_t cap)
+{
+    bool bash = pt_str_eqz(a->ask.view.name, "bash"), web = pt_str_eqz(a->ask.view.name, "web_fetch");
+    int n;
+    if ((bash || web) && !a->ask.prefix[0])
+        return false;
+    if (bash)
+        n = snprintf(out, cap, "bash(%s:*)", a->ask.prefix);
+    else if (web)
+        n = snprintf(out, cap, "web_fetch(%s)", a->ask.prefix);
+    else
+        n = snprintf(out, cap, "%.*s", (int)a->ask.view.name.n, a->ask.view.name.p);
+    return n > 0 && (size_t)n < cap;
+}
+
 static void ask_row(app *a, int i)
 {
-    char line[300];
+    char line[300], rule[200];
     pick(a, i == a->ask.sel);
     if (i == 0)
         snprintf(line, sizeof line, "1  yes");
@@ -203,8 +218,12 @@ static void ask_row(app *a, int i)
                  a->ask.view.name.p, a->ask.prefix);
     else if (i == 1)
         snprintf(line, sizeof line, "2  yes, and allow %.*s this session", (int)a->ask.view.name.n, a->ask.view.name.p);
-    else
+    else if (i == 2)
         snprintf(line, sizeof line, "3  no (esc)");
+    else if (app_ask_rule(a, rule, sizeof rule))
+        snprintf(line, sizeof line, "4  yes, and always allow %.150s (saved to the config)", rule);
+    else
+        snprintf(line, sizeof line, "4  always allow: no rule fits this call");
     pt_buf_putz(&a->tmp, line);
     row(a, pt_buf_str(&a->tmp));
 }
@@ -241,11 +260,11 @@ static void ask_call(app *a)
     a->ask.call_w = width(a);
 }
 
-/* The rows a question wants: a blank, the call, the three choices. */
+/* The rows a question wants: a blank, the call, the four choices. */
 static int ask_want(app *a)
 {
     ask_call(a);
-    return 4 + (a->ask.call_n < ASK_LINES ? a->ask.call_n : ASK_LINES);
+    return 5 + (a->ask.call_n < ASK_LINES ? a->ask.call_n : ASK_LINES);
 }
 
 /* The question in n rows: a blank row while there is room, the call
@@ -254,7 +273,7 @@ static int ask_want(app *a)
 static void ask_rows(app *a, int n)
 {
     pt_str all = pt_buf_str(&a->ask.call);
-    int i, choices = n - 1 < 3 ? n - 1 : 3, room = n - choices, total = a->ask.call_n, show;
+    int i, choices = n - 1 < 4 ? n - 1 : 4, room = n - choices, total = a->ask.call_n, show;
     size_t at = 0;
     if (room > (total < ASK_LINES ? total : ASK_LINES)) {
         blank_row(a);

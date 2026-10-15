@@ -146,6 +146,7 @@ static void add_mentions(app *a, pt_str q)
 }
 
 static const char *const mcp_subs[] = {"login", "logout", "restart", "trust", "untrust"};
+static const char *const perm_subs[] = {"trust", "untrust"};
 
 /* "/login api|oauth <provider> <key>": where the key (or the address a
  * login's browser ended on) starts, or 0. It is shown masked and never
@@ -330,6 +331,9 @@ void app_menu_update(app *a)
                     if (pt_str_starts(pt_strz(in[i].name), name))
                         add_item(a, in[i].name, strlen(in[i].name), in[i].target);
             }
+        } else if (pt_str_eqz(cmd, "permissions")) {
+            if (pt_str_find(arg, ' ') < 0)
+                add_list(a, perm_subs, sizeof perm_subs / sizeof perm_subs[0], arg);
         } else if (pt_str_eqz(cmd, "resume")) {
             session_list *list = get_sessions(a, !was_sessions);
             uint32_t i;

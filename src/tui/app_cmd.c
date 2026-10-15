@@ -23,6 +23,7 @@ const app_cmd_def app_cmds[] = {
     {"thinking", " [mode]", "how thinking is shown: hidden, full"},
     {"login", " [api|oauth] [provider] [key]", "save an API key, or sign in with a subscription"},
     {"mcp", " [login|logout|restart name] [trust|untrust]", "MCP servers: their state, logins, trust"},
+    {"permissions", " [trust|untrust]", "the allow and deny rules in force; trust a project's"},
     {"settings", "", "user settings (saved)"},
     {"help", "", "commands and keys"},
     {"quit", "", "exit; it prints how to continue"},
@@ -567,6 +568,85 @@ static const char *mcp_state_name(pt_mcp_state st)
     }
 }
 
+#define RULES_SHOWN 128
+
+/* How many of the project's allow rules wait for trust. */
+static uint32_t rules_untrusted(app *a, pt_rt_rule_info *in, uint32_t *n)
+{
+    uint32_t i, k = 0;
+    *n = a->open ? pt_rt_rules(a->s.rt, in, RULES_SHOWN) : 0;
+    if (*n > RULES_SHOWN)
+        *n = RULES_SHOWN;
+    for (i = 0; i < *n; i++)
+        k += !in[i].active;
+    return k;
+}
+
+void app_perms_note(app *a)
+{
+    pt_rt_rule_info in[RULES_SHOWN];
+    uint32_t n, k = rules_untrusted(a, in, &n);
+    char msg[300];
+    if (!k)
+        return;
+    snprintf(msg, sizeof msg,
+             "this project allows %u tool calls without asking in .pytte/config.json, but they do not apply until "
+             "trusted: /permissions lists them, /permissions trust applies them",
+             k);
+    app_out_z(a, TUI_DIM, msg);
+}
+
+/* /permissions: the rules in force and where each came from; trust and
+ * untrust for the project's allow rules. */
+static void cmd_permissions(app *a, pt_str arg)
+{
+    static const char *const src[] = {"this session", "user config", "project config"};
+    pt_rt_rule_info in[RULES_SHOWN];
+    char msg[900], err[700], cwd[4096];
+    uint32_t i, n, k;
+    arg = pt_str_trim(arg);
+    if (!a->open) {
+        app_out_z(a, TUI_DIM, "no session is open yet");
+        return;
+    }
+    if (pt_str_eqz(arg, "trust") || pt_str_eqz(arg, "untrust")) {
+        bool on = arg.p[0] == 't';
+        if (!getcwd(cwd, sizeof cwd) || !cli_perms_trust(cwd, on, err, sizeof err)) {
+            app_out_z(a, TUI_RED, getcwd(cwd, sizeof cwd) ? err : "cannot find the current directory");
+            return;
+        }
+        /* read the files again: what is trusted is what they say now */
+        if (!cli_perms_apply(a->s.rt, cwd)) {
+            app_out_z(a, TUI_RED, "out of memory loading the rules");
+            return;
+        }
+        app_out_z(a, TUI_DIM,
+                  on ? "trusted this project's allow rules: they apply now"
+                     : "no longer trusting this project's allow rules: they do not apply");
+        return;
+    }
+    if (arg.n) {
+        app_out_z(a, TUI_RED, "/permissions [trust|untrust]");
+        return;
+    }
+    k = rules_untrusted(a, in, &n);
+    snprintf(msg, sizeof msg, "mode %s (%s) · a deny rule beats an allow rule, both beat the mode; read-only stays read-only",
+             a->cfg->val[CFG_PERMS], a->cfg->src[CFG_PERMS]);
+    app_out_z(a, TUI_DIM, msg);
+    if (!n) {
+        app_out_z(a, TUI_DIM, "no rules: add permissions.allow and permissions.deny to ~/.config/pytte/config.json "
+                              "or .pytte/config.json");
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        snprintf(msg, sizeof msg, "%s %.*s · %s%s", in[i].deny ? "deny " : "allow", (int)(in[i].spec.n > 600 ? 600 : in[i].spec.n),
+                 in[i].spec.p, src[in[i].src], in[i].active ? "" : " · not trusted, ignored");
+        app_out_z(a, in[i].deny ? TUI_RED : TUI_DIM, msg);
+    }
+    if (k)
+        app_out_z(a, TUI_DIM, "/permissions trust applies this project's allow rules (they allow calls without asking)");
+}
+
 static void cmd_mcp(app *a, pt_str arg)
 {
     pt_rt_mcp_info in[CLI_MCP_MAX];
@@ -835,6 +915,8 @@ void app_run_command(app *a, pt_str line)
         cmd_login(a, arg);
     } else if (pt_str_eqz(cmd, "mcp")) {
         cmd_mcp(a, arg);
+    } else if (pt_str_eqz(cmd, "permissions")) {
+        cmd_permissions(a, arg);
     } else if (pt_str_eqz(cmd, "help")) {
         cmd_help(a);
     } else if (pt_str_eqz(cmd, "quit") || pt_str_eqz(cmd, "exit")) {

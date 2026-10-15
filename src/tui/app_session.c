@@ -224,6 +224,7 @@ void app_finish_session(app *a)
     }
     a->open = true;
     a->sess.fallback[0] = 0;
+    app_perms_note(a);
     {
         char name[CLI_NAME_MAX + 1], dir[4096];
         pt_str cwd = pt_session_cwd(a->s.a);
