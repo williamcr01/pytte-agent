@@ -91,6 +91,7 @@ void app_close_session(app *a)
         return;
     while (a->queue.xs) /* the runtime goes: their answers never come */
         app_xreq_drop(a, a->queue.xs);
+    app_rewind_drop(a); /* it borrowed the runtime */
     empty = !a->sess.keep_on_quit && app_session_empty(a);
     app_save_draft(a);
     if (pt_fatal(a->s.a) == PT_FATAL_STORAGE)
@@ -206,6 +207,7 @@ void app_finish_session(app *a)
         return;
     a->sess.opening = NULL;
     if (rc) {
+        pt_buf_reset(&a->rw.text);
         app_group_close(a);
         app_out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
         a->pace.urgent = true;
@@ -273,6 +275,10 @@ void app_finish_session(app *a)
         }
     }
     free(text);
+    if (a->rw.text.n) { /* a rewind's fork: the message is back to be sent again */
+        tui_input_set(&a->in, pt_buf_str(&a->rw.text));
+        pt_buf_reset(&a->rw.text);
+    }
     app_set_config(a);
     app_out_tail(a);
     if (cli_session_note(&a->s)[0])

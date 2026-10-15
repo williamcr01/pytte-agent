@@ -162,6 +162,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     pt_buf_init(&a->menu.buf, pt_sys_allocator());
     pt_buf_init(&a->hist.pending, pt_sys_allocator());
     pt_buf_init(&a->command, pt_sys_allocator());
+    pt_buf_init(&a->rw.text, pt_sys_allocator());
     pt_arena_init(&a->ar, pt_sys_allocator(), 0);
     if (!tui_term_start(a->t, !term || (strncmp(term, "linux", 5) != 0 && strncmp(term, "vt", 2) != 0))) {
         startup_free(a);
@@ -275,6 +276,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
             }
         }
         a->run.active = a->open && !pt_idle(a->s.a) && !pt_fatal(a->s.a);
+        app_rewind_poll(a);
         if (a->run.active != was) {
             set_dirty(a);
             if (a->run.active) {
@@ -414,6 +416,8 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     pt_buf_free(&a->menu.buf);
     pt_buf_free(&a->hist.pending);
     pt_buf_free(&a->command);
+    pt_buf_free(&a->rw.text);
+    app_rewind_drop(a);
     {
         uint32_t i;
         for (i = 0; i < a->queue.cap; i++) {

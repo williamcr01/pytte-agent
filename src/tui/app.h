@@ -253,9 +253,23 @@ typedef struct app_menu {
     int set_sel;         /* the selection in the settings menu */
     bool of_mentions;    /* it lists @-mentions */
     bool of_sessions;    /* ...sessions (/resume) */
+    bool of_rewind;      /* ...user messages (/rewind) */
     bool of_skills;      /* ...skills (read when it opens) */
     session_list *sessions;
 } app_menu;
+
+/* /rewind (section 8.6): the files being put back, and the fork that
+ * follows. The scan of the log lives while the menu lists its messages. */
+typedef struct app_rewind {
+    pt_rt_rewind *scan;
+    bool active;        /* the core's rewind task runs */
+    bool ended, failed; /* PT_E_REWIND arrived (seen between steps) */
+    char err[600];
+    uint32_t nfiles;
+    bool fork;          /* when it ends, continue in a fork before the message */
+    uint64_t keep;      /* ...whose log is this long */
+    pt_buf text;        /* the message, for the fork's input box */
+} app_rewind;
 
 /* When to paint, and double presses. */
 typedef struct app_pace {
@@ -308,6 +322,7 @@ typedef struct app {
     app_queue queue;
     app_menu menu;
     app_pace pace;
+    app_rewind rw;
     bool quit;
     int code;
 } app;
@@ -355,6 +370,7 @@ void app_paint(app *a);
 int app_find_setting(pt_str name);
 bool app_menu_takes_arg(pt_str cmd);
 pt_str app_item_label(const app *a, int i);
+void app_menu_add(app *a, const char *label, size_t ln, pt_str desc, size_t dn);
 const pt_rt_mcp_prompt *app_find_prompt(app *a, pt_str cmd);
 size_t app_secret_at(pt_str d);
 void app_menu_update(app *a);
@@ -375,6 +391,11 @@ void app_mcp_note(void *ud, const char *server, const char *msg);
 void app_show_notes(app *a);
 void app_run_command(app *a, pt_str line);
 bool app_mcp_known(app *a, pt_str name);
+/* /rewind: the menu's messages (a fresh scan when refresh), the end of a
+ * rewind seen between steps, and Esc Esc on an empty draft. */
+void app_rewind_messages(app *a, pt_str q, bool refresh);
+void app_rewind_poll(app *a);
+void app_rewind_drop(app *a);
 
 /* app_session.c: opening, switching and closing sessions; drafts, history, the pager */
 void app_save_draft(app *a);
