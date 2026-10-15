@@ -94,6 +94,8 @@ static bool load_file(cli_config *c, const char *path, const char *src, char *wa
                 }
             }
         }
+        if (!warn[0])
+            cli_perms_check(j, path, warn, cap);
         if (strcmp(src, "user") == 0)
             cli_catalog_load(pt_json_get(j, "providers"), path, warn, cap);
         else if (pt_json_get(j, "providers") && !warn[0])

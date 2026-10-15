@@ -172,6 +172,29 @@ void cli_open_url(const char *url);
  * in the browser (xdg-open, open), lines for the user through notify. */
 void cli_mcp_host(pt_rt_mcp_host *h, void (*notify)(void *ud, const char *server, const char *msg), void *ud);
 
+/* ---- perm_cfg.c: permission rules (section 15.5) ----
+ * "permissions": {"allow": [...], "deny": [...]} in the user's config.json
+ * and in a project's .pytte/config.json. A project's deny rules apply at
+ * once; its allow rules once trusted (trust.json, a hash of the list, so
+ * any change asks again). */
+
+/* Load the rules of the user file and of the project in cwd into rt,
+ * replacing those loaded before, and set whether the project's allow rules
+ * are trusted. False when out of memory. */
+bool cli_perms_apply(pt_rt *rt, const char *cwd);
+/* Trust (on) or stop trusting the project's allow rules as they are now. */
+bool cli_perms_trust(const char *cwd, bool on, char *err, size_t cap);
+/* Add a rule to permissions.allow of the user's config.json, keeping every
+ * other key (once; a rule already there is not added again). */
+bool cli_perms_allow_save(pt_str spec, char *err, size_t cap);
+/* Whether the "permissions" of a parsed config file hold only rules; false
+ * with the first problem in warn. */
+bool cli_perms_check(const pt_json *root, const char *path, char *warn, size_t cap);
+/* A member of a JSON file such as trust.json, as text (strings unquoted);
+ * and replacing it (empty raw: removing it), keeping the others, atomically. */
+bool cli_file_get(const char *path, const char *key, pt_buf *out);
+bool cli_file_put(const char *path, const char *key, pt_str raw, char *err, size_t cap);
+
 /* ---- session.c: opening sessions ---- */
 
 typedef struct cli_opts {

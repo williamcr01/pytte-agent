@@ -301,7 +301,7 @@ void cli_mcp_auth_path(char *out, size_t cap)
 }
 
 /* The member key of a JSON file (an object of objects or strings), raw. */
-static bool file_get(const char *path, const char *key, pt_buf *out)
+bool cli_file_get(const char *path, const char *key, pt_buf *out)
 {
     size_t n;
     char *text = pt_sys_read_file(path, &n);
@@ -325,7 +325,7 @@ static bool file_get(const char *path, const char *key, pt_buf *out)
 }
 
 /* Set member key (raw JSON; empty: remove it), keeping the others. */
-static bool file_put(const char *path, const char *key, pt_str raw, char *err, size_t cap)
+bool cli_file_put(const char *path, const char *key, pt_str raw, char *err, size_t cap)
 {
     size_t n = 0;
     char *text = pt_sys_read_file(path, &n), dir[4096], *slash;
@@ -423,7 +423,7 @@ void cli_mcp_load(cli_mcp *m, const char *cwd)
         m->hash[64] = 0;
         cli_trust_path(trust, sizeof trust);
         pt_buf_init(&have, pt_sys_allocator());
-        m->trusted = file_get(trust, m->project, &have) && pt_str_eqz(pt_buf_str(&have), m->hash);
+        m->trusted = cli_file_get(trust, m->project, &have) && pt_str_eqz(pt_buf_str(&have), m->hash);
         pt_buf_free(&have);
         for (e = s1 ? s1->child : NULL; e; e = e->next)
             if (parse_server(m, e, proj1, m->project, &s, &tmp) && !add(m, &s, ".mcp.json", m->trusted))
@@ -457,7 +457,7 @@ bool cli_mcp_trust(const cli_mcp *m, bool on, char *err, size_t cap)
     pt_buf_init(&v, pt_sys_allocator());
     if (on)
         pt_json_quote(&v, pt_strz(m->hash));
-    ok = file_put(path, m->project, pt_buf_str(&v), err, cap);
+    ok = cli_file_put(path, m->project, pt_buf_str(&v), err, cap);
     pt_buf_free(&v);
     return ok;
 }
@@ -475,7 +475,7 @@ static bool auth_load(void *ud, const char *server, const char *url, pt_buf *out
     (void)ud;
     (void)server;
     cli_mcp_auth_path(path, sizeof path);
-    return file_get(path, url, out);
+    return cli_file_get(path, url, out);
 }
 
 static void auth_save(void *ud, const char *server, const char *url, pt_str json)
@@ -484,7 +484,7 @@ static void auth_save(void *ud, const char *server, const char *url, pt_str json
     (void)ud;
     (void)server;
     cli_mcp_auth_path(path, sizeof path);
-    file_put(path, url, json, err, sizeof err);
+    cli_file_put(path, url, json, err, sizeof err);
 }
 
 void cli_open_url(const char *url)
