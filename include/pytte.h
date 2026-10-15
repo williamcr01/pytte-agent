@@ -207,10 +207,22 @@ bool pt_closed(const pt_agent *a);
 
 /* ---- work ----------------------------------------------------------------------- */
 
+/* An image attached to a user input: its bytes are a stored blob (the
+ * host wrote it first), shown to the model after the text. */
+typedef struct pt_input_image {
+    pt_str blob; /* "sha256:<hex>", durable before the submit */
+    pt_str mime;
+    pt_str name; /* what the user sees: a file name */
+} pt_input_image;
+
+#define PT_INPUT_IMAGES 8 /* at most this many to an input */
+
 typedef struct pt_input {
     pt_str text;
     pt_str req; /* optional request ID: submitting it twice is a no-op */
     bool note;  /* pytte wrote it, not the user: its entry says "from":"pytte" */
+    const pt_input_image *images; /* copied; the text names them as "[image N: name]" */
+    uint32_t nimages;
 } pt_input;
 
 bool pt_submit(pt_agent *a, const pt_input *in);

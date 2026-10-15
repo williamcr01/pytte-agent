@@ -509,6 +509,48 @@ static void test_big_prompt(void)
     pt_buf_free(&got);
 }
 
+/* Images attached to an input: the input record and the user entry hold
+ * the blob refs, the context has one message each after the text, and a
+ * reload reads the bytes back. */
+static void test_input_images(void)
+{
+    host h;
+    pt_input in;
+    pt_input_image im[2];
+    pt_buf want, got;
+    h_init(&h, hello);
+    pt_buf_init(&want, T_AL);
+    pt_buf_init(&got, T_AL);
+    h_create(&h);
+    pt_buf_putz(&h.blob, "abcd");
+    strcpy(h.blob_ref, "sha256:0123");
+    memset(im, 0, sizeof im);
+    im[0].blob = im[1].blob = pt_strz(h.blob_ref);
+    im[0].mime = im[1].mime = PT_S("image/png");
+    im[0].name = PT_S("a.png");
+    im[1].name = PT_S("b \"q\".png");
+    memset(&in, 0, sizeof in);
+    in.text = PT_S("look [image 1: a.png] [image 2: b.png]");
+    in.images = im;
+    in.nimages = 2;
+    CHECK(pt_submit(h.a, &in));
+    in.nimages = PT_INPUT_IMAGES + 1;
+    CHECK(!pt_submit(h.a, &in));
+    h_run(&h);
+    CHECK(h.done == 1);
+    CHECK(has(pt_buf_str(&h.log), PT_S("\"images\":[{\"blob\":\"sha256:0123\",\"mime\":\"image/png\",\"name\":\"a.png\"}")));
+    CHECK(!has(pt_buf_str(&h.log), PT_S("YWJjZA"))); /* the bytes stay in the blob */
+    transcript(h.a, &want);
+    CHECK(h_reload(&h) == PT_LOAD_OK);
+    transcript(h.a, &got);
+    CHECK_SAME(pt_buf_str(&got), pt_buf_str(&want));
+    pt_buf_reset(&h.blob); /* gone: the log cannot be read */
+    CHECK(h_reload(&h) == PT_LOAD_CORRUPT);
+    pt_buf_free(&want);
+    pt_buf_free(&got);
+    h_free(&h);
+}
+
 /* max_tokens comes from the same estimate as the compaction check: the
  * provider's count for the last answer, not a guess from the bytes (text
  * of about 3.8 bytes a token would make a bytes/3 guess too high, and the
@@ -1038,6 +1080,7 @@ int main(void)
     RUN(test_torn_tail);
     RUN(test_retry);
     RUN(test_big_prompt);
+    RUN(test_input_images);
     RUN(test_epoch_materials);
     RUN(test_provisional_epoch);
     RUN(test_max_tokens_estimate);

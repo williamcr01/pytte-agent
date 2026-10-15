@@ -155,8 +155,16 @@ static bool build_any(const pt_ai_target *t, const pt_ai_context *ctx, const pt_
             pt_jw_key(&w, "type");
             pt_jw_strz(&w, "input_text");
             pt_jw_key(&w, "text");
-            pt_jw_str(&w, m->text);
+            pt_jw_str(&w, pt_ai_result_text(t, m, a)); /* an attached image's label, and a note when not sent */
             pt_jw_obj_end(&w);
+            if (pt_ai_sends_image(t, m)) {
+                pt_jw_obj(&w);
+                pt_jw_key(&w, "type");
+                pt_jw_strz(&w, "input_image");
+                pt_jw_key(&w, "image_url");
+                pt_ai_image_url(&w, m, a);
+                pt_jw_obj_end(&w);
+            }
             pt_jw_arr_end(&w);
             pt_jw_obj_end(&w);
             break;

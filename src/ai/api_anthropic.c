@@ -206,7 +206,22 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
                 pt_jw_key(&w, "type");
                 pt_jw_strz(&w, "text");
                 pt_jw_key(&w, "text");
-                pt_jw_str(&w, m->text);
+                pt_jw_str(&w, pt_ai_result_text(t, m, a)); /* an attached image's label, and a note when not sent */
+                if (pt_ai_sends_image(t, m)) {
+                    pt_jw_obj_end(&w);
+                    pt_jw_obj(&w);
+                    pt_jw_key(&w, "type");
+                    pt_jw_strz(&w, "image");
+                    pt_jw_key(&w, "source");
+                    pt_jw_obj(&w);
+                    pt_jw_key(&w, "type");
+                    pt_jw_strz(&w, "base64");
+                    pt_jw_key(&w, "media_type");
+                    pt_jw_str(&w, m->image_mime);
+                    pt_jw_key(&w, "data");
+                    pt_jw_base64(&w, NULL, m->image);
+                    pt_jw_obj_end(&w);
+                }
             } else {
                 pt_jw_key(&w, "type");
                 pt_jw_strz(&w, "tool_result");
