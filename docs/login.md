@@ -15,14 +15,14 @@ when set), created with mode 0600, by provider:
 ```json
 {
   "anthropic": {"key": "sk-ant-..."},
-  "exa": {"key": "..."},
+  "search:exa": {"key": "..."},
   "openai-codex": {"access": "eyJ...", "refresh": "...", "expires": 1760000000000, "account_id": "..."}
 }
 ```
 
 | Member | Meaning |
 |---|---|
-| `key` | an API key saved by `/login api`, or a search key saved by `/login search` (under `exa` or `parallel`) |
+| `key` | an API key saved by `/login api`, or a search key saved by `/login search` (under `search:exa` or `search:parallel`, so a provider named `exa` does not share the key) |
 | `access` | a login's access token (sent as a bearer token) |
 | `refresh` | the token that gets a new access token |
 | `expires` | when the access token expires, in milliseconds since the epoch |

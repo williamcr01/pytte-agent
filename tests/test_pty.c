@@ -1195,7 +1195,7 @@ static void test_login_search(void)
     CHECK(wait_for(&p, "Turn on web_search and web_fetch? (y/n)", 1000));
     snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
-    CHECK(cfg && strstr(cfg, "\"exa\": {\n    \"key\": \"exa-secret-1\"\n  }"));
+    CHECK(cfg && strstr(cfg, "\"search:exa\": {\n    \"key\": \"exa-secret-1\"\n  }"));
     free(cfg);
     snprintf(path, sizeof path, "%s/pytte/history", state_dir);
     cfg = pt_sys_read_file(path, &n);

@@ -509,7 +509,7 @@ static void search_status(app *a)
     for (i = 0; i < 2; i++) {
         const char *env = cli_search_env(cli_search_backends[i]);
         snprintf(msg, sizeof msg, "%s: %s%s", cli_search_backends[i],
-                 getenv(env) && *getenv(env) ? "from " : cli_auth_key(cli_search_backends[i]) ? "saved in auth.json" : "no key",
+                 getenv(env) && *getenv(env) ? "from " : cli_search_saved(cli_search_backends[i]) ? "saved in auth.json" : "no key",
                  getenv(env) && *getenv(env) ? env : "");
         app_out_z(a, TUI_DIM, msg);
     }
@@ -557,7 +557,7 @@ static void login_search(app *a, pt_str name, pt_str key)
         app_out_z(a, TUI_RED, "not an API key: it has spaces or control characters");
         return;
     }
-    if (!cli_auth_save(backend, key, err, sizeof err)) {
+    if (!cli_search_save(backend, key, err, sizeof err)) {
         app_out_z(a, TUI_RED, err);
         return;
     }

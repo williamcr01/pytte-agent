@@ -95,13 +95,17 @@ const char *cli_auth_key(const char *provider);
  * this process could not take it. */
 bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap);
 
-/* Search API keys (/login search) are kept like provider keys, under the
- * backend's name ("exa", "parallel"). */
+/* Search API keys (/login search) are kept like provider keys, under
+ * "search:exa" or "search:parallel" in auth.json, so no provider's id
+ * can be the same member. */
 extern const char *const cli_search_backends[2];
 /* The environment variable that holds a backend's key (EXA_API_KEY). */
 const char *cli_search_env(const char *backend);
 /* The backend's key into out: its environment variable first, then
  * auth.json. False when there is none. Also pt_rt_cfg.search_key. */
+/* The backend's saved key (not the environment's), or NULL; and saving one. */
+const char *cli_search_saved(const char *backend);
+bool cli_search_save(const char *backend, pt_str key, char *err, size_t cap);
 bool cli_search_key(void *ud, const char *backend, char *out, size_t cap);
 
 /* Subscription logins (/login oauth) live in auth.json too, by provider:
