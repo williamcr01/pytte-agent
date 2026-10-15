@@ -742,33 +742,54 @@ static pt_str error_message(app *a, pt_str raw)
 
 /* A user entry pytte wrote (a note that background commands ended). The
  * key cannot come from the text: quotes in a JSON string are escaped. */
-/* Where the resources an @-mention added start: blocks to the end of the
- * text, each "\n\n<resource server=\"s\" uri=\"u\">\n...\n</resource>";
- * text.n when there are none. */
+/* The blocks a mention adds after the text, each closed on a line of its
+ * own: an MCP resource, a file, a directory. */
+static const struct {
+    const char *head, *tail;
+} blocks[] = {
+    {"\n\n<resource server=\"", "\n</resource>"},
+    {"\n\n<file path=\"", "\n</file>"},
+    {"\n\n<directory path=\"", "\n</directory>"},
+};
+
+/* The kind of block that starts at at, or -1. */
+static int block_at(pt_str text, size_t at)
+{
+    size_t i;
+    for (i = 0; i < sizeof blocks / sizeof blocks[0]; i++) {
+        size_t n = strlen(blocks[i].head);
+        if (at + n <= text.n && memcmp(text.p + at, blocks[i].head, n) == 0)
+            return (int)i;
+    }
+    return -1;
+}
+
+/* Where the block of kind b at at ends, after its tail (a tail ends a
+ * block when the text ends there or another block follows); 0 if it
+ * does not end. */
+static size_t block_end(pt_str text, size_t at, int b)
+{
+    size_t tn = strlen(blocks[b].tail), e;
+    for (e = at + strlen(blocks[b].head); e + tn <= text.n; e++)
+        if (memcmp(text.p + e, blocks[b].tail, tn) == 0 && (e + tn == text.n || block_at(text, e + tn) >= 0))
+            return e + tn;
+    return 0;
+}
+
+/* Where the blocks a mention added start: they run to the end of the
+ * text; text.n when there are none. */
 static size_t resources_at(pt_str text)
 {
-    static const char head[] = "\n\n<resource server=\"", tail[] = "\n</resource>";
     size_t at;
-    for (at = 0; at + sizeof head - 1 <= text.n; at++) {
-        size_t k = at;
-        if (memcmp(text.p + at, head, sizeof head - 1) != 0)
+    for (at = 0; at < text.n; at++) {
+        size_t k = at, end;
+        int b;
+        if (block_at(text, at) < 0)
             continue;
-        for (;;) { /* blocks, one after another, to the end */
-            size_t e;
-            if (k == text.n)
-                return at;
-            if (k + sizeof head - 1 > text.n || memcmp(text.p + k, head, sizeof head - 1) != 0)
-                break;
-            for (e = k + sizeof head - 1; e + sizeof tail - 1 <= text.n; e++)
-                if (!memcmp(text.p + e, tail, sizeof tail - 1) &&
-                    (e + sizeof tail - 1 == text.n ||
-                     (e + sizeof tail - 1 + sizeof head - 1 <= text.n &&
-                      !memcmp(text.p + e + sizeof tail - 1, head, sizeof head - 1))))
-                    break;
-            if (e + sizeof tail - 1 > text.n)
-                break;
-            k = e + sizeof tail - 1;
-        }
+        while ((b = block_at(text, k)) >= 0 && (end = block_end(text, k, b)) != 0)
+            k = end;
+        if (k == text.n)
+            return at;
     }
     return text.n;
 }
@@ -831,20 +852,22 @@ void app_out_entry(app *a, pt_buf *out, const pt_entry_view *v, bool full)
         if (res)
             app_out_text(a, out, TUI_BOLD, mark, ACCENT | TUI_BOLD, (pt_str){text.p, res}, MARGIN);
         while (res < text.n) { /* an @-mention's contents: just which */
-            const char *p = text.p + res + 20, *end = text.p + text.n, *q, *u, *close;
-            for (q = p; q < end && *q != '"'; q++)
+            int b = block_at(text, res);
+            size_t end = block_end(text, res, b), at = res + strlen(blocks[b].head), q, u, close;
+            for (q = at; q < end && text.p[q] != '"'; q++)
                 ;
-            u = q + 7 < end ? q + 7 : end; /* after ` uri="` */
-            for (close = u; close < end && *close != '"'; close++)
-                ;
-            snprintf(line, sizeof line, "resource %.*s:%.*s", (int)(q - p > 40 ? 40 : q - p), p,
-                     (int)(close - u > 70 ? 70 : close - u), u);
-            app_out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
-            {
-                pt_str rest = {text.p + res + 2, text.n - res - 2};
-                size_t nx = resources_at(rest);
-                res = nx == rest.n ? text.n : res + 2 + nx;
+            if (b == 0) { /* the server, then ` uri="` and the uri */
+                u = q + 7 < end ? q + 7 : end;
+                for (close = u; close < end && text.p[close] != '"'; close++)
+                    ;
+                snprintf(line, sizeof line, "resource %.*s:%.*s", (int)(q - at > 40 ? 40 : q - at), text.p + at,
+                         (int)(close - u > 70 ? 70 : close - u), text.p + u);
+            } else {
+                snprintf(line, sizeof line, "%s %.*s", b == 1 ? "file" : "directory", (int)(q - at > 110 ? 110 : q - at),
+                         text.p + at);
             }
+            app_out_text(a, out, TUI_DIM, mark, ACCENT, pt_strz(line), MARGIN);
+            res = end;
         }
     } else if (strcmp(v->kind, "assistant") == 0) {
         bool any = false;

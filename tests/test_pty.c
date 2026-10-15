@@ -1450,6 +1450,102 @@ static void test_mcp(void)
     CHECK(chdir("..") == 0);
 }
 
+/* @path mentions and image attachments: the menu, Tab on a directory,
+ * what is sent, a pasted image path, and Ctrl-V with a fake wl-paste. */
+static void test_attachments(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "../tests/faux/attach.json", NULL};
+    static const unsigned char png[] = {
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+        0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+        0x42, 0x60, 0x82};
+    char cwd[4096], paste[4400], script[4400], *oldpath, newpath[8800], *log;
+    size_t n;
+    CHECK(mkdir("attproj", 0700) == 0 || errno == EEXIST);
+    CHECK(mkdir("attproj/sub", 0700) == 0 || errno == EEXIST);
+    CHECK(mkdir("attproj/bin", 0700) == 0 || errno == EEXIST);
+    CHECK(pt_sys_write_file("attproj/hello.txt", "garden notes\n", 13));
+    CHECK(pt_sys_write_file("attproj/sub/inner.txt", "inner\n", 6));
+    CHECK(pt_sys_write_file("attproj/secret.txt", "hidden\n", 7));
+    CHECK(pt_sys_write_file("attproj/.gitignore", "secret.txt\n", 11));
+    CHECK(pt_sys_write_file("attproj/pic.png", (const char *)png, sizeof png));
+    CHECK(pt_sys_write_file("attproj/not.png", "just text\n", 10));
+    CHECK(chdir("attproj") == 0 && getcwd(cwd, sizeof cwd));
+    /* the clipboard tool: prints the picture, as wl-paste does */
+    snprintf(script, sizeof script, "#!/bin/sh\ncat %s/pic.png\n", cwd);
+    CHECK(pt_sys_write_file("bin/wl-paste", script, strlen(script)));
+    CHECK(chmod("bin/wl-paste", 0700) == 0);
+    oldpath = getenv("PATH") ? strdup(getenv("PATH")) : strdup("/usr/bin:/bin");
+    snprintf(newpath, sizeof newpath, "%s/bin:%s", cwd, oldpath);
+    setenv("PATH", newpath, 1);
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    /* a file, from the menu: ignored files are not listed */
+    keys(&p, "read @");
+    CHECK(wait_for(&p, "    @hello.txt", 2000));
+    CHECK(!has(&p, "@secret.txt") && !has(&p, "@sub/inner.txt")); /* ignored; and only this directory's */
+    keys(&p, "he");
+    CHECK(wait_for(&p, "  › @hello.txt", 1000) && !has(&p, "@sub/"));
+    keys(&p, "\x15"); /* Ctrl-U: back to the start of the line */
+    keys(&p, "see @su");
+    CHECK(wait_for(&p, "  › @sub/", 2000));
+    keys(&p, "\t"); /* a directory is completed, not closed: its entries follow */
+    CHECK(wait_for(&p, "› see @sub/\n", 1000));
+    CHECK(wait_for(&p, "  › @sub/inner.txt", 1000));
+    keys(&p, "\r"); /* picks the file; the message goes on */
+    CHECK(wait_for(&p, "› see @sub/inner.txt \n", 1000));
+    keys(&p, "and @hello.txt and @nope.txt\r");
+    CHECK(wait_for(&p, "› see @sub/inner.txt and @hello.txt and @nope.txt\n› file sub/inner.txt\n› file hello.txt", 3000));
+    CHECK(wait_for(&p, "Hello from the faux", 3000));
+    CHECK(!has(&p, "garden notes")); /* the model's to read */
+    CHECK(wait_idle(&p, 3000));
+    /* a directory */
+    keys(&p, "list @sub \r");
+    CHECK(wait_for(&p, "› list @sub\n› directory sub", 3000));
+    CHECK(wait_for(&p, "Second answer from faux", 3000));
+    CHECK(wait_idle(&p, 3000));
+    /* a dropped image path: a label in the draft */
+    snprintf(paste, sizeof paste, "\x1b[200~'%s/pic.png'\x1b[201~", cwd);
+    keys(&p, "what is ");
+    keys(&p, paste);
+    CHECK(wait_for(&p, "› what is [image 1: pic.png] \n", 1000));
+    keys(&p, "\x1b[118;5u"); /* Ctrl-V, kitty style: the clipboard's image */
+    CHECK(wait_for(&p, "› what is [image 1: pic.png] [image 2: clipboard.png] \n", 2000));
+    snprintf(paste, sizeof paste, "\x1b[200~%s/not.png\x1b[201~", cwd);
+    keys(&p, paste); /* text in disguise stays text */
+    CHECK(wait_for(&p, "not.png", 1000));
+    keys(&p, "\x15");
+    keys(&p, "\x1b[200~\x1b[201~"); /* an empty paste (a terminal with an image only): the clipboard too */
+    CHECK(wait_for(&p, "› [image 1: clipboard.png] \n", 2000));
+    keys(&p, "\x15");
+    snprintf(paste, sizeof paste, "\x1b[200~%s/pic.png\x1b[201~", cwd);
+    keys(&p, "what is ");
+    keys(&p, paste);
+    CHECK(wait_for(&p, "› what is [image 1: pic.png] \n", 1000));
+    keys(&p, "this?\r");
+    CHECK(wait_for(&p, "› what is [image 1: pic.png] this?", 3000));
+    CHECK(wait_for(&p, "Third answer from faux", 3000));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 5000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    log = last_log(&n);
+    CHECK(log && strstr(log, "<file path=\\\"sub/inner.txt\\\">\\ninner\\n</file>"));
+    CHECK(log && strstr(log, "<file path=\\\"hello.txt\\\">\\ngarden notes\\n</file>"));
+    CHECK(log && strstr(log, "and @nope.txt")); /* plain text, as sent */
+    CHECK(log && strstr(log, "<directory path=\\\"sub\\\">\\ninner.txt\\n</directory>"));
+    CHECK(log && strstr(log, "\"images\":[{\"blob\":\"sha256:"));
+    CHECK(log && strstr(log, "\"mime\":\"image/png\",\"name\":\"pic.png\"}]"));
+    free(log);
+    setenv("PATH", oldpath, 1);
+    free(oldpath);
+    CHECK(chdir("..") == 0);
+}
+
 int main(int argc, char **argv)
 {
     char tmpl[] = "/tmp/pytte-pty-XXXXXX";
@@ -1510,6 +1606,7 @@ int main(int argc, char **argv)
     RUN(test_early_input);
     RUN(test_blocked_settings);
     RUN(test_mcp);
+    RUN(test_attachments);
     snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
     if (!t_failed && system(cmd) != 0)
         fprintf(stderr, "cannot remove %s\n", dir);

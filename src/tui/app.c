@@ -110,6 +110,7 @@ static void startup_free(app *a)
     }
     pt_buf_free(&a->group.buf);
     pt_buf_free(&a->menu.buf);
+    pt_buf_free(&a->menu.paths);
     pt_buf_free(&a->hist.pending);
     pt_buf_free(&a->command);
     pt_arena_free(&a->ar);
@@ -160,6 +161,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     }
     pt_buf_init(&a->group.buf, pt_sys_allocator());
     pt_buf_init(&a->menu.buf, pt_sys_allocator());
+    pt_buf_init(&a->menu.paths, pt_sys_allocator());
     pt_buf_init(&a->hist.pending, pt_sys_allocator());
     pt_buf_init(&a->command, pt_sys_allocator());
     pt_arena_init(&a->ar, pt_sys_allocator(), 0);
@@ -412,6 +414,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     }
     pt_buf_free(&a->group.buf);
     pt_buf_free(&a->menu.buf);
+    pt_buf_free(&a->menu.paths);
     pt_buf_free(&a->hist.pending);
     pt_buf_free(&a->command);
     {

@@ -106,9 +106,18 @@ typedef struct run_call {
     bool open;      /* and one more is under way */
 } run_call;
 
-/* An input that names an MCP prompt (/server:prompt) or resources
- * (@server:uri) waits for them, then goes as the text they make. */
-#define XPARTS 9 /* the prompt, and up to 8 resources */
+/* An image attached to the draft: its bytes are a stored blob. The draft
+ * shows it as "[image N: name]"; the label is what holds it there. */
+typedef struct attach {
+    char ref[72];
+    const char *mime; /* static */
+    char name[48];
+} attach;
+
+/* An input that names an MCP prompt (/server:prompt), resources
+ * (@server:uri) or files (@path) waits for them, then goes as the text
+ * they make. */
+#define XPARTS 9 /* the prompt, and up to 8 mentions */
 
 typedef struct queued_input {
     pt_buf text;
@@ -118,7 +127,9 @@ typedef struct queued_input {
     bool failed, prompt; /* prompt: parts[0] is the prompt's text */
     char err[300];
     pt_buf parts[XPARTS];
-    pt_buf names; /* "server\turi\n" of each resource part */
+    pt_buf names; /* "server\turi\n" of each resource part; "\tpath\n" of a file's (its part is the whole block) */
+    attach att[PT_INPUT_IMAGES]; /* the images it carries, as numbered in its text */
+    uint32_t natt;
 } queued_input;
 
 /* A fetch on its way: its answer goes to the queued input of id. */
@@ -250,12 +261,19 @@ typedef struct app_menu {
     int n, sel, label_w; /* label_w: the widest label shown, for the column */
     int top;             /* the first row of the menu's window */
     pt_buf buf;          /* the items' labels and descriptions */
+    pt_buf paths;        /* the paths under cwd, a line each, while an @-menu is open */
     int set_sel;         /* the selection in the settings menu */
-    bool of_mentions;    /* it lists @-mentions */
+    bool of_mentions;    /* it lists @-mentions: resources, then paths */
     bool of_sessions;    /* ...sessions (/resume) */
     bool of_skills;      /* ...skills (read when it opens) */
     session_list *sessions;
 } app_menu;
+
+/* The images attached to the draft, in the order of their labels. */
+typedef struct app_attach {
+    attach v[PT_INPUT_IMAGES];
+    uint32_t n;
+} app_attach;
 
 /* When to paint, and double presses. */
 typedef struct app_pace {
@@ -307,6 +325,7 @@ typedef struct app {
     app_model model;
     app_queue queue;
     app_menu menu;
+    app_attach att;
     app_pace pace;
     bool quit;
     int code;

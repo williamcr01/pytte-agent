@@ -118,7 +118,7 @@ const pt_rt_mcp_prompt *app_find_prompt(app *a, pt_str cmd)
 }
 
 /* Resources whose mention ("@server:uri") starts with q, or whose name
- * has q's text. */
+ * has q's text; add_paths then adds files and directories. */
 static void add_mentions(app *a, pt_str q)
 {
     uint32_t i, n = 0;
@@ -142,6 +142,51 @@ static void add_mentions(app *a, pt_str q)
         }
         pt_buf_putc(&a->tmp, 0);
         add_item(a, a->tmp2.p, a->tmp2.n, a->tmp.p);
+    }
+}
+
+#define PATHS_MAX 20000 /* paths a menu looks through: a walk that is quick, and a list that is small */
+
+/* Paths under cwd for "@q": when q is empty or ends in "/", the entries of
+ * that directory; otherwise those it starts, then those it is part of.
+ * fresh: the menu just opened, so the walk is made again. */
+static void add_paths(app *a, pt_str q, bool fresh)
+{
+    pt_str rest = {q.p + 1, q.n - 1}, all;
+    bool dir = !rest.n || rest.p[rest.n - 1] == '/';
+    int pass;
+    if (!a->open)
+        return;
+    if (fresh) {
+        bool cut;
+        pt_buf_reset(&a->menu.paths);
+        pt_rt_walk_paths(a->s.rt, PATHS_MAX, &a->menu.paths, &cut);
+    }
+    all = pt_buf_str(&a->menu.paths);
+    for (pass = 0; pass < (dir ? 1 : 2); pass++) {
+        size_t at = 0, e;
+        for (; at < all.n && a->menu.n < MAX_ITEMS; at = e + 1) {
+            pt_str path;
+            bool starts;
+            e = at;
+            while (e < all.n && all.p[e] != '\n')
+                e++;
+            path = (pt_str){all.p + at, e - at};
+            if (!path.n || path.n > 300 || memchr(path.p, ' ', path.n))
+                continue; /* a mention ends at a space */
+            starts = pt_str_starts(path, rest);
+            if (dir) { /* direct children: no slash after the prefix, but a directory's own */
+                pt_str tail = {path.p + rest.n, path.n - rest.n};
+                if (!starts || !tail.n || pt_str_find((pt_str){tail.p, tail.n - 1}, '/') >= 0)
+                    continue;
+            } else if (pass == 0 ? !starts : starts || !pt_str_icontains(path, rest)) {
+                continue;
+            }
+            pt_buf_reset(&a->tmp2);
+            pt_buf_putc(&a->tmp2, '@');
+            pt_buf_puts(&a->tmp2, path);
+            add_item(a, a->tmp2.p, a->tmp2.n, NULL);
+        }
     }
 }
 
@@ -238,8 +283,13 @@ void app_menu_update(app *a)
     if (a->menu.kind == MENU_SETTINGS)
         return;
     a->menu.kind = MENU_NONE;
-    if (!a->menu.closed && word.n && word.p[0] == '@') { /* @server:uri anywhere */
+    if (a->menu.paths.cap && (a->menu.closed || !word.n || word.p[0] != '@')) {
+        pt_buf_free(&a->menu.paths); /* the list lives as long as the @ menu */
+        pt_buf_init(&a->menu.paths, pt_sys_allocator());
+    }
+    if (!a->menu.closed && word.n && word.p[0] == '@') { /* @server:uri and @path anywhere */
         add_mentions(a, word);
+        add_paths(a, word, !a->menu.paths.n);
         a->menu.kind = a->menu.n ? MENU_ARG : MENU_NONE;
         a->menu.of_mentions = a->menu.n > 0;
         if (a->menu.n != old || a->menu.sel >= a->menu.n)
@@ -374,7 +424,7 @@ bool app_complete(app *a)
     } else { /* replace the last word */
         pt_buf_put(&nd, d.p, (size_t)(last_word(d).p - d.p));
         pt_buf_puts(&nd, label);
-        if ((label.n && (label.p[0] == '$' || label.p[0] == '@')) ||
+        if ((label.n && (label.p[0] == '$' || (label.p[0] == '@' && label.p[label.n - 1] != '/'))) || /* a directory goes on */
             (pt_str_starts(d, PT_S("/login ")) && !pt_str_starts(d, PT_S("/login oauth "))) ||
             (pt_str_starts(d, PT_S("/mcp ")) && pt_str_find((pt_str){d.p + 5, d.n - 5}, ' ') < 0 &&
              !pt_str_eqz(label, "trust") && !pt_str_eqz(label, "untrust"))) /* then the key, the name */

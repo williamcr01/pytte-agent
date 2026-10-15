@@ -76,7 +76,7 @@ In the TUI: Enter sends (queued while a run is active or the session is
 still opening), Shift+Enter or Ctrl-J adds a newline, Esc Esc interrupts,
 Ctrl-C clears the draft, else interrupts the run (twice with nothing to
 clear or interrupt quits), Ctrl-D quits, Ctrl-T toggles thinking (hidden or full),
-Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
+Ctrl-O opens the full transcript in a pager, Ctrl-V attaches a clipboard image, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
 `/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. Settings are saved to
 `~/.config/pytte/config.json`.
@@ -257,6 +257,15 @@ project's servers (`.mcp.json`) run once trusted (`/mcp trust`), remote
 servers can log in with OAuth (`/mcp login <name>`), and `arguments` fills
 in tool arguments the model should not choose, such as the calling
 model's name. Every key and rule is in [docs/mcp.md](docs/mcp.md).
+
+Mentions and attachments: `@path` anywhere in a message adds that file (up
+to `read`'s limits, with a note when cut) or directory listing to it; typing
+`@` lists the paths under the working directory (the walk `find` uses), Tab
+completes a directory. A pasted or dropped path to a PNG, JPEG, GIF or WebP
+file, or `Ctrl-V` with an image on the clipboard (`wl-paste`, `xclip` or
+`pngpaste`), attaches the image as `[image 1: name.png]`, with `read`'s size
+and pixel limits. The log keeps the message as sent. See
+[docs/mentions.md](docs/mentions.md).
 
 Long sessions: before a request that would not fit the context window
 (less 24k tokens, or a quarter of a small window), or after the provider
