@@ -413,7 +413,8 @@ static void build_frame(app *a, int64_t now)
             pt_str q = pt_buf_str(&a->queue.items[i].text);
             long nl = pt_str_find(q, '\n');
             pt_buf_putz(&a->tmp, a->queue.items[i].xid && a->queue.items[i].got < a->queue.items[i].want ? "  fetching · "
-                                                                                       : "  queued · ");
+                                 : a->queue.items[i].steer ? "  \xe2\x86\xb3 will be sent after the current tool calls · "
+                                                           : "  queued · ");
             if (nl >= 0)
                 q.n = (size_t)nl;
             tui_clean(&a->tmp, q, &col);

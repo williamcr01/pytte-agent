@@ -773,6 +773,17 @@ static size_t resources_at(pt_str text)
     return text.n;
 }
 
+/* A user entry that joined a run in flight (a steer). */
+static bool has_steer_mark(const pt_entry_view *v)
+{
+    static const char key[] = "\"steer\":true";
+    size_t i, k = sizeof key - 1;
+    for (i = 0; i + k <= v->raw.n; i++)
+        if (memcmp(v->raw.p + i, key, k) == 0)
+            return true;
+    return false;
+}
+
 static bool is_note(const pt_entry_view *v)
 {
     static const char key[] = "\"from\":\"pytte\"";
@@ -1037,8 +1048,17 @@ static void on_entries(app *a)
         if (strcmp(v.kind, "user") == 0) /* answers a key: no frame wait */
             a->pace.urgent = true;
         if (strcmp(v.kind, "user") == 0 && a->queue.n && !is_note(&v)) { /* a queued input was placed */
-            queued_input first = a->queue.items[0];
-            memmove(a->queue.items, a->queue.items + 1, (a->queue.n - 1) * sizeof *a->queue.items);
+            /* A steer joins the run in flight, ahead of older follow-ups; anything
+             * else is the oldest input (a steer the run could not take starts one). */
+            bool steered = has_steer_mark(&v);
+            uint32_t at = 0;
+            queued_input first;
+            while (steered && at < a->queue.n && !a->queue.items[at].steer)
+                at++;
+            if (at == a->queue.n)
+                at = 0;
+            first = a->queue.items[at];
+            memmove(a->queue.items + at, a->queue.items + at + 1, (a->queue.n - at - 1) * sizeof *a->queue.items);
             a->queue.items[--a->queue.n] = first;
             pt_buf_reset(&a->queue.items[a->queue.n].text);
         }

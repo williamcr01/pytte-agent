@@ -230,7 +230,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     if (prompt && *prompt) {
         a->draft.drop_restored = true;
         tui_input_set(&a->in, pt_strz(prompt));
-        app_submit(a);
+        app_submit(a, false);
     }
     app_menu_update(a);
     app_paint(a);

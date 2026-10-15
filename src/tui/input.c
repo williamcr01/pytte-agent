@@ -194,7 +194,7 @@ tui_input_result tui_input_key(tui_input *in, const tui_ev *ev, int width)
         return TI_MOVED;
     }
     in->goal = -1;
-    if ((k == TK_ENTER && (m & (TM_SHIFT | TM_ALT))) || (k == 'j' && ctrl && !alt)) {
+    if ((k == TK_ENTER && (m & TM_SHIFT)) || (k == 'j' && ctrl && !alt)) {
         tui_input_insert(in, PT_S("\n"));
         return TI_EDITED;
     }
