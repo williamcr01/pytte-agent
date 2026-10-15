@@ -325,6 +325,35 @@ void pt_rt_set_perm(pt_rt *rt, pt_perm_mode mode);
  * string argument) starts with prefix as a word, or every call when prefix
  * is empty. */
 bool pt_rt_allow(pt_rt *rt, pt_str tool, pt_str prefix);
+
+/* Rules from config (section 15.5): "tool" or "tool(pattern)", with * in
+ * the tool name and in patterns matching any text:
+ *   bash(git diff:*)   every command of the line starts with the words "git diff"
+ *   bash(git status)   every command of the line is exactly that
+ *   web_fetch(*.test)  the URL's host; other tools: the first string argument
+ *   mcp__github__*     every call of the tools matching the name
+ * A deny rule matches a call when any command of a bash line matches it; it
+ * beats allow rules and the mode, except that read-only stays read-only.
+ * A project's allow rules apply only once pt_rt_rules_trust says so. */
+typedef enum { PT_RULE_SESSION, PT_RULE_USER, PT_RULE_PROJECT } pt_rule_src;
+/* Whether spec is a rule; why says what is wrong when not (static text). */
+bool pt_rule_check(pt_str spec, const char **why);
+/* Add a rule (copied). False when spec is not a rule, or out of memory. */
+bool pt_rt_rule_add(pt_rt *rt, bool deny, pt_str spec, pt_rule_src src);
+/* Drop the rules from config (user and project), keeping the session's. */
+void pt_rt_rules_drop_config(pt_rt *rt);
+/* Whether the project's allow rules apply (deny rules always do). */
+void pt_rt_rules_trust(pt_rt *rt, bool trusted);
+
+typedef struct pt_rt_rule_info {
+    pt_str spec;
+    bool deny;
+    pt_rule_src src;
+    bool active; /* false: a project's allow rule that is not trusted */
+} pt_rt_rule_info;
+/* The rules in the order they were added; returns how many there are (up
+ * to max are written). The specs live until a rule is added. */
+uint32_t pt_rt_rules(pt_rt *rt, pt_rt_rule_info *out, uint32_t max);
 /* The first string argument of a call ("ls -la", "src/a.c"), or empty;
  * allocated in a. */
 pt_str pt_rt_gist(pt_str args, pt_arena *a);

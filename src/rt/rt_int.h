@@ -55,8 +55,15 @@ typedef struct rt_call {
     pt_sha256 sha;
 } rt_call;
 
+/* A permission rule (section 15.5): spec is "tool" or "tool(pattern)",
+ * tool and pat point into the same allocation (pat NULL: any call). */
+typedef enum { RULE_ANY, RULE_PREFIX, RULE_GLOB } rt_rule_mode;
 typedef struct rt_rule {
-    char *tool, *prefix;
+    char *spec;
+    const char *tool, *pat;
+    rt_rule_mode mode;
+    bool deny;
+    pt_rule_src src;
 } rt_rule;
 
 /* The effect being stored: on the worker, or inline without one. */
@@ -136,6 +143,7 @@ struct pt_rt {
     pt_perm_mode perm;
     rt_rule *rules;
     uint32_t nrules, rucap;
+    bool project_trusted; /* a project's allow rules apply */
     bool closing, free_waiting;
     rt_builtin builtin;
     rt_prompt prompt;
