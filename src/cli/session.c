@@ -582,9 +582,9 @@ static bool sync_dir(const char *dir)
     return ok;
 }
 
-/* The whole file, synced. A file that is not there is copied as nothing
- * unless it must be. */
-static bool copy_file(const char *from, const char *to, bool must)
+/* The file's first limit bytes (all of it for UINT64_MAX), synced. A file
+ * that is not there is copied as nothing unless it must be. */
+static bool copy_file(const char *from, const char *to, bool must, uint64_t limit)
 {
     char buf[16384];
     int in = open(from, O_RDONLY | O_CLOEXEC | O_NOFOLLOW), out;
@@ -595,14 +595,15 @@ static bool copy_file(const char *from, const char *to, bool must)
         close(in);
         return false;
     }
-    while (ok) {
-        ssize_t n = read(in, buf, sizeof buf), at = 0;
+    while (ok && limit) {
+        ssize_t n = read(in, buf, limit < sizeof buf ? (size_t)limit : sizeof buf), at = 0;
         if (n < 0 && errno == EINTR)
             continue;
         if (n <= 0) {
             ok = n == 0;
             break;
         }
+        limit -= (uint64_t)n;
         while (ok && at < n) {
             ssize_t w = write(out, buf + at, (size_t)(n - at));
             if (w < 0 && errno != EINTR)
@@ -649,7 +650,7 @@ static bool copy_blobs(const char *from, const char *to)
                 continue;
             snprintf(src, sizeof src, "%.4096s/blobs/%.255s/%.255s", from, e->d_name, f->d_name);
             snprintf(dst, sizeof dst, "%.4096s/blobs/%.255s/%.255s", to, e->d_name, f->d_name);
-            ok = link(src, dst) == 0 || copy_file(src, dst, true);
+            ok = link(src, dst) == 0 || copy_file(src, dst, true, UINT64_MAX);
         }
         closedir(sub);
         snprintf(dst, sizeof dst, "%.4096s/blobs/%.255s", to, e->d_name);
@@ -690,31 +691,30 @@ static void remove_fork(const char *dir)
     cli_session_discard(dir);
 }
 
-/* Copy the closed session in from to a new one (job->forked): its log,
- * blobs, name and draft. The copy's log is the original's, so it opens
- * as the original would, with every entry and setting. */
-static bool fork_session(cli_open_job *job, const char *from)
+bool cli_session_fork(const char *from, uint64_t keep, char *id, size_t idcap, char *err, size_t cap)
 {
     static const char *const files[] = {"name", "draft", "log.jsonl"}; /* the log last */
     char root[4096], to[4200], a[4400], b[4400];
     size_t i;
     bool ok;
     cli_sessions_dir(root, sizeof root);
-    new_session_id(job->forked, sizeof job->forked);
-    snprintf(to, sizeof to, "%s/%s", root, job->forked);
+    new_session_id(id, idcap);
+    snprintf(to, sizeof to, "%s/%s", root, id);
     if (mkdir(to, 0700) != 0) {
-        snprintf(job->err, sizeof job->err, "cannot create %.400s: %s", to, strerror(errno));
+        snprintf(err, cap, "cannot create %.400s: %s", to, strerror(errno));
         return false;
     }
     ok = copy_blobs(from, to);
     for (i = 0; ok && i < sizeof files / sizeof files[0]; i++) {
+        if (i == 1 && keep) /* a fork that goes back has a draft of its own */
+            continue;
         snprintf(a, sizeof a, "%s/%s", from, files[i]);
         snprintf(b, sizeof b, "%s/%s", to, files[i]);
-        ok = copy_file(a, b, i == 2);
+        ok = copy_file(a, b, i == 2, i == 2 && keep ? keep : UINT64_MAX);
     }
     ok = ok && sync_dir(to) && sync_dir(root);
     if (!ok) {
-        snprintf(job->err, sizeof job->err, "cannot fork the session: %s", strerror(errno));
+        snprintf(err, cap, "cannot fork the session: %s", strerror(errno));
         remove_fork(to);
     }
     return ok;
@@ -888,7 +888,8 @@ static void job_open(void *ud)
             cli_session_discard(s->dir);
         job->previous = NULL;
         if (job->o.fork && !job->discard_previous) {
-            if (!fork_session(job, s->dir)) {
+            if (!cli_session_fork(s->dir, job->o.fork_keep, job->forked, sizeof job->forked, job->err,
+                                  sizeof job->err)) {
                 job->code = 1;
                 return;
             }

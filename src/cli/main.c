@@ -6,6 +6,7 @@
  *   ... | pytte -p "PROMPT"     the same, with stdin as data for the prompt
  *   pytte log [ID] [--json]     print a session's transcript
  *   pytte approve ID TASK yes|no   answer a tool call waiting for approval
+ *   pytte rewind ID [--at ENTRY]   put files and conversation back to before a message
  *   pytte ls                    list sessions with their status
  *   pytte update-catalog        fetch the model catalog (models.dev, OpenRouter)
  *   pytte mcp [list|trust|untrust|login NAME|logout NAME]   MCP servers
@@ -38,6 +39,12 @@ static const char usage[] =
     "                                     since the last compaction)\n"
     "       pytte approve ID TASK yes|no  answer a tool call waiting for approval,\n"
     "                                     then go on as -p would\n"
+    "       pytte rewind ID [--at ENTRY] [--files | --conversation] [--yes]\n"
+    "                                     put files and conversation back to before a\n"
+    "                                     user message (default: the newest; ENTRY from\n"
+    "                                     log --json), in a fork whose ID is printed.\n"
+    "                                     --files: only files; --conversation: only the\n"
+    "                                     fork; --yes: overwrite changed files\n"
     "       pytte ls                      list sessions, newest first: status, directory\n"
     "                                     and name (its first prompt)\n"
     "       pytte update-catalog          fetch the newest models from models.dev and\n"
@@ -126,6 +133,14 @@ static void parse_args(int argc, char **argv, opts *o)
             o->json = true;
         } else if (strcmp(a, "--all-epochs") == 0) { /* log */
             o->all_epochs = true;
+        } else if (strcmp(a, "--files") == 0) { /* rewind */
+            o->files_only = true;
+        } else if (strcmp(a, "--conversation") == 0) {
+            o->conversation_only = true;
+        } else if (strcmp(a, "--yes") == 0) {
+            o->yes = true;
+        } else if (TAKES("--at")) {
+            o->at = v;
         } else if (strcmp(a, "--no-stdin") == 0) {
             o->no_stdin = true;
         } else if (strcmp(a, "--no-mcp") == 0) {
@@ -191,7 +206,9 @@ static void parse_args(int argc, char **argv, opts *o)
             o->mcp_args[o->mcp_args[0] ? 1 : 0] = a;
         } else if (i == 1 && strcmp(a, "approve") == 0) {
             o->cmd_approve = a;
-        } else if ((o->cmd_log || o->cmd_approve) && !o->id) {
+        } else if (i == 1 && strcmp(a, "rewind") == 0) {
+            o->cmd_rewind = a;
+        } else if ((o->cmd_log || o->cmd_approve || o->cmd_rewind) && !o->id) {
             o->id = a;
         } else if (o->cmd_approve && !o->task) {
             o->task = a;
@@ -210,6 +227,12 @@ static void parse_args(int argc, char **argv, opts *o)
     }
     if (o->cmd_approve && !o->answer)
         die("usage: pytte approve ID TASK yes|no", NULL);
+    if (o->cmd_rewind && !o->id)
+        die("usage: pytte rewind ID [--at ENTRY] [--files | --conversation] [--yes]", NULL);
+    if (o->files_only && o->conversation_only)
+        die("--files and --conversation exclude each other", NULL);
+    if ((o->at || o->files_only || o->conversation_only || o->yes) && !o->cmd_rewind)
+        die("--at, --files, --conversation and --yes belong to pytte rewind", NULL);
     if (!o->c.script)
         o->c.script = getenv("PYTTE_FAUX_SCRIPT");
 }
@@ -335,6 +358,10 @@ int main(int argc, char **argv)
     if (o.cmd_approve) {
         cli_config_load(&cfg, warn, sizeof warn);
         return pytte_print(&o, o.id, &cfg);
+    }
+    if (o.cmd_rewind) {
+        cli_config_load(&cfg, warn, sizeof warn);
+        return pytte_rewind(&o, &cfg);
     }
     cli_config_load(&cfg, warn, sizeof warn);
     if (warn[0])

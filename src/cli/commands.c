@@ -189,6 +189,166 @@ int pytte_log(const opts *o)
     return 0;
 }
 
+/* ---- pytte rewind (section 8.6) ---- */
+
+typedef struct rewound {
+    bool done, failed;
+    char err[600];
+} rewound;
+
+static void rewind_event(void *ud, const pt_event *ev)
+{
+    rewound *r = (rewound *)ud;
+    if (ev->kind != PT_E_REWIND)
+        return;
+    r->done = true;
+    r->failed = pt_str_eqz(ev->outcome, "failed");
+    snprintf(r->err, sizeof r->err, "%.*s", (int)ev->error.n, ev->error.p);
+}
+
+/* The first line of a message, cut to fit one line of the listing. */
+static void first_line(pt_str text, char *out, size_t cap)
+{
+    size_t n = 0;
+    while (n < text.n && text.p[n] != '\n')
+        n++;
+    if (n >= cap) {
+        n = cap - 1;
+        while (n && ((unsigned char)text.p[n] & 0xC0) == 0x80)
+            n--;
+    }
+    memcpy(out, text.p, n);
+    out[n] = 0;
+}
+
+int pytte_rewind(opts *o, cli_config *cfg)
+{
+    cli_session s;
+    rewound rw;
+    pt_rt_rewind *scan;
+    const pt_rt_point *pts, *p = NULL;
+    pt_rt_plan plan;
+    pt_buf text;
+    char err[700], line[160], dir[4300], newid[64], draft[4400];
+    uint32_t n, i, at = 0;
+    int rc;
+    memset(&rw, 0, sizeof rw);
+    apply_config(o, cfg, false);
+    if ((rc = cli_session_open(&s, &o->c, o->id, rewind_event, &rw, err, sizeof err)) != 0) {
+        fprintf(stderr, "pytte: %s\n", err);
+        return rc;
+    }
+    if (!(scan = pt_rt_rewind_scan(s.rt, err, sizeof err))) {
+        fprintf(stderr, "pytte: %s\n", err);
+        cli_session_close(&s);
+        return 20;
+    }
+    pts = pt_rt_rewind_points(scan, &n);
+    if (o->at) {
+        uint64_t v;
+        if (!pt_str_to_u64(pt_strz(o->at), &v) || v > UINT32_MAX)
+            v = 0;
+        for (i = 0; i < n; i++)
+            if (pts[i].entry == v)
+                p = &pts[i];
+    } else if (n && !pts[n - 1].queued) {
+        p = &pts[n - 1];
+    }
+    if (!p || p->queued) {
+        fprintf(stderr, "pytte: %s; the messages:\n", p ? "that message was queued behind a run and cannot be rewound to"
+                                                     : o->at ? "no such user message" : "no message to rewind to");
+        for (i = 0; i < n; i++) {
+            first_line(pts[i].text, line, sizeof line);
+            fprintf(stderr, "%6u  %s%s\n", pts[i].entry, line, pts[i].queued ? "  (queued: cannot)" : "");
+        }
+        pt_rt_rewind_free(scan);
+        cli_session_close(&s);
+        return 1;
+    }
+    at = p->entry;
+    first_line(p->text, line, sizeof line);
+    fprintf(stderr, "pytte: back to before entry %u: %s\n", at, line);
+    pt_buf_init(&text, pt_sys_allocator());
+    pt_buf_puts(&text, p->text);
+    if (!pt_rt_rewind_plan(s.rt, scan, at, &plan)) {
+        fprintf(stderr, "pytte: cannot plan the rewind\n");
+        pt_buf_free(&text);
+        pt_rt_rewind_free(scan);
+        cli_session_close(&s);
+        return 1;
+    }
+    if (!o->conversation_only) {
+        for (i = 0; i < plan.n; i++)
+            fprintf(stderr, "  %s %.*s%s\n", plan.files[i].blob.n ? "restore" : "remove ", (int)plan.files[i].path.n,
+                    plan.files[i].path.p, plan.changed[i] ? "  (changed outside pytte)" : "");
+        if (!plan.n)
+            fprintf(stderr, "  no file differs from before it\n");
+        if (plan.risky)
+            fprintf(stderr, "pytte: %u call%s of bash or MCP tools since then cannot be undone\n", plan.risky,
+                    plan.risky == 1 ? "" : "s");
+        if (plan.nchanged && !o->yes) {
+            char answer[16];
+            if (!isatty(STDIN_FILENO)) {
+                fprintf(stderr, "pytte: %u file%s changed outside pytte since pytte last wrote %s; --yes overwrites\n",
+                        plan.nchanged, plan.nchanged == 1 ? "" : "s", plan.nchanged == 1 ? "it" : "them");
+                rc = 1;
+                goto out;
+            }
+            fprintf(stderr, "overwrite the %u file%s changed outside pytte? [y/N] ", plan.nchanged,
+                    plan.nchanged == 1 ? "" : "s");
+            if (!fgets(answer, sizeof answer, stdin) || (answer[0] != 'y' && answer[0] != 'Y')) {
+                fprintf(stderr, "pytte: nothing was changed\n");
+                rc = 1;
+                goto out;
+            }
+        }
+        if (plan.n) {
+            if (!pt_rewind(s.a, at, plan.files, plan.n)) {
+                fprintf(stderr, "pytte: %s (finish its work first: pytte -r %s)\n", pt_error(s.a), s.id);
+                rc = 1;
+                goto out;
+            }
+            if (pt_rt_run(s.rt) != PT_RT_IDLE || !rw.done) {
+                fprintf(stderr, "pytte: %s\n", pt_fatal(s.a) ? pt_error(s.a) : "the rewind did not finish");
+                rc = 20;
+                goto out;
+            }
+            if (rw.failed) {
+                fprintf(stderr, "pytte: not every file was restored: %s\n", rw.err);
+                rc = 10;
+                goto out;
+            }
+            fprintf(stderr, "pytte: restored %u file%s\n", plan.n, plan.n == 1 ? "" : "s");
+        }
+    }
+    rc = 0;
+    if (!o->files_only) {
+        snprintf(dir, sizeof dir, "%s", s.dir);
+        cli_session_close(&s);
+        if (!cli_session_fork(dir, p->keep, newid, sizeof newid, err, sizeof err)) {
+            fprintf(stderr, "pytte: %s\n", err);
+            rc = 1;
+            goto out_closed;
+        }
+        {
+            char root[4096];
+            cli_sessions_dir(root, sizeof root);
+            snprintf(draft, sizeof draft, "%s/%s/draft", root, newid);
+        }
+        pt_sys_write_file(draft, text.p, text.n); /* the message is back in the input */
+        printf("%s\n", newid);
+        fprintf(stderr, "pytte: continue with: pytte -r %s\n", newid);
+        goto out_closed;
+    }
+out:
+    cli_session_close(&s);
+out_closed:
+    pt_rt_plan_free(&plan);
+    pt_buf_free(&text);
+    pt_rt_rewind_free(scan);
+    return rc;
+}
+
 /* ---- pytte ls ---- */
 
 #define LS_PEEK 65536 /* ls reads this much of each log's head and tail */

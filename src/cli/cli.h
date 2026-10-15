@@ -185,8 +185,10 @@ typedef struct cli_opts {
      * new session and opens the copy; worktree (a name) makes a git
      * worktree at <repo>/.pytte/worktrees/<name> on branch worktree-<name>,
      * or reuses it, and starts a new session there (the process changes
-     * into it). */
+     * into it). With fork_keep, the copy has only the first fork_keep
+     * bytes of the log (rewinding; see cli_session_fork) and no draft. */
     bool fork;
+    uint64_t fork_keep;
     const char *worktree;
     bool (*stop)(void *ud); /* polled by pt_rt_run (print mode) */
     /* MCP servers for the session (copied when it opens); with any, a new
@@ -266,6 +268,11 @@ const char *cli_session_note(const cli_session *s);
 void cli_session_close(cli_session *s);
 /* Free without closing (the agent is fatal). */
 void cli_session_free(cli_session *s);
+/* Copy the closed session in directory `from` to a new one (id, of idcap
+ * bytes): its log, blobs and name, and its draft unless keep is set. keep
+ * (not 0): only the first keep bytes of the log, which end at a commit
+ * (pt_rt_point.keep); the copy opens as the original did at that point. */
+bool cli_session_fork(const char *from, uint64_t keep, char *id, size_t idcap, char *err, size_t cap);
 /* Remove a closed session that holds nothing worth keeping. */
 void cli_session_discard(const char *dir);
 
