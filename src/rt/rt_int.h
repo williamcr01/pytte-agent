@@ -198,6 +198,9 @@ void pt_rt_web_tool(web *w, pt_rt_tool *t);
  * take), and their size in pixels from the header */
 #define PT_RT_IMAGE_MAX 3932160u /* bytes: 5 MB in base64, Anthropic's limit */
 #define PT_RT_IMAGE_SIDE_MAX 8000u
+/* What read shows of a text file at most, and a @path mention adds. */
+#define PT_RT_READ_BYTES (50u * 1024u)
+#define PT_RT_READ_LINES 2000
 const char *pt_rt_image_type(const unsigned char *p, size_t n);
 bool pt_rt_image_size(const unsigned char *p, size_t n, const char *mime, uint32_t *w, uint32_t *h);
 /* prompt.c */

@@ -121,6 +121,28 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r);
 /* Store n bytes as a blob: true with ref set ("sha256:<hex>", NUL
  * terminated). False when the store keeps no blobs or writing failed. */
 bool pt_rt_put_blob(pt_rt *rt, const void *p, size_t n, char ref[72]);
+/* An image to attach to a user input, stored as a blob with read's limits
+ * (bytes, pixels). pt_rt_attach_file: 1 attached (ref and mime set; mime is
+ * static); 0 the file is not an image providers take; -1 it is one that
+ * cannot be attached (err says why). pt_rt_attach_bytes is the same for
+ * bytes already in memory (the clipboard): true, or false with err. */
+int pt_rt_attach_file(pt_rt *rt, const char *path, char ref[72], const char **mime, char *err, size_t cap);
+bool pt_rt_attach_bytes(pt_rt *rt, const void *p, size_t n, char ref[72], const char **mime, char *err, size_t cap);
+
+/* The paths under the session's directory that find would list (it skips
+ * .git and what .gitignore ignores), at most max, appended to out one per
+ * line, relative, directories ending in "/". Returns how many; *cut says the
+ * walk stopped early (max, or its own limit). */
+uint32_t pt_rt_walk_paths(pt_rt *rt, uint32_t max, pt_buf *out, bool *cut);
+
+/* What "@path" adds to a message, appended to out: a text file's contents
+ * (at most what read shows, with a note when cut) or a directory's listing,
+ * in a <file> or <directory> block. path is relative to the session's
+ * directory, or absolute; "~/" is the home directory. 1 added; 0 there is no
+ * such file (the @ was plain text); -1 it exists but cannot be added (err
+ * says why). */
+int pt_rt_mention_path(pt_rt *rt, pt_str path, pt_buf *out, char *err, size_t cap);
+
 /* The agent the runtime drives (for a tool's lookups: pt_doc, the cwd). */
 pt_agent *pt_rt_agent(pt_rt *rt);
 /* pt_opts.blob for a store (blob_ud: the pt_store). */
