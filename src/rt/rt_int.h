@@ -198,6 +198,9 @@ void pt_rt_web_free(web *w);
 void pt_rt_web_tool(web *w, pt_rt_tool *t);
 /* tools_websearch.c: web_search, with its state */
 typedef struct wsearch wsearch;
+/* The variables that hold search keys, NULL-ended: never passed to tools,
+ * like the providers' key variables. */
+extern const char *const pt_rt_search_env[3];
 wsearch *pt_rt_wsearch_new(pt_rt *rt);
 void pt_rt_wsearch_free(wsearch *w);
 void pt_rt_wsearch_tool(wsearch *w, pt_rt_tool *t);

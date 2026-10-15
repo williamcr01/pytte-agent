@@ -905,7 +905,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     pt_rt_tool t[10], bt[2];
     uint32_t i, k, n = 0;
     if (!b || !(b->k.io = (char *)malloc(RT_TOOL_IO)) ||
-        !(b->k.unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *b->k.unset)) ||
+        !(b->k.unset = (const char **)calloc((size_t)cat->nproviders * 4 + 3, sizeof *b->k.unset)) ||
         !(b->search = pt_rt_search_new(rt)) || !(b->web = pt_rt_web_new(rt)) ||
         !(b->wsearch = pt_rt_wsearch_new(rt)) ||
         !(b->bash = pt_rt_bash_new(&b->k))) {
@@ -927,6 +927,8 @@ bool pt_rt_add_builtins(pt_rt *rt)
     for (i = 0; i < cat->nproviders; i++)
         for (k = 0; k < 4 && cat->providers[i].key_env[k]; k++)
             b->k.unset[n++] = cat->providers[i].key_env[k];
+    for (k = 0; pt_rt_search_env[k]; k++)
+        b->k.unset[n++] = pt_rt_search_env[k];
     rt->builtin.ud = b;
     rt->builtin.free = builtins_free;
     rt->builtin.idle = builtins_idle;

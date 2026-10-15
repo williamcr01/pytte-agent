@@ -1,6 +1,7 @@
 /* web_fetch and web_search, end to end through the core and the runtime: the model (a
  * faux script) calls it, a fake web answers, and the tool result is what
  * the session recorded. */
+#define _POSIX_C_SOURCE 200809L
 #include "t.h"
 
 #include "cli/cli.h"
@@ -127,7 +128,8 @@ static int wb_pump(pt_http_driver *d, int timeout_ms, pt_waitfd *fds, unsigned n
             x->sink.head(x->sink.ud, p->status, PT_STR_NULL);
         }
         len = p->n ? p->n : strlen(p->body);
-        step = len - x->at < 7 ? len - x->at : 7;
+        step = len > (1u << 20) ? 8192 : 7; /* a huge page in bigger pieces */
+        step = len - x->at < step ? len - x->at : step;
         if (step)
             x->sink.body(x->sink.ud, p->body + x->at, step);
         x->at += step;
@@ -418,6 +420,11 @@ static const page search_refused[] = {
     {"https://api.exa.ai/search", 401, "Content-Type: application/json\n", "{\"error\":\"invalid  api key\"}", 0},
     {NULL, 0, NULL, NULL, 0},
 };
+static char huge[6u << 20]; /* more than the tool reads */
+static const page search_huge[] = {
+    {"https://api.exa.ai/search", 200, "Content-Type: application/json\n", huge, 0},
+    {NULL, 0, NULL, NULL, 0},
+};
 static const page search_empty[] = {
     {"https://api.exa.ai/search", 200, "Content-Type: application/json\n", empty_json, 0},
     {NULL, 0, NULL, NULL, 0},
@@ -486,6 +493,10 @@ static void test_search(void)
     SEARCH("{\"query\":\"q\"}");
     CHECK(res.is_error && has(res.text, "HTTP 401") && has(res.text, "/login search exa") &&
           has(res.text, "invalid api key"));
+    memset(huge, ' ', sizeof huge - 1);
+    pages = search_huge; /* the transfer is stopped, not read to the end */
+    SEARCH("{\"query\":\"q\"}");
+    CHECK(res.is_error && has(res.text, "more than the tool reads") && res.cancelled == 1);
     pages = search_empty;
     SEARCH("{\"query\":\"q\"}");
     CHECK(!res.is_error && has(res.text, "(no results)"));
@@ -493,6 +504,23 @@ static void test_search(void)
     SEARCH("{\"query\":\"q\"}");
     CHECK(res.is_error && has(res.text, "Could not resolve host"));
     keys = NULL;
+}
+
+/* bash does not see the search keys, nor a provider's. */
+static void test_search_keys_hidden(void)
+{
+    setenv("EXA_API_KEY", "exa-leak", 1);
+    setenv("PARALLEL_API_KEY", "par-leak", 1);
+    setenv("ANTHROPIC_API_KEY", "ant-leak", 1);
+    tool = "bash";
+    run_fetch("{\"command\":\"env; echo done\"}", PT_PERM_AUTO, NULL);
+    tool = "web_fetch";
+    unsetenv("EXA_API_KEY");
+    unsetenv("PARALLEL_API_KEY");
+    unsetenv("ANTHROPIC_API_KEY");
+    CHECK(!res.is_error && has(res.text, "done"));
+    CHECK(has(res.text, "PATH=")); /* it did print the environment */
+    CHECK(!has(res.text, "EXA_API_KEY") && !has(res.text, "PARALLEL_API_KEY") && !has(res.text, "leak"));
 }
 
 static void test_search_permissions(void)
@@ -570,6 +598,7 @@ int main(void)
     RUN(test_fetch);
     RUN(test_permissions);
     RUN(test_search);
+    RUN(test_search_keys_hidden);
     RUN(test_search_permissions);
     RUN(test_search_listing);
     return t_done("test_web");

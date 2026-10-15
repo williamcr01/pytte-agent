@@ -29,11 +29,14 @@ static const char *const names[] = {"exa", "parallel"};
 static const char *const labels[] = {"Exa", "Parallel"};
 static const char *const urls[] = {"https://api.exa.ai/search", "https://api.parallel.ai/v1/search"};
 
+const char *const pt_rt_search_env[3] = {"EXA_API_KEY", "PARALLEL_API_KEY", NULL};
+
 typedef struct sreq {
     struct sreq *next;
     wsearch *w;
     uint32_t fx;
     void *req;
+    uint32_t timer; /* the stop of a response that is too long */
     pt_http_req hr;
     pt_header headers[2];
     pt_buf body, key, resp;
@@ -256,6 +259,8 @@ static void f_free(sreq *r)
         }
     if (r->req)
         pt_rt_http_cancel(w->rt, r->req);
+    if (r->timer)
+        pt_rt_timer_cancel(w->rt, r->timer);
     pt_buf_free(&r->body);
     pt_buf_free(&r->key);
     pt_buf_free(&r->resp);
@@ -373,6 +378,18 @@ static void on_head(void *ud, int status, pt_str retry_after)
     ((sreq *)ud)->status = status;
 }
 
+/* Stop reading a response that is too long, as web_fetch does: a callback
+ * must not cancel its own request, so a timer does it. */
+static void stop_now(void *ud, pt_rt *rt)
+{
+    sreq *r = (sreq *)ud;
+    r->timer = 0;
+    if (r->req)
+        pt_rt_http_cancel(rt, r->req);
+    r->req = NULL;
+    finish(r);
+}
+
 static void on_body(void *ud, const char *p, size_t n)
 {
     sreq *r = (sreq *)ud;
@@ -380,6 +397,7 @@ static void on_body(void *ud, const char *p, size_t n)
         return;
     if (r->resp.n + n > RESP_MAX) {
         r->too_big = true;
+        r->timer = pt_rt_timer(r->w->rt, 0, stop_now, r); /* none: the rest is read and dropped */
         return;
     }
     pt_buf_put(&r->resp, p, n);
@@ -389,7 +407,10 @@ static void on_done(void *ud, const char *error)
 {
     sreq *r = (sreq *)ud;
     r->req = NULL; /* the driver ends it */
-    if (error)
+    if (r->timer) /* a stop was waiting: the request ended first */
+        pt_rt_timer_cancel(r->w->rt, r->timer);
+    r->timer = 0;
+    if (error && !r->too_big)
         snprintf(r->error, sizeof r->error, "%s search failed: %s", labels[r->b], error);
     finish(r);
 }
