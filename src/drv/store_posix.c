@@ -49,54 +49,7 @@ static int sync_fd(int fd)
 
 static int sync_dir(const char *dir)
 {
-    struct stat st;
-    int fd = open(dir, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK), r, error;
-    if (fd < 0)
-        return -1;
-    if (fstat(fd, &st) != 0) {
-        error = errno;
-        close(fd);
-        errno = error;
-        return -1;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        close(fd);
-        errno = ENOTDIR;
-        return -1;
-    }
-    r = pt_sys_sync_fd(fd, false);
-    error = errno;
-    if (close(fd) != 0 && r == 0) {
-        r = -1;
-        error = errno;
-    }
-    if (r != 0)
-        errno = error;
-    return r;
-}
-
-/* Sync the containing directory after creating dir. Trim trailing slashes
- * first, so "session/" syncs ".", not the new session itself. */
-static int sync_parent_dir(const char *dir)
-{
-    char parent[4096];
-    size_t n = strlen(dir);
-    char *slash;
-    if (n >= sizeof parent) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    memcpy(parent, dir, n + 1);
-    while (n > 1 && parent[n - 1] == '/')
-        parent[--n] = 0;
-    slash = strrchr(parent, '/');
-    if (!slash)
-        return sync_dir(".");
-    if (slash == parent)
-        slash[1] = 0;
-    else
-        *slash = 0;
-    return sync_dir(parent);
+    return pt_sys_sync_dir(dir, false);
 }
 
 /* 1: created, 0: already an actual directory, -1: error. */
@@ -815,7 +768,7 @@ pt_store *pt_store_posix_open(const char *dir, bool create, char *err, size_t ca
         snprintf(err, cap, "cannot open %s: %s", p, strerror(errno));
         goto fail;
     }
-    if (dir_created && (sync_dir(s->dir) != 0 || sync_parent_dir(s->dir) != 0)) {
+    if (dir_created && (sync_dir(s->dir) != 0 || pt_sys_sync_parent(s->dir, false) != 0)) {
         snprintf(err, cap, "cannot sync %s: %s", s->dir, strerror(errno));
         goto fail;
     }

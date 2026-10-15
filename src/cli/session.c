@@ -570,6 +570,9 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
         snprintf(err, cap, "session %s: %s", s->id, pt_error(s->a));
         return fail(s, 1, err, cap, NULL);
     }
+    /* What a call cut off by a crash started ends now, rather than going
+     * on behind its "interrupted" result. */
+    pt_rt_stop_orphans(s->rt);
     return 0;
 }
 
@@ -577,11 +580,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
 
 static bool sync_dir(const char *dir)
 {
-    int fd = open(dir, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    bool ok = fd >= 0 && pt_sys_sync_fd(fd, false) == 0;
-    if (fd >= 0)
-        close(fd);
-    return ok;
+    return pt_sys_sync_dir(dir, false) == 0;
 }
 
 /* The whole file, synced. A file that is not there is copied as nothing

@@ -323,10 +323,9 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
         unlink(tmp);
         return false;
     }
-    if (pt_sys_sync_parent(path) != 0) { /* else a power loss may undo the rename */
-        snprintf(err, cap, "%s: %s", path, strerror(errno));
-        return false;
-    }
+    /* Else a power loss may undo the rename; but the file has changed, so
+     * a failure here is no failure to write it. */
+    (void)pt_sys_sync_parent(path, true);
     return true;
 }
 

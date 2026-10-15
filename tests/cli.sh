@@ -338,8 +338,28 @@ orphan() { # name command wait: kill pytte -9 once orphan.pid exists, then resum
     check "...and resuming stops it" gone "$pid"
 }
 orphan "the shell runs on" 'sleep 31 & echo $! > orphan.pid; wait' 0
-orphan "the shell is gone" '(sleep 32 & echo $! > orphan.pid); sleep 1' 1.5
-kill -9 "$pid" 2>/dev/null
+if [ "$(uname -s)" = Linux ]; then # elsewhere a group without its shell is not found
+    orphan "the shell is gone" '(sleep 32 & echo $! > orphan.pid); sleep 1' 1.5
+    kill -9 "$pid" 2>/dev/null
+    # What a command leaves behind when its shell ends goes when pytte exits.
+    rm -f orphan.pid
+    printf '{"turns":[{"content":[{"type":"tool_call","name":"bash","args":{"command":"%s"}}]},{"content":[{"type":"text","text":"ok"}]}]}' \
+        '(sleep 33 & echo $! > orphan.pid)' >"$XDG_STATE_HOME/orphan.json"
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script "$XDG_STATE_HOME/orphan.json" "left behind" >/dev/null 2>&1
+    pid=$(cat orphan.pid)
+    check "a command's leftovers stop when pytte exits" gone "$pid"
+    kill -9 "$pid" 2>/dev/null
+    check "...and its record goes" [ -z "$(find "$XDG_STATE_HOME/pytte/sessions" -path '*/procs/g*')" ]
+fi
+rm -f orphan.pid
+printf '{"turns":[{"content":[{"type":"tool_call","name":"bash","args":{"command":"sleep 1.5","yield":0}}]},{"content":[{"type":"text","text":"ok"}]}]}' \
+    >"$XDG_STATE_HOME/nohup.json"
+(trap '' HUP && PYTTE_PERMISSION_MODE=auto exec "$pytte" -p -m faux/faux --script "$XDG_STATE_HOME/nohup.json" "no hang-up") >/dev/null 2>&1 &
+p=$!
+sleep 0.4
+kill -HUP $p
+wait $p
+check "print mode started ignoring SIGHUP (nohup) runs on" [ $? -eq 0 ]
 "$pytte" -p -m faux/faux --script tests/faux/slow.json "hang up" >/dev/null 2>&1 &
 p=$!
 sleep 0.4

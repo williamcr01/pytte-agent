@@ -206,22 +206,26 @@ static void on_live(void *ud, uint32_t task, pt_str bytes)
 }
 
 /* A dead owner's process group: stopped if it is still the same group,
- * forgotten either way. */
+ * forgotten unless it ran on another host. */
 static void on_proc(void *ud, int64_t id, pt_str mark)
 {
     pt_store *st = (pt_store *)ud;
-    pt_proc_stop_marked(mark);
-    st->proc_del(st, id);
+    if (pt_proc_stop_marked(mark) >= 0)
+        st->proc_del(st, id);
 }
 
-void pt_rt_proc_started(pt_rt *rt, const pt_proc *p)
+void pt_rt_stop_orphans(pt_rt *rt)
 {
     pt_store *st = rt->c.store;
-    char mark[160];
-    size_t n;
-    if (!st || !st->proc_put || !(n = pt_proc_mark(p, mark, sizeof mark)))
-        return;
-    st->proc_put(st, pt_proc_group(p), mark, n); /* best effort */
+    if (st && st->proc_list)
+        st->proc_list(st, on_proc, st);
+}
+
+void pt_rt_proc_started(pt_rt *rt, int64_t group, pt_str mark)
+{
+    pt_store *st = rt->c.store;
+    if (st && st->proc_put && mark.n)
+        st->proc_put(st, group, mark.p, mark.n); /* best effort */
 }
 
 void pt_rt_proc_ended(pt_rt *rt, int64_t group)
@@ -308,10 +312,6 @@ bool pt_rt_recover(pt_rt *rt, char *err, size_t cap)
         snprintf(err, cap, "%s", st->err);
         ok = false;
     }
-    /* Before any tool runs: what a call cut off by the crash started ends
-     * now, rather than going on behind its "interrupted" result. */
-    if (ok && st->proc_list)
-        st->proc_list(st, on_proc, st);
     if (ok && !pt_load_done(rt->a)) {
         snprintf(err, cap, "%s", pt_error(rt->a));
         ok = false;

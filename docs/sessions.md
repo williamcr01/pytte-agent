@@ -26,7 +26,7 @@ Each session is a directory:
 | `log.jsonl` | The whole truth: one commit per line, each a JSON object with a sequence number and a CRC-32 checksum, readable with `jq` |
 | `blobs/ab/cdef…` | Large content (prompts of 16 KB or more, long command output, images), named by its SHA-256 |
 | `live/` | The newest output of a request or tool call in progress, for recovery and watchers |
-| `procs/` | The process groups of `bash` calls that are still running |
+| `procs/` | The process groups of `bash` calls that may still be running |
 | `LOCK` | Held by the process that has the session open, and says which one |
 | `name`, `draft` | The session's name and the unsent input |
 
@@ -40,10 +40,14 @@ Each session is a directory:
   line names it.
 - **Files the model writes.** `write` and `edit` replace a file through a
   temporary file and a rename, and sync both the file and its directory
-  before the result is written, so the log never claims a change that a
-  power cut undid.
+  before the result is written, so the log does not claim a change that a
+  power cut undid. Once the rename is done the file has changed, so a
+  failed directory sync after it is not reported as a failed write (the
+  same goes for a directory `write` creates, and for `config.json`).
 - **macOS** syncs with `F_FULLFSYNC`, which also empties the drive's
-  write cache; plain `fsync` there does not survive a power cut.
+  write cache; plain `fsync` there does not survive a power cut. pytte
+  falls back to `fsync` only on a file system without `F_FULLFSYNC`; any
+  other error is reported.
 - **One owner at a time.** Opening a session takes its lock; a second
   `pytte` on the same session is refused and told who has it.
 
@@ -67,11 +71,19 @@ When a session is opened again after its owner died:
   and "cut off when pytte exited" when pytte quit cleanly mid-call.
 - **Commands left running.** A `bash` call's command, and anything it
   started in its process group, is stopped (SIGKILL) when the session is
-  next opened, before any tool runs. Until then it goes on. pytte records
-  each group with its leader's start time, so a process that later got
-  the same ID is never stopped by mistake. (On Linux a group whose shell
-  already exited is found too; on other systems only a group whose shell
-  still runs is.)
+  next opened, before any tool runs but after the session is known to be
+  this host's to open. Until then it goes on. Each group's record names
+  its host, the boot, its shell's start time, and a random
+  `PYTTE_GROUP` value that the command and its children inherit in their
+  environment. A group is stopped only when its shell still runs with
+  that start time, or, on Linux, when its shell is gone and a process
+  still in the group carries that `PYTTE_GROUP`. A process that later got
+  the same ID descends from someone else and lacks the value, so it is
+  never stopped by mistake. When pytte cannot tell (another system with
+  the shell gone, or a process that cleared its environment) it leaves
+  the group running and forgets it. A record from another host (a
+  session opened with `--force`) is kept for that host; one from before
+  a reboot is dropped.
 - **Approvals.** A tool call waiting for approval keeps waiting; an
   answer given before the crash was written, and counts.
 
@@ -81,6 +93,7 @@ When a session is opened again after its owner died:
 |---|---|
 | `/quit`, Ctrl-D, Ctrl-C twice | closed |
 | SIGTERM, SIGINT, SIGHUP (a closed terminal or ssh connection), in the TUI and in print mode | closed |
+| SIGHUP to print mode started ignoring it (`nohup pytte -p …`, `trap '' HUP`) | runs on |
 | `kill -9`, a crash, a power cut | left open: `pytte ls` says *crashed* |
 
 A closed session with a run unfinished continues where it stopped when

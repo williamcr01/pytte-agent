@@ -33,7 +33,10 @@ struct pt_proc {
     int out, err, in, exitfd;
     bool reaped;
     int status;
+    char group_env[32]; /* opts.marked: "PYTTE_GROUP=<16 hex>"; else empty */
 };
+
+#define GROUP_VAR "PYTTE_GROUP="
 
 static bool named(const char *kv, const char *const names[])
 {
@@ -46,10 +49,11 @@ static bool named(const char *kv, const char *const names[])
     return false;
 }
 
-/* Before fork: async-signal-safe code only may run in the child. */
-static char **make_env(const char *const unset[], const char *const add[])
+/* Before fork: async-signal-safe code only may run in the child. extra:
+ * PYTTE_GROUP=... (it replaces an inherited one), or NULL. */
+static char **make_env(const char *const unset[], const char *const add[], const char *extra)
 {
-    size_t n = 0, k = 0, i;
+    size_t n = 1, k = 0, i; /* 1: room for extra */
     char **env;
     for (i = 0; environ[i]; i++) {
         if (n == SIZE_MAX)
@@ -67,10 +71,13 @@ static char **make_env(const char *const unset[], const char *const add[])
     if (!env)
         return NULL;
     for (i = 0; environ[i]; i++)
-        if (!named(environ[i], unset) && !named(environ[i], (const char *const *)add))
+        if (!named(environ[i], unset) && !named(environ[i], (const char *const *)add) &&
+            !(extra && strncmp(environ[i], GROUP_VAR, sizeof GROUP_VAR - 1) == 0))
             env[k++] = environ[i];
     for (i = 0; add && add[i]; i++)
         env[k++] = (char *)add[i];
+    if (extra)
+        env[k++] = (char *)extra;
     env[k] = NULL;
     return env;
 }
@@ -114,9 +121,22 @@ pt_proc *pt_proc_spawn(const char *const argv[], const char *cwd, const char *co
                        const char *const add[], const pt_proc_opts *opts, char *err, size_t cap)
 {
     pt_proc *p = (pt_proc *)calloc(1, sizeof *p);
-    char **env = make_env(unset, add);
+    char **env = NULL;
     int fds[2] = {-1, -1}, efds[2] = {-1, -1}, ifds[2] = {-1, -1}, in;
     bool want_in = opts && opts->stdin_pipe, split = opts && opts->split_err;
+    if (p && opts && opts->marked) {
+        static const char hex[] = "0123456789abcdef";
+        unsigned char r[8] = {0};
+        size_t i, at = sizeof GROUP_VAR - 1;
+        pt_sys_random(NULL, r, sizeof r);
+        memcpy(p->group_env, GROUP_VAR, at);
+        for (i = 0; i < sizeof r; i++) {
+            p->group_env[at++] = hex[r[i] >> 4];
+            p->group_env[at++] = hex[r[i] & 15];
+        }
+    }
+    if (p)
+        env = make_env(unset, add, p->group_env[0] ? p->group_env : NULL);
     if (!p || !env) {
         snprintf(err, cap, "out of memory");
         goto fail;
@@ -302,9 +322,10 @@ void pt_proc_free(pt_proc *p)
 }
 
 /* ---- what outlives a crash ----
- * A mark is "<pid> <boot> <start>": the group's ID, which is its leader's
- * pid (setsid), and when that leader started, so that a later process
- * that gets the same pid is never taken for it. */
+ * A mark is "<pid> <host> <boot> <start> <tag>": the group's ID, which is
+ * its leader's pid (setsid), where it runs, when that leader started, so
+ * that a later process that gets the same pid is never taken for it, and
+ * the PYTTE_GROUP value its members inherit ("-": none). */
 
 #ifdef __linux__
 /* From /proc/<pid>/stat, after the command: the group, the session and
@@ -363,16 +384,53 @@ static bool start_of(long pid, char *out, size_t cap)
     return true;
 }
 
+/* Whether pid's environment (as it was exec'd) holds entry whole: read in
+ * blocks, keeping the bytes a match could span. */
+static bool env_has(long pid, const char *entry)
+{
+    char path[64], buf[4096], needle[64];
+    size_t nn = strlen(entry) + 2, keep = 1, n;
+    ssize_t got;
+    int fd;
+    bool found = false;
+    if (nn > sizeof needle)
+        return false;
+    needle[0] = needle[nn - 1] = 0; /* entries end in a NUL */
+    memcpy(needle + 1, entry, nn - 2);
+    snprintf(path, sizeof path, "/proc/%ld/environ", pid);
+    if ((fd = open(path, O_RDONLY | O_CLOEXEC)) < 0)
+        return false;
+    buf[0] = 0; /* as if a NUL came before the first entry */
+    while (!found) {
+        do
+            got = read(fd, buf + keep, sizeof buf - keep);
+        while (got < 0 && errno == EINTR);
+        if (got <= 0)
+            break;
+        n = keep + (size_t)got;
+        found = memmem(buf, n, needle, nn) != NULL;
+        keep = n < nn - 1 ? n : nn - 1;
+        memmove(buf, buf + n - keep, keep);
+    }
+    close(fd);
+    return found;
+}
+
 /* The leader is gone but its group may not be: a member of its session
- * that started no earlier than it did. The kernel does not hand out a pid
- * while a group or session still uses it as its ID. */
-static bool group_lives(long pid, const char *start)
+ * that started no earlier than it did and carries its PYTTE_GROUP. The
+ * kernel does not hand out a pid while a group or session still uses it
+ * as its ID, and a later group with the same ID descends from a later
+ * leader, which has the tag only if one of this group's processes started
+ * it. A member that dropped the tag (env -i) is not found. */
+static bool group_lives(long pid, const char *start, const char *tag)
 {
     unsigned long long since = strtoull(start, NULL, 10);
-    DIR *d = opendir("/proc");
+    char entry[48];
+    DIR *d;
     struct dirent *e;
     bool found = false;
-    if (!d)
+    if (!strcmp(tag, "-") || (size_t)snprintf(entry, sizeof entry, GROUP_VAR "%s", tag) >= sizeof entry ||
+        !(d = opendir("/proc")))
         return false;
     while (!found && (e = readdir(d))) {
         long pgrp, sid, member;
@@ -383,7 +441,7 @@ static bool group_lives(long pid, const char *start)
         member = strtol(e->d_name, &end, 10);
         if (*end || !linux_stat(member, &pgrp, &sid, &at))
             continue;
-        found = pgrp == pid && sid == pid && at >= since;
+        found = pgrp == pid && sid == pid && at >= since && env_has(member, entry);
     }
     closedir(d);
     return found;
@@ -400,10 +458,11 @@ static bool start_of(long pid, char *out, size_t cap)
     return true;
 }
 
-static bool group_lives(long pid, const char *start)
+static bool group_lives(long pid, const char *start, const char *tag)
 {
     (void)pid;
     (void)start;
+    (void)tag;
     return false; /* only a leader that still runs is known for sure */
 }
 #else
@@ -415,13 +474,24 @@ static bool start_of(long pid, char *out, size_t cap)
     return false;
 }
 
-static bool group_lives(long pid, const char *start)
+static bool group_lives(long pid, const char *start, const char *tag)
 {
     (void)pid;
     (void)start;
+    (void)tag;
     return false;
 }
 #endif
+
+/* The host name, as one word (a mark is split at spaces). */
+static void host_of(char *out, size_t cap)
+{
+    char *c;
+    pt_sys_identity(out, cap, NULL, 0, NULL);
+    for (c = out; *c; c++)
+        if (*c <= ' ' || *c > '~')
+            *c = '_';
+}
 
 /* The boot ID, or "-" where there is none (the start time is absolute). */
 static void boot_of(char *out, size_t cap)
@@ -438,33 +508,54 @@ int64_t pt_proc_group(const pt_proc *p)
 
 size_t pt_proc_mark(const pt_proc *p, char *out, size_t cap)
 {
-    char boot[64], start[32];
+    char host[64], boot[64], start[32];
     int n;
     if (p->reaped || !start_of((long)p->pid, start, sizeof start))
         return 0;
+    host_of(host, sizeof host);
     boot_of(boot, sizeof boot);
-    n = snprintf(out, cap, "%ld %s %s", (long)p->pid, boot, start);
+    n = snprintf(out, cap, "%ld %s %s %s %s", (long)p->pid, host, boot, start,
+                 p->group_env[0] ? p->group_env + sizeof GROUP_VAR - 1 : "-");
     return n > 0 && (size_t)n < cap ? (size_t)n : 0;
 }
 
-bool pt_proc_stop_marked(pt_str mark)
+/* pt_proc_marked_runs, and the group's ID when it says 1. */
+static int judge(pt_str mark, pid_t *group)
 {
-    char text[160], boot[64], start[32], now[64], cur[32];
+    char text[256], host[64], boot[64], start[32], tag[32], now[64], cur[32];
     long pid;
     if (!mark.n || mark.n >= sizeof text)
-        return false;
+        return 0;
     memcpy(text, mark.p, mark.n);
     text[mark.n] = 0;
-    if (sscanf(text, "%ld %63s %31s", &pid, boot, start) != 3 || pid <= 1 || (long)(pid_t)pid != pid)
-        return false;
+    if (sscanf(text, "%ld %63s %63s %31s %31s", &pid, host, boot, start, tag) != 5 || pid <= 1 ||
+        (long)(pid_t)pid != pid)
+        return 0;
+    host_of(now, sizeof now);
+    if (strcmp(host, now) != 0)
+        return -1;
     boot_of(now, sizeof now);
     if (strcmp(boot, now) != 0)
-        return false; /* rebooted since: nothing of it runs */
-    if (start_of(pid, cur, sizeof cur)) {
-        if (strcmp(cur, start) != 0)
-            return false; /* the pid is another process's now */
-    } else if (!group_lives(pid, start)) {
-        return false;
-    }
-    return kill(-(pid_t)pid, SIGKILL) == 0;
+        return 0; /* rebooted since: nothing of it runs */
+    *group = (pid_t)pid;
+    if (start_of(pid, cur, sizeof cur))
+        return strcmp(cur, start) == 0; /* else the pid is another process's now */
+    return group_lives(pid, start, tag);
+}
+
+int pt_proc_marked_runs(pt_str mark)
+{
+    pid_t group;
+    return judge(mark, &group);
+}
+
+int pt_proc_stop_marked(pt_str mark)
+{
+    pid_t group = 0;
+    int r = judge(mark, &group);
+    /* The member seen may end before the kill, but the ID stays unused
+     * until the pids wrap around, far longer than this takes. */
+    if (r == 1)
+        kill(-group, SIGKILL);
+    return r;
 }

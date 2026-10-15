@@ -194,7 +194,7 @@ static bool finish_cut(pt_agent *a, task *t, const pt_block *call, bool aborted,
     ending e;
     pt_buf b;
     pt_str tail = tail_of(a, t);
-    bool quit = a->claims.quit, ok;
+    bool quit = t->quit, ok;
     pt_buf_init(&b, a->al);
     pt_buf_putz(&b, aborted ? aborted_text : quit ? quit_text : interrupted_text);
     if (tail.n) {
