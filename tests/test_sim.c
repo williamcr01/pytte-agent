@@ -161,6 +161,7 @@ struct scenario {
     int tools; /* fake tools, run without asking or approved by the client */
     uint32_t window; /* context window (tokens), to make it compact */
     uint32_t together; /* the most looks the reference run has at once; 0: not checked */
+    uint32_t steer;    /* bit i: prompt i is sent as a steer; the reference run is then one run */
 };
 
 static task *first_run(world *w)
@@ -396,6 +397,7 @@ static pt_rt_result client(world *w, const scenario *sc)
         memset(&in, 0, sizeof in);
         in.text = strcmp(sc->prompts[i], "@big") == 0 ? big_prompt() : pt_strz(sc->prompts[i]);
         in.req = pt_strz(req);
+        in.steer = (sc->steer >> i & 1) != 0;
         CHECK(pt_submit(a, &in));
     }
     do
@@ -608,6 +610,10 @@ static void exhaustive(const scenario *sc)
     CHECK(!sc->together || ref.most_looks == sc->together);
     k = pt_store_memory_appends(ref.store);
     outcome(&ref, &want);
+    if (sc->steer) { /* every steer joined the first run */
+        const char *at = find(pt_buf_str(&want), "run: ");
+        CHECK(at && !find((pt_str){at + 1, (size_t)(want.p + want.n - (at + 1))}, "run: "));
+    }
     if (getenv("SIM_SHOW"))
         fprintf(stderr, "%s:\n%.*s", sc->name, (int)want.n, want.p);
 
@@ -670,36 +676,36 @@ static const scenario scenarios[] = {
     {"answer",
      "{\"chunk\":7,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Easy.\"},"
      "{\"type\":\"text\",\"text\":\"The answer is 450, since 25 times 18 is 450.\"}]}]}",
-     {"what is 25*18?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"what is 25*18?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
     {"retry",
      "{\"chunk\":7,\"turns\":[[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"This stream gets cut off somewhere in the middle\"}],"
      "\"cut\":150},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Third time lucky.\"}]}]]}",
-     {"go", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"go", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
     {"tool_round",
      "{\"chunk\":9,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Let me look.\"},"
      "{\"type\":\"tool_call\",\"name\":\"bash\",\"args\":{\"cmd\":\"ls\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"No tools here, so I will just answer.\"}]}]}",
-     {"list the files", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"list the files", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
     {"fatal",
      "{\"turns\":[{\"status\":401,\"body\":{\"class\":\"fatal\",\"message\":\"invalid key\"}}]}",
-     {"hello?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"hello?", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
     {"length",
      "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"This is cut by max_tok\"}],"
      "\"stop\":\"length\"}]}",
-     {"write a novel", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"write a novel", NULL, NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
     {"two_inputs",
      "{\"chunk\":6,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First answer.\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Second answer.\"}]}]}",
-     {"first question", "second question", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"first question", "second question", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
     {"abort_stream",
      "{\"chunk\":5,\"turns\":[{\"content\":[{\"type\":\"thinking\",\"text\":\"Long.\"},"
      "{\"type\":\"text\",\"text\":\"A long answer that the user interrupts somewhere in the middle.\"}]}]}",
-     {"first question", "second question", NULL}, ABORT_STREAM, 6, TOOLS_NONE, 0, 0},
+     {"first question", "second question", NULL}, ABORT_STREAM, 6, TOOLS_NONE, 0, 0, 0},
     {"abort_retry",
      "{\"turns\":[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"overloaded\"}}]}",
-     {"go", NULL, NULL}, ABORT_RETRY, 0, TOOLS_NONE, 0, 0},
+     {"go", NULL, NULL}, ABORT_RETRY, 0, TOOLS_NONE, 0, 0, 0},
     {"tools",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Count, then look.\"},"
      "{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}},"
@@ -709,7 +715,7 @@ static const scenario scenarios[] = {
      "{\"type\":\"tool_call\",\"name\":\"nope\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Counted twice and looked.\"}]}]}",
-     {"count and look", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 0},
+     {"count and look", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 0, 0},
     /* Looks run together, count alone: the round goes in three batches. */
     {"batches",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"a\"}},"
@@ -719,25 +725,25 @@ static const scenario scenarios[] = {
      "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"d\"}},"
      "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"e\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Looked around a count.\"}]}]}",
-     {"look, count, look", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 3},
+     {"look, count, look", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 3, 0},
     {"approve",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}},"
      "{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Approved.\"}]}]}",
-     {"count, if I may", "and again", NULL}, ABORT_NONE, 0, TOOLS_ASK, 0, 0},
+     {"count, if I may", "and again", NULL}, ABORT_NONE, 0, TOOLS_ASK, 0, 0, 0},
     {"abort_tool",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}},"
      "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Next.\"}]}]}",
-     {"look twice", "then this", NULL}, ABORT_TOOL, 0, TOOLS_AUTO, 0, 0},
+     {"look twice", "then this", NULL}, ABORT_TOOL, 0, TOOLS_AUTO, 0, 0, 0},
     {"big_prompt",
      "{\"chunk\":9,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"A long read.\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"And a short one.\"}]}]}",
-     {"@big", "short", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"@big", "short", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
     {"big_output",
      "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"big\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"That was long.\"}]}]}",
-     {"look at it all", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 0},
+     {"look at it all", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 0, 0},
     {"compact",
      "{\"chunk\":40,\"turns\":["
      "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG "\"}]},"
@@ -745,7 +751,7 @@ static const scenario scenarios[] = {
      "{\"content\":[{\"type\":\"text\",\"text\":\"Third. " LONG "\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Fourth, after a summary.\"}]}],"
      "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"Three questions so far.\"}]}}",
-     {"first question", "second question", "third question"}, ABORT_NONE, 0, TOOLS_NONE, 300, 0},
+     {"first question", "second question", "third question"}, ABORT_NONE, 0, TOOLS_NONE, 300, 0, 0},
     /* Between tool rounds, keeping the newest two. The window leaves room
      * for count's longer result when a crash interrupts it. */
     {"compact_midrun",
@@ -757,21 +763,32 @@ static const scenario scenarios[] = {
      "{\"content\":[{\"type\":\"tool_call\",\"name\":\"count\",\"args\":{}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Looked twice and counted.\"}]}],"
      "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"Looking at things.\"}]}}",
-     {"look around", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 440, 0},
+     {"look around", NULL, NULL}, ABORT_NONE, 0, TOOLS_AUTO, 440, 0, 0},
     {"overflow",
      "{\"chunk\":40,\"turns\":["
      "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG LONG LONG "\"}]},"
      "{\"context_limit\":900,\"content\":[{\"type\":\"text\",\"text\":\"After the summary.\"}]}],"
      "\"compact\":[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"busy\"}},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"One short answer.\"}]}]}",
-     {"first", "second", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0},
+     {"first", "second", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
+    /* A steer waits for the tool round, then joins the next request. */
+    {"steer_tool",
+     "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Looking.\"},"
+     "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"a\"}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Looked, and heard the steer.\"}]}]}",
+     {"look at a", "actually, be brief", NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 0, 2},
+    /* A run that ends with an answer starts the steer's turn in the same run. */
+    {"steer_answer",
+     "{\"chunk\":6,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First answer.\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Answer to the steer.\"}]}]}",
+     {"first question", "and one more thing", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 2},
     {"abort_compact",
      "{\"chunk\":40,\"turns\":["
      "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG "\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Second. " LONG "\"}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Third.\"}]}],"
      "\"compact\":{\"content\":[{\"type\":\"text\",\"text\":\"Never used.\"}]}}",
-     {"one", "two", "three"}, ABORT_COMPACT, 0, TOOLS_NONE, 300, 0},
+     {"one", "two", "three"}, ABORT_COMPACT, 0, TOOLS_NONE, 300, 0, 0},
 };
 
 /* Another writer appends to the log behind the owner's back (shared

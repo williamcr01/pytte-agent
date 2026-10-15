@@ -150,7 +150,19 @@ static bool start_compaction(pt_agent *a, task *t, uint32_t cutoff)
     return pt_core_commit_end(a);
 }
 
-static bool prepare(pt_agent *a, task *t, uint32_t attempt)
+/* Place every pending steer in the open commit, oldest first, after what
+ * the run has so far (section 8.5). Returns the newest entry's ID, or
+ * `cutoff` when there was none. */
+static uint32_t place_steers(pt_agent *a, task *t, uint32_t cutoff)
+{
+    input *s = NULL;
+    while ((s = pt_core_next_steer(a, s)))
+        cutoff = pt_core_write_steer(a, s, t->id);
+    return cutoff;
+}
+
+/* steer: this is a turn boundary, so pending steers join the request. */
+static bool prepare(pt_agent *a, task *t, uint32_t attempt, bool steer)
 {
     pt_arena *sa = &a->scratch;
     const pt_config *c = &a->o.config;
@@ -159,6 +171,7 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     pt_credentials cred;
     entry *last = pt_core_last_entry(a);
     task nt = *t;
+    input *s;
     uint64_t used;
     pt_buf ref;
     bool ok;
@@ -169,7 +182,9 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     nt.cutoff = last ? last->id : 0;
     used = pt_core_estimate(a, nt.cutoff);
     if (over_budget(a, &target, used))
-        return start_compaction(a, t, nt.cutoff);
+        return start_compaction(a, t, nt.cutoff); /* the steers wait for the next boundary */
+    for (s = steer ? pt_core_next_steer(a, NULL) : NULL; s; s = pt_core_next_steer(a, s))
+        used += s->text.n / 3 + 1; /* the estimate of pt_core_estimate */
     if (!pt_core_context(a, nt.cutoff, &ctx, sa)) {
         pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
         return false;
@@ -185,6 +200,8 @@ static bool prepare(pt_agent *a, task *t, uint32_t attempt)
     nt.reasoning = c->reasoning;
     nt.max_tokens = c->max_tokens ? c->max_tokens : pt_ai_auto_max_tokens(&target, &ctx, used < UINT32_MAX ? (uint32_t)(used ? used : 1) : UINT32_MAX);
     pt_core_commit_begin(a, t->id);
+    if (steer)
+        nt.cutoff = place_steers(a, t, nt.cutoff);
     pt_write_task(&a->commit.w, &nt);
     ok = pt_core_commit_end(a);
     pt_buf_free(&ref);
@@ -537,6 +554,12 @@ static bool classify(pt_agent *a, task *t)
                                         PT_S("The tool call was cut off by max_tokens. Retry in smaller pieces."));
         nt.phase = PH_PREPARE;
         nt.attempt = 1;
+    } else if (m->stop != PT_STOP_REFUSAL && pt_core_next_steer(a, NULL)) {
+        /* No next turn, but a steer waits: it starts one in this run. */
+        pt_run_write_assistant(a, pt_core_new_id(a), m);
+        nt.cutoff = place_steers(a, t, nt.cutoff);
+        nt.phase = PH_PREPARE;
+        nt.attempt = 1;
     } else {
         uint32_t id = pt_core_new_id(a);
         pt_run_write_assistant(a, id, m);
@@ -718,11 +741,11 @@ bool pt_run_step(pt_agent *a, task *t)
 {
     switch (t->phase) {
     case PH_PREPARE:
-        return prepare(a, t, t->attempt ? t->attempt : 1);
+        return prepare(a, t, t->attempt ? t->attempt : 1, false);
     case PH_RETRY:
         if (t->woke) {
             t->woke = false;
-            return prepare(a, t, t->attempt + 1);
+            return prepare(a, t, t->attempt + 1, false);
         }
         return pt_run_sleep(a, t);
     case PH_TOOLS:
@@ -730,7 +753,7 @@ bool pt_run_step(pt_agent *a, task *t)
             return false;
         if (t->abort)
             return end_aborted(a, t);
-        return prepare(a, t, 1); /* pure: folded into the next request's commit */
+        return prepare(a, t, 1, true); /* pure: folded into the next request's commit */
     case PH_REQUEST:
         if (t->rescued.n)
             return commit_rescued(a, t);

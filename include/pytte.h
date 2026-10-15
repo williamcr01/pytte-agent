@@ -211,6 +211,10 @@ typedef struct pt_input {
     pt_str text;
     pt_str req; /* optional request ID: submitting it twice is a no-op */
     bool note;  /* pytte wrote it, not the user: its entry says "from":"pytte" */
+    bool steer; /* when_busy "steer" (section 8.5): while a run is active, join it at its
+                 * next turn boundary, after the tool round in flight, instead of waiting
+                 * for it to end. With no run active, or when the run ends without a next
+                 * turn (it failed, was aborted), it is an ordinary input. */
 } pt_input;
 
 bool pt_submit(pt_agent *a, const pt_input *in);
