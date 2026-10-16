@@ -21,6 +21,9 @@ bool pt_rt_tool_add(pt_rt *rt, const pt_rt_tool *t)
         if (!d)
             return false;
         rt->defs = d;
+        if (!(d = (pt_tool_def *)realloc(rt->on, rt->tcap * sizeof *d)))
+            return false;
+        rt->on = d;
     }
     rt->tools[rt->ntools] = *t;
     rt->defs[rt->ntools++] = t->def;
@@ -52,10 +55,55 @@ bool pt_rt_tool_has(pt_rt *rt, pt_str name)
     return false;
 }
 
-const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n)
+const pt_tool_def *pt_rt_tool_all(pt_rt *rt, uint32_t *n)
 {
     *n = rt->ntools;
     return rt->defs;
+}
+
+const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n)
+{
+    uint32_t i;
+    if (!rt->noff)
+        return pt_rt_tool_all(rt, n);
+    *n = 0;
+    for (i = 0; i < rt->ntools; i++) /* rt->on has room for every tool */
+        if (!pt_rt_tool_off(rt, rt->defs[i].name))
+            rt->on[(*n)++] = rt->defs[i];
+    return rt->on;
+}
+
+bool pt_rt_tool_off(const pt_rt *rt, pt_str name)
+{
+    uint32_t i;
+    for (i = 0; i < rt->noff; i++)
+        if (pt_str_eqz(name, rt->off[i]))
+            return true;
+    return false;
+}
+
+bool pt_rt_tool_set_off(pt_rt *rt, pt_str name, bool off)
+{
+    uint32_t i;
+    char *z;
+    for (i = 0; i < rt->noff && !pt_str_eqz(name, rt->off[i]); i++)
+        ;
+    if (!off) {
+        if (i < rt->noff) {
+            free(rt->off[i]);
+            rt->off[i] = rt->off[--rt->noff];
+        }
+        return true;
+    }
+    if (i < rt->noff)
+        return true;
+    if (!pt_rt_grow((void **)&rt->off, &rt->ocap, rt->noff + 1, sizeof *rt->off) || !(z = (char *)malloc(name.n + 1)))
+        return false;
+    if (name.n)
+        memcpy(z, name.p, name.n);
+    z[name.n] = 0;
+    rt->off[rt->noff++] = z;
+    return true;
 }
 
 void pt_rt_tool_fallback(pt_rt *rt, const pt_rt_tool *t)
@@ -109,32 +157,133 @@ void pt_rt_set_perm(pt_rt *rt, pt_perm_mode mode)
     rt->perm = mode;
 }
 
-static char *dupz(pt_str s)
+/* ---- rules ---- */
+
+/* Split a spec into its tool name and pattern, and say how the pattern
+ * matches. A bash pattern ending in ":*" is a prefix of words. */
+static bool rule_split(pt_str spec, pt_str *tool, pt_str *pat, rt_rule_mode *mode, const char **why)
 {
-    char *p = (char *)malloc(s.n + 1);
-    if (p) {
-        if (s.n)
-            memcpy(p, s.p, s.n);
-        p[s.n] = 0;
+    long open;
+    size_t i;
+    *pat = PT_STR_NULL;
+    *mode = RULE_ANY;
+    open = pt_str_find(spec, '(');
+    *tool = open < 0 ? spec : (pt_str){spec.p, (size_t)open};
+    if (!tool->n) {
+        *why = "a rule starts with a tool name";
+        return false;
     }
-    return p;
+    for (i = 0; i < tool->n; i++)
+        if (!tool->p[i] || strchr(" \t\n)", tool->p[i])) {
+            *why = "a tool name has no spaces or parentheses";
+            return false;
+        }
+    if (open < 0)
+        return true;
+    if (spec.p[spec.n - 1] != ')' || spec.n < (size_t)open + 3) {
+        *why = "a rule is tool or tool(pattern)";
+        return false;
+    }
+    *pat = (pt_str){spec.p + open + 1, spec.n - (size_t)open - 2};
+    *mode = RULE_GLOB;
+    if (pt_str_eqz(*tool, "bash") && pat->n >= 2 && pat->p[pat->n - 2] == ':' && pat->p[pat->n - 1] == '*') {
+        pat->n -= 2;
+        *mode = pat->n ? RULE_PREFIX : RULE_ANY;
+    }
+    return true;
+}
+
+bool pt_rule_check(pt_str spec, const char **why)
+{
+    pt_str tool, pat;
+    rt_rule_mode mode;
+    const char *w = "";
+    if (!why)
+        why = &w;
+    return rule_split(pt_str_trim(spec), &tool, &pat, &mode, why);
+}
+
+bool pt_rt_rule_add(pt_rt *rt, bool deny, pt_str spec, pt_rule_src src)
+{
+    pt_str tool, pat;
+    rt_rule_mode mode;
+    const char *why;
+    rt_rule *r;
+    char *data;
+    spec = pt_str_trim(spec);
+    if (!rule_split(spec, &tool, &pat, &mode, &why) ||
+        !pt_rt_grow((void **)&rt->rules, &rt->rucap, rt->nrules + 1, sizeof *rt->rules))
+        return false;
+    /* spec, tool and pattern, each ended by a NUL */
+    data = (char *)malloc(spec.n + tool.n + pat.n + 3);
+    if (!data)
+        return false;
+    r = &rt->rules[rt->nrules];
+    memcpy(data, spec.p, spec.n);
+    data[spec.n] = 0;
+    memcpy(data + spec.n + 1, tool.p, tool.n);
+    data[spec.n + 1 + tool.n] = 0;
+    if (pat.n)
+        memcpy(data + spec.n + tool.n + 2, pat.p, pat.n);
+    data[spec.n + tool.n + 2 + pat.n] = 0;
+    r->spec = data;
+    r->tool = data + spec.n + 1;
+    r->pat = mode == RULE_ANY ? NULL : data + spec.n + tool.n + 2;
+    r->mode = mode;
+    r->deny = deny;
+    r->src = src;
+    rt->nrules++;
+    return true;
+}
+
+void pt_rt_rules_drop_config(pt_rt *rt)
+{
+    uint32_t i, k = 0;
+    for (i = 0; i < rt->nrules; i++) {
+        if (rt->rules[i].src == PT_RULE_SESSION)
+            rt->rules[k++] = rt->rules[i];
+        else
+            free(rt->rules[i].spec);
+    }
+    rt->nrules = k;
+}
+
+void pt_rt_rules_trust(pt_rt *rt, bool trusted)
+{
+    rt->project_trusted = trusted;
+}
+
+static bool rule_active(const pt_rt *rt, const rt_rule *r)
+{
+    return r->deny || r->src != PT_RULE_PROJECT || rt->project_trusted;
+}
+
+uint32_t pt_rt_rules(pt_rt *rt, pt_rt_rule_info *out, uint32_t max)
+{
+    uint32_t i;
+    for (i = 0; i < rt->nrules && i < max; i++) {
+        out[i].spec = pt_strz(rt->rules[i].spec);
+        out[i].deny = rt->rules[i].deny;
+        out[i].src = rt->rules[i].src;
+        out[i].active = rule_active(rt, &rt->rules[i]);
+    }
+    return rt->nrules;
 }
 
 bool pt_rt_allow(pt_rt *rt, pt_str tool, pt_str prefix)
 {
-    rt_rule *r;
-    if (!pt_rt_grow((void **)&rt->rules, &rt->rucap, rt->nrules + 1, sizeof *rt->rules))
-        return false;
-    r = &rt->rules[rt->nrules];
-    r->tool = dupz(tool);
-    r->prefix = dupz(prefix);
-    if (!r->tool || !r->prefix) {
-        free(r->tool);
-        free(r->prefix);
-        return false;
+    pt_buf b;
+    bool ok;
+    pt_buf_init(&b, pt_sys_allocator());
+    pt_buf_puts(&b, tool);
+    if (prefix.n) {
+        pt_buf_putc(&b, '(');
+        pt_buf_puts(&b, prefix);
+        pt_buf_putz(&b, pt_str_eqz(tool, "bash") ? ":*)" : ")");
     }
-    rt->nrules++;
-    return true;
+    ok = !b.oom && pt_rt_rule_add(rt, false, pt_buf_str(&b), PT_RULE_SESSION);
+    pt_buf_free(&b);
+    return ok;
 }
 
 pt_str pt_rt_gist(pt_str args, pt_arena *a)
@@ -147,47 +296,181 @@ pt_str pt_rt_gist(pt_str args, pt_arena *a)
     return PT_STR_NULL;
 }
 
-/* A rule with a prefix allows "git status", not "git status; rm -rf x":
- * gists that could run more than one command never match one. */
-static bool allowed(pt_rt *rt, pt_str name, pt_str gist)
+/* p against s, * matching any run of characters. Linear in the common
+ * case, quadratic at worst; patterns are short. */
+static bool glob(pt_str p, pt_str s, bool fold)
 {
-    uint32_t i;
-    size_t k;
-    bool plain = true;
-    for (k = 0; k < gist.n && plain; k++)
-        plain = !strchr(";&|<>()`$\n\r", gist.p[k]) && gist.p[k];
-    for (i = 0; i < rt->nrules; i++) {
-        pt_str p = pt_strz(rt->rules[i].prefix);
-        if (!pt_str_eqz(name, rt->rules[i].tool))
-            continue;
-        if (!p.n)
-            return true;
-        if (pt_str_eqz(name, "web_fetch")) { /* by host: the URL is the gist */
-            if (pt_str_ieq(pt_rt_url_host(gist), p))
-                return true;
-            continue;
+    size_t pi = 0, si = 0, star = (size_t)-1, mark = 0;
+    while (si < s.n) {
+        char pc = pi < p.n ? p.p[pi] : 0, sc = s.p[si];
+        if (pc == '*') {
+            star = pi++;
+            mark = si;
+        } else if (pi < p.n && (pc == sc || (fold && pc >= 'A' && pc <= 'Z' && pc + 32 == sc) ||
+                                (fold && sc >= 'A' && sc <= 'Z' && sc + 32 == pc))) {
+            pi++;
+            si++;
+        } else if (star != (size_t)-1) {
+            pi = star + 1;
+            si = ++mark;
+        } else {
+            return false;
         }
-        if (plain && pt_str_starts(gist, p) && (gist.n == p.n || gist.p[p.n] == ' '))
+    }
+    while (pi < p.n && p.p[pi] == '*')
+        pi++;
+    return pi == p.n;
+}
+
+/* A bash line's commands: the next one in *rest, without spaces; false
+ * when there is none. */
+#define SEP_CMDS ";&|\n\r"
+#define SEP_ALL ";&|\n\r<>()`$"
+static bool next_cmd(pt_str *rest, const char *seps, pt_str *cmd)
+{
+    while (rest->n) {
+        size_t k = 0, skip;
+        pt_str c;
+        while (k < rest->n && rest->p[k] && !strchr(seps, rest->p[k]))
+            k++;
+        c = pt_str_trim((pt_str){rest->p, k});
+        skip = k < rest->n ? k + 1 : k;
+        rest->p += skip;
+        rest->n -= skip;
+        if (c.n) {
+            *cmd = c;
             return true;
+        }
     }
     return false;
 }
 
+/* Whether the rule's tool name and pattern match text: for bash, one
+ * command; for web_fetch, the URL; else the first string argument. */
+static bool rule_matches(const rt_rule *r, pt_str name, pt_str text)
+{
+    pt_str pat = pt_strz(r->pat);
+    bool fold = false;
+    if (!glob(pt_strz(r->tool), name, false))
+        return false;
+    if (r->mode == RULE_ANY)
+        return true;
+    if (r->mode == RULE_PREFIX) /* the words of a command, not the letters */
+        return pt_str_starts(text, pat) && (text.n == pat.n || text.p[pat.n] == ' ' || text.p[pat.n] == '\t');
+    if (pt_str_eqz(name, "web_fetch")) { /* by host */
+        text = pt_rt_url_host(text);
+        fold = true;
+    }
+    return glob(pat, text, fold);
+}
+
+/* The deny rule that matches the call, or NULL. A bash line is cut at
+ * everything that could start a command, so no rule is dodged by
+ * writing "ls; rm -rf x" or "echo $(rm -rf x)". */
+static const rt_rule *denied(pt_rt *rt, pt_str name, pt_str gist)
+{
+    bool is_bash = pt_str_eqz(name, "bash");
+    uint32_t i;
+    for (i = 0; i < rt->nrules; i++) {
+        const rt_rule *r = &rt->rules[i];
+        pt_str rest = gist, cmd;
+        if (!r->deny)
+            continue;
+        if (!is_bash || r->mode == RULE_ANY) {
+            if (rule_matches(r, name, gist))
+                return r;
+            continue;
+        }
+        while (next_cmd(&rest, SEP_ALL, &cmd))
+            if (rule_matches(r, name, cmd))
+                return r;
+    }
+    return NULL;
+}
+
+/* The allow rule that lets the call run without asking, or NULL. A bash
+ * line is allowed when rules match every command in it; a line with
+ * substitution, a subshell or a redirect is allowed only by a rule
+ * without a pattern, as the commands in it cannot be told. The rule
+ * returned is the one for the first command. */
+static const rt_rule *allowed(pt_rt *rt, pt_str name, pt_str gist)
+{
+    const rt_rule *first = NULL;
+    pt_str rest = gist, cmd;
+    uint32_t i;
+    size_t k;
+    bool plain = true;
+    for (i = 0; i < rt->nrules; i++) {
+        const rt_rule *r = &rt->rules[i];
+        if (!r->deny && rule_active(rt, r) && (r->mode == RULE_ANY || !pt_str_eqz(name, "bash")) &&
+            rule_matches(r, name, gist))
+            return r;
+    }
+    if (!pt_str_eqz(name, "bash"))
+        return NULL;
+    for (k = 0; k < gist.n && plain; k++)
+        plain = gist.p[k] && !strchr("<>()`$", gist.p[k]);
+    if (!plain)
+        return NULL;
+    while (next_cmd(&rest, SEP_CMDS, &cmd)) {
+        const rt_rule *hit = NULL;
+        for (i = 0; i < rt->nrules && !hit; i++)
+            if (!rt->rules[i].deny && rule_active(rt, &rt->rules[i]) && rule_matches(&rt->rules[i], name, cmd))
+                hit = &rt->rules[i];
+        if (!hit)
+            return NULL;
+        if (!first)
+            first = hit;
+    }
+    return first;
+}
+
+static const char *const src_names[] = {"session", "user config", "project config"};
+
+/* "<before><spec> (<source>)", in the arena. */
+static pt_str rule_text(pt_rt *rt, const char *before, const rt_rule *r)
+{
+    pt_buf b;
+    pt_str s;
+    pt_buf_init(&b, pt_sys_allocator());
+    pt_buf_putz(&b, before);
+    pt_buf_putz(&b, r->spec);
+    pt_buf_putz(&b, " (");
+    pt_buf_putz(&b, src_names[r->src]);
+    pt_buf_putc(&b, ')');
+    s = b.oom ? PT_STR_NULL : pt_arena_dup(&rt->ar, pt_buf_str(&b));
+    pt_buf_free(&b);
+    return s;
+}
+
+/* The decision (section 15.5): a tool turned off first, then a deny
+ * rule, then read-only mode, then the tool being read-only or the mode
+ * auto or an allow rule; else ask. The text of a rule that decided goes with the answer, and is
+ * committed with it. */
 void pt_rt_gate(pt_rt *rt, const pt_fx *fx)
 {
     int k = find_tool(rt, fx->name);
+    bool claimed = k < 0 && fallback_claims(rt, fx->name);
+    const rt_rule *rule = NULL;
     pt_gate g;
     pt_str gist;
     pt_arena_reset(&rt->ar);
     gist = pt_rt_gist(fx->args, &rt->ar);
     memset(&g, 0, sizeof g);
     g.kind = PT_GATE_ALLOW;
-    if (k < 0 && fallback_claims(rt, fx->name)) {
+    if (pt_rt_tool_off(rt, fx->name)) { /* still in an epoch frozen before */
+        g.kind = PT_GATE_DENY;
+        g.text = PT_S("the user turned this tool off");
+    } else if ((k >= 0 || claimed) && (rule = denied(rt, fx->name, gist))) {
+        g.kind = PT_GATE_DENY;
+        g.text = rule_text(rt, "blocked by the deny rule ", rule);
+        rule = NULL;
+    } else if (claimed) {
         /* not listed yet: it may change things */
         if (rt->perm == PT_PERM_READ_ONLY) {
             g.kind = PT_GATE_DENY;
             g.text = PT_S("pytte runs in read-only mode: only tools that change nothing run");
-        } else if (rt->perm != PT_PERM_AUTO && !allowed(rt, fx->name, gist)) {
+        } else if (rt->perm != PT_PERM_AUTO && !(rule = allowed(rt, fx->name, gist))) {
             g.kind = PT_GATE_ASK;
             g.text = gist;
         }
@@ -200,13 +483,14 @@ void pt_rt_gate(pt_rt *rt, const pt_fx *fx)
             g.text = PT_S("pytte runs in read-only mode: only tools that change nothing run (read, grep, "
                           "find and ls)");
         }
-    } else if (rt->tools[k].def.read_only || rt->tools[k].no_ask || rt->perm == PT_PERM_AUTO ||
-               allowed(rt, fx->name, gist)) {
+    } else if (rt->tools[k].def.read_only || rt->tools[k].no_ask || rt->perm == PT_PERM_AUTO) {
         /* allow */
-    } else {
+    } else if (!(rule = allowed(rt, fx->name, gist))) {
         g.kind = PT_GATE_ASK;
         g.text = gist;
     }
+    if (g.kind == PT_GATE_ALLOW && rule)
+        g.text = rule_text(rt, "allow ", rule);
     pt_fx_gate(rt->a, fx->id, &g);
 }
 
@@ -540,12 +824,14 @@ void pt_rt_tools_free(pt_rt *rt)
         pt_buf_free(&rt->calls[i].head);
         pt_buf_free(&rt->calls[i].tail);
     }
-    for (i = 0; i < rt->nrules; i++) {
-        free(rt->rules[i].tool);
-        free(rt->rules[i].prefix);
-    }
+    for (i = 0; i < rt->nrules; i++)
+        free(rt->rules[i].spec);
     free(rt->calls);
     free(rt->tools);
     free(rt->defs);
+    free(rt->on);
+    for (i = 0; i < rt->noff; i++)
+        free(rt->off[i]);
+    free(rt->off);
     free(rt->rules);
 }

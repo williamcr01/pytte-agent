@@ -78,6 +78,7 @@ typedef struct task {
     pt_str call_id;     /* tool */
     pt_str args;        /* tool: arguments a gate rewrote; empty: as called */
     pt_str prompt;      /* tool approve */
+    pt_str rule;        /* tool execute: the permission rule that allowed it, or empty */
     pt_replay replay;   /* tool execute */
     uint32_t compact;   /* run compact_wait: the compact task */
     bool abort;         /* an abort was requested (section 8.4) */
@@ -90,6 +91,9 @@ typedef struct task {
     pt_buf rescued; /* live file written before a crash */
     bool woke;      /* the retry sleep is over */
     bool recovered; /* the record was loaded, not committed by this process */
+    /* A loaded tool intent: whether its owner closed the session (quit)
+     * before anyone opened it again (reopened), or crashed. */
+    bool quit, reopened;
     bool asked;     /* approve: the question went out */
     bool gated;     /* call: the gate answered (gate, gate_text) */
     pt_gate_kind gate;

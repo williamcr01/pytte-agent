@@ -13,12 +13,22 @@
 
 /* ---- config.c: settings (section 19) ---- */
 
-enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_PERMS, CFG_COMPACT_MODEL, CFG_SKILLS, CFG_N };
+enum { CFG_MODEL, CFG_REASONING, CFG_THINKING, CFG_SYMBOLS, CFG_PAGER, CFG_PERMS, CFG_COMPACT_MODEL, CFG_SKILLS, CFG_SEARCH_BACKEND, CFG_N };
+
+/* A tool turned on or off by a config file: "tools": {"web_fetch": true}. */
+#define CLI_TOOLS_MAX 64
+typedef struct cli_tool_cfg {
+    char name[128];
+    bool on;
+    const char *src; /* "user", "project" */
+} cli_tool_cfg;
 
 typedef struct cli_config {
     char val[CFG_N][512];
     const char *src[CFG_N]; /* where the value came from: "default", "user", "project", "env", "flag" */
     char user_path[4096];   /* ~/.config/pytte/config.json */
+    cli_tool_cfg tools[CLI_TOOLS_MAX];
+    uint32_t ntools;
 } cli_config;
 
 /* The user's pytte directory: $XDG_CONFIG_HOME/pytte, else ~/.config/pytte.
@@ -40,12 +50,31 @@ void cli_config_set(cli_config *c, int k, const char *v, const char *src);
 bool cli_config_save(cli_config *c, int k, const char *v, char *err, size_t cap);
 /* Persist one setting without mutating the caller's configuration. */
 bool cli_config_write(const char *path, int k, const char *v, char *err, size_t cap);
+
+/* Tools: every tool is on unless a config file turns it off, but for
+ * web_fetch, which is off unless one turns it on. */
+bool cli_tool_on(const cli_config *c, pt_str name);
+/* bash_poll serves bash: on and off with it, never on its own. The tool
+ * a follower goes with, or NULL; the follower of a tool, or NULL. */
+const char *cli_tool_leader(pt_str name);
+const char *cli_tool_follower(pt_str name);
+/* The config entry for name, or NULL: where its state comes from. */
+const cli_tool_cfg *cli_tool_entry(const cli_config *c, pt_str name);
+/* Turn a tool on or off in c (not saved); false when c holds
+ * CLI_TOOLS_MAX tools already, or the name is too long or has a dot. */
+bool cli_tool_set(cli_config *c, pt_str name, bool on, const char *src);
+/* The tools to turn off in a session's runtime, one name per line:
+ * those off by default or by a file, registered or not. */
+#define CLI_TOOLS_OFF_CAP ((CLI_TOOLS_MAX + 8) * 128)
+void cli_tools_off(const cli_config *c, char out[CLI_TOOLS_OFF_CAP]);
+/* Save tools.<name> to the file at path, keeping every other key. */
+bool cli_config_write_tool(const char *path, const char *name, bool on, char *err, size_t cap);
 /* Set key (dotted: "tui.thinking") to a JSON value in the file's text,
  * keeping every other member; out is indented by two spaces. False with err when the text is not a JSON
  * object, or the path is not made of objects. */
 bool cli_json_set(pt_str src, const char *key, pt_str value, pt_buf *out, char *err, size_t cap);
-/* Replace a file atomically (temporary file, fsync, rename), keeping the
- * old file's mode, or 0600 for a new one. */
+/* Replace a file atomically (temporary file, fsync, rename, fsync of the
+ * directory), keeping the old file's mode, or 0600 for a new one. */
 bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap);
 
 /* ---- config.c: API keys ----
@@ -65,6 +94,19 @@ const char *cli_auth_key(const char *provider);
  * it could not be saved; true with a non-empty err when it was saved but
  * this process could not take it. */
 bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap);
+
+/* Search API keys (/login search) are kept like provider keys, under
+ * "search:exa" or "search:parallel" in auth.json, so no provider's id
+ * can be the same member. */
+extern const char *const cli_search_backends[2];
+/* The environment variable that holds a backend's key (EXA_API_KEY). */
+const char *cli_search_env(const char *backend);
+/* The backend's key into out: its environment variable first, then
+ * auth.json. False when there is none. Also pt_rt_cfg.search_key. */
+/* The backend's saved key (not the environment's), or NULL; and saving one. */
+const char *cli_search_saved(const char *backend);
+bool cli_search_save(const char *backend, pt_str key, char *err, size_t cap);
+bool cli_search_key(void *ud, const char *backend, char *out, size_t cap);
 
 /* Subscription logins (/login oauth) live in auth.json too, by provider:
  * {"openai-codex": {"access": "...", "refresh": "...", "expires": <ms since
@@ -172,6 +214,29 @@ void cli_open_url(const char *url);
  * in the browser (xdg-open, open), lines for the user through notify. */
 void cli_mcp_host(pt_rt_mcp_host *h, void (*notify)(void *ud, const char *server, const char *msg), void *ud);
 
+/* ---- perm_cfg.c: permission rules (section 15.5) ----
+ * "permissions": {"allow": [...], "deny": [...]} in the user's config.json
+ * and in a project's .pytte/config.json. A project's deny rules apply at
+ * once; its allow rules once trusted (trust.json, a hash of the list, so
+ * any change asks again). */
+
+/* Load the rules of the user file and of the project in cwd into rt,
+ * replacing those loaded before, and set whether the project's allow rules
+ * are trusted. False when out of memory. */
+bool cli_perms_apply(pt_rt *rt, const char *cwd);
+/* Trust (on) or stop trusting the project's allow rules as they are now. */
+bool cli_perms_trust(const char *cwd, bool on, char *err, size_t cap);
+/* Add a rule to permissions.allow of the user's config.json, keeping every
+ * other key (once; a rule already there is not added again). */
+bool cli_perms_allow_save(pt_str spec, char *err, size_t cap);
+/* Whether the "permissions" of a parsed config file hold only rules; false
+ * with the first problem in warn. */
+bool cli_perms_check(const pt_json *root, const char *path, char *warn, size_t cap);
+/* A member of a JSON file such as trust.json, as text (strings unquoted);
+ * and replacing it (empty raw: removing it), keeping the others, atomically. */
+bool cli_file_get(const char *path, const char *key, pt_buf *out);
+bool cli_file_put(const char *path, const char *key, pt_str raw, char *err, size_t cap);
+
 /* ---- session.c: opening sessions ---- */
 
 typedef struct cli_opts {
@@ -194,6 +259,8 @@ typedef struct cli_opts {
     const pt_rt_mcp_server *mcp;
     uint32_t nmcp;
     pt_rt_mcp_host mcp_host;
+    char tools_off[CLI_TOOLS_OFF_CAP]; /* the tools turned off: cli_tools_off */
+    const char *search_backend; /* search.backend; NULL or empty: the first with a key */
 } cli_opts;
 
 typedef struct cli_open_job cli_open_job;

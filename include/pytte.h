@@ -256,7 +256,7 @@ typedef enum { PT_GATE_ALLOW, PT_GATE_DENY, PT_GATE_ASK, PT_GATE_REWRITE } pt_ga
 
 typedef struct pt_gate {
     pt_gate_kind kind;
-    pt_str text; /* DENY: why; ASK: the question */
+    pt_str text; /* DENY: why; ASK: the question; ALLOW: the rule that allowed it, if one did */
     pt_str args; /* REWRITE: the arguments to run with instead (a JSON object) */
 } pt_gate;
 
@@ -333,6 +333,10 @@ pt_str pt_session_cwd(const pt_agent *a);
  * first, the one the session was created with (pt_config.model), or
  * empty. Lives until the next commit applies. */
 pt_str pt_session_model(const pt_agent *a);
+/* Whether the first epoch's materials (its tools, system prompt) are still
+ * provisional: asked for at the first request, so what the host changes
+ * before it makes it in (pt_session_cfg.provisional). */
+bool pt_epoch_provisional(const pt_agent *a);
 /* The host's prompt settings from the session header (pt_session_cfg.prompt),
  * or empty. */
 pt_str pt_session_prompt(const pt_agent *a);

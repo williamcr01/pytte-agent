@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE /* F_FULLFSYNC */
 #include "drv/drv.h"
 
 #include <errno.h>
@@ -192,6 +193,70 @@ bool pt_sys_write_file(const char *path, const void *p, size_t n)
     ok = fwrite(p, 1, n, f) == n;
     ok = fclose(f) == 0 && ok;
     return ok;
+}
+
+int pt_sys_sync_fd(int fd, bool data_only)
+{
+#ifdef __APPLE__
+    (void)data_only;
+    if (fcntl(fd, F_FULLFSYNC) == 0)
+        return 0;
+    if (errno != ENOTSUP && errno != EINVAL && errno != ENOTTY)
+        return -1; /* an I/O error, not a file system without it */
+    return fsync(fd);
+#else
+    return data_only ? fdatasync(fd) : fsync(fd);
+#endif
+}
+
+int pt_sys_sync_dir(const char *dir, bool follow)
+{
+    struct stat st;
+    int fd = open(dir, O_RDONLY | O_CLOEXEC | O_NONBLOCK | (follow ? 0 : O_NOFOLLOW)), r, error;
+    if (fd < 0)
+        return -1;
+    if (fstat(fd, &st) != 0) {
+        error = errno;
+        close(fd);
+        errno = error;
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode)) {
+        close(fd);
+        errno = ENOTDIR;
+        return -1;
+    }
+    r = pt_sys_sync_fd(fd, false);
+    error = errno;
+    if (close(fd) != 0 && r == 0) {
+        r = -1;
+        error = errno;
+    }
+    if (r != 0)
+        errno = error;
+    return r;
+}
+
+int pt_sys_sync_parent(const char *path, bool follow)
+{
+    char parent[4096];
+    size_t n = strlen(path);
+    char *slash;
+    if (n >= sizeof parent) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(parent, path, n + 1);
+    while (n > 1 && parent[n - 1] == '/') /* "dir/" is in ".", not in itself */
+        parent[--n] = 0;
+    slash = strrchr(parent, '/');
+    if (!slash)
+        return pt_sys_sync_dir(".", follow);
+    if (slash == parent)
+        slash[1] = 0;
+    else
+        *slash = 0;
+    return pt_sys_sync_dir(parent, follow);
 }
 
 void pt_sys_random(void *ud, void *out, size_t n)

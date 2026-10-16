@@ -55,6 +55,10 @@ static void write_state(pt_jw *w, const task *t)
             pt_jw_key(w, "prompt");
             pt_jw_str(w, t->prompt);
         } else if (t->phase == PH_EXECUTE) {
+            if (t->rule.n) {
+                pt_jw_key(w, "rule");
+                pt_jw_str(w, t->rule);
+            }
             pt_jw_key(w, "replay");
             pt_jw_strz(w, t->replay == PT_REPLAY_SAFE ? "safe" : "unsafe");
             pt_jw_key(w, "attempt");
@@ -236,6 +240,7 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
         t->call_id = pt_json_gets(st, "call_id", ar);
         t->args = pt_json_is(args, PT_J_OBJ) ? args->raw : PT_STR_NULL;
         t->prompt = pt_json_gets(st, "prompt", ar);
+        t->rule = pt_json_gets(st, "rule", ar);
         t->replay = pt_str_eqz(pt_json_gets(st, "replay", ar), "safe") ? PT_REPLAY_SAFE : PT_REPLAY_UNSAFE;
         return t->entry > 0 && (t->phase != PH_EXECUTE || t->attempt > 0);
     }
@@ -356,6 +361,8 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
             nt.args = pt_arena_dup(&nt.a, nt.args);
         if (nt.prompt.n)
             nt.prompt = pt_arena_dup(&nt.a, nt.prompt);
+        if (nt.rule.n)
+            nt.rule = pt_arena_dup(&nt.a, nt.rule);
         if (nt.ncalls) {
             uint32_t *c = (uint32_t *)pt_arena_alloc(&nt.a, sizeof(uint32_t) * nt.ncalls);
             bool *par = (bool *)pt_arena_alloc(&nt.a, sizeof(bool) * nt.ncalls);
@@ -737,6 +744,7 @@ static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
 {
     pt_arena *pa = &a->perm, *sa = &a->scratch;
     claim *c = &a->claims.newest;
+    uint32_t i;
     c->id = id;
     c->event = pt_arena_dup(pa, pt_json_gets(r, "event", sa));
     c->token = pt_arena_dup(pa, pt_json_gets(r, "token", sa));
@@ -744,6 +752,17 @@ static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
     c->boot = pt_arena_dup(pa, pt_json_gets(r, "boot", sa));
     c->pid = pt_json_geti(r, "pid", 0);
     c->opened = pt_json_geti(r, "opened", 0);
+    /* How each tool call cut off so far ended: by the first claim after
+     * its intent (a task record resets both). */
+    for (i = 0; i < a->ntasks; i++) {
+        task *t = a->tasks[i];
+        if (t->kind != TASK_TOOL || t->phase != PH_EXECUTE || t->reopened)
+            continue;
+        if (pt_str_eqz(c->event, "close"))
+            t->quit = true;
+        else if (pt_str_eqz(c->event, "open"))
+            t->reopened = true;
+    }
 }
 
 static bool apply_record(pt_agent *a, const pt_json *r)

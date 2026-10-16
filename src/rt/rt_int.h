@@ -1,6 +1,6 @@
 /* Inside the runtime: shared by rt.c (the loop), tools.c (the registry,
  * calls and the gate), prompt.c, mcp*.c and the builtin tools
- * (tools_builtin.c, tools_bash.c, tools_search.c, tools_web.c). */
+ * (tools_builtin.c, tools_bash.c, tools_search.c, tools_web.c, tools_websearch.c). */
 #ifndef PT_RT_INT_H
 #define PT_RT_INT_H
 
@@ -55,8 +55,15 @@ typedef struct rt_call {
     pt_sha256 sha;
 } rt_call;
 
+/* A permission rule (section 15.5): spec is "tool" or "tool(pattern)",
+ * tool and pat point into the same allocation (pat NULL: any call). */
+typedef enum { RULE_ANY, RULE_PREFIX, RULE_GLOB } rt_rule_mode;
 typedef struct rt_rule {
-    char *tool, *prefix;
+    char *spec;
+    const char *tool, *pat;
+    rt_rule_mode mode;
+    bool deny;
+    pt_rule_src src;
 } rt_rule;
 
 /* The effect being stored: on the worker, or inline without one. */
@@ -123,8 +130,10 @@ struct pt_rt {
     char session[64]; /* c.session's copy */
     /* tools */
     pt_rt_tool *tools;
-    pt_tool_def *defs;
+    pt_tool_def *defs, *on; /* every tool's, and those of the tools on (pt_rt_tool_defs) */
     uint32_t ntools, tcap;
+    char **off; /* names of the tools turned off, registered or not */
+    uint32_t noff, ocap;
     pt_rt_tool fallback; /* def.name: the prefix it claims; empty: none */
     rt_call *calls;
     uint32_t ncalls, ccap, cinit;
@@ -136,6 +145,7 @@ struct pt_rt {
     pt_perm_mode perm;
     rt_rule *rules;
     uint32_t nrules, rucap;
+    bool project_trusted; /* a project's allow rules apply */
     bool closing, free_waiting;
     rt_builtin builtin;
     rt_prompt prompt;
@@ -194,6 +204,14 @@ typedef struct web web;
 web *pt_rt_web_new(pt_rt *rt);
 void pt_rt_web_free(web *w);
 void pt_rt_web_tool(web *w, pt_rt_tool *t);
+/* tools_websearch.c: web_search, with its state */
+typedef struct wsearch wsearch;
+/* The variables that hold search keys, NULL-ended: never passed to tools,
+ * like the providers' key variables. */
+extern const char *const pt_rt_search_env[3];
+wsearch *pt_rt_wsearch_new(pt_rt *rt);
+void pt_rt_wsearch_free(wsearch *w);
+void pt_rt_wsearch_tool(wsearch *w, pt_rt_tool *t);
 /* tools_builtin.c: images by their first bytes (NULL: not one providers
  * take), and their size in pixels from the header */
 #define PT_RT_IMAGE_MAX 3932160u /* bytes: 5 MB in base64, Anthropic's limit */

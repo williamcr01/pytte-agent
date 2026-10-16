@@ -696,6 +696,11 @@ void app_submit(app *a)
     bool command;
     if (!text.n)
         return;
+    if (a->web_prompt && app_web_answer(a, text)) {
+        tui_input_set(&a->in, PT_STR_NULL);
+        a->draft.dirty = true;
+        return;
+    }
     if (app_secret_at(text)) {
         /* the key stays out of the history */
     } else if (a->hist.ready) {
@@ -768,7 +773,7 @@ static void enter(app *a)
         bool needs = false;
         for (k = 0; p && k < p->nargs; k++)
             needs = needs || p->args[k].required;
-        if ((app_menu_takes_arg(label) && !pt_str_eqz(label, "settings")) || needs) {
+        if ((app_menu_takes_arg(label) && !pt_str_eqz(label, "settings") && !pt_str_eqz(label, "tools")) || needs) {
             /* /model and friends: show their arguments first */
             if (app_complete(a))
                 return;
@@ -804,7 +809,9 @@ static void settings_key(app *a, const tui_ev *ev)
     }
     if (ev->key != TK_LEFT && ev->key != TK_RIGHT && ev->key != TK_ENTER)
         return;
-    if (vals) {
+    if (k == SET_TOOLS) {
+        app_tools_open(a);
+    } else if (vals) {
         for (i = 0; i < nv && strcmp(a->cfg->val[k], vals[i]) != 0; i++)
             ;
         app_save_setting(a, k, vals[((i < nv ? i : 0) + dir + nv) % nv]);
@@ -814,6 +821,32 @@ static void settings_key(app *a, const tui_ev *ev)
         a->menu.closed = false;
         tui_input_set(&a->in, pt_strz(d));
         app_menu_update(a);
+    }
+}
+
+/* The tools menu: space, enter, or left and right turn the selected one
+ * on or off. */
+static void tools_key(app *a, const tui_ev *ev)
+{
+    pt_str name;
+    bool on;
+    if (ev->key == TK_ESC || (ev->key == 'c' && ev->mods == TM_CTRL)) {
+        a->menu.kind = MENU_NONE;
+        app_menu_update(a);
+        return;
+    }
+    if (!a->menu.n)
+        return;
+    if (ev->key == TK_UP || ev->key == TK_DOWN) {
+        a->menu.sel = (a->menu.sel + (ev->key == TK_UP ? -1 : 1) + a->menu.n) % a->menu.n;
+        return;
+    }
+    name = app_item_label(a, a->menu.sel);
+    on = cli_tool_on(a->cfg, name);
+    if (ev->key == TK_ENTER || (ev->key == TK_LEFT && on) || (ev->key == TK_RIGHT && !on)) {
+        char z[128]; /* the label goes with the rebuilt menu */
+        snprintf(z, sizeof z, "%.*s", (int)name.n, name.p);
+        app_tool_set(a, pt_strz(z), !on);
     }
 }
 
@@ -827,11 +860,25 @@ static bool interrupt(app *a)
     return true;
 }
 
-/* Answer the question: 0 yes, 1 yes and allow alike, 2 no. */
+/* Answer the question: 0 yes, 1 yes and allow alike this session, 2 no,
+ * 3 yes and save a rule to the user config. */
 static void answer(app *a, int choice)
 {
+    char rule[200], err[600];
     if (choice == 1 && !pt_rt_allow(a->s.rt, a->ask.view.name, pt_strz(a->ask.prefix)))
         app_out_z(a, TUI_RED, "out of memory: allowed this once only");
+    if (choice == 3) {
+        if (!app_ask_rule(a, rule, sizeof rule)) {
+            app_out_z(a, TUI_RED, "no rule fits this call: choose another answer");
+            return;
+        }
+        if (!pt_rt_rule_add(a->s.rt, false, pt_strz(rule), PT_RULE_USER))
+            app_out_z(a, TUI_RED, "out of memory: allowed this once only");
+        else if (!cli_perms_allow_save(pt_strz(rule), err, sizeof err))
+            app_out_z(a, TUI_RED, err); /* it still applies to this session */
+        else
+            app_out_z(a, TUI_DIM, "saved the rule to permissions.allow of the user config");
+    }
     if (!pt_approve(a->s.a, a->ask.view.task, choice != 2, PT_STR_NULL))
         app_out_z(a, TUI_RED, pt_error(a->s.a));
     a->ask.task = 0;
@@ -844,14 +891,14 @@ static bool ask_key(app *a, const tui_ev *ev)
     if (!app_asking(a))
         return false;
     if (ev->kind == TE_TEXT) {
-        if (ev->text.n == 1 && ev->text.p[0] >= '1' && ev->text.p[0] <= '3')
+        if (ev->text.n == 1 && ev->text.p[0] >= '1' && ev->text.p[0] <= '4')
             answer(a, ev->text.p[0] - '1');
         return true; /* typing waits for the answer */
     }
     if (ev->kind != TE_KEY || (ev->mods && ev->key != TK_ENTER))
         return false;
     if (ev->key == TK_UP || ev->key == TK_DOWN)
-        a->ask.sel = (a->ask.sel + (ev->key == TK_UP ? 2 : 1)) % 3;
+        a->ask.sel = (a->ask.sel + (ev->key == TK_UP ? 3 : 1)) % 4;
     else if (ev->key == TK_ENTER)
         answer(a, a->ask.sel);
     else if (ev->key == TK_ESC)
@@ -873,8 +920,16 @@ void app_on_key(app *a, const tui_ev *ev)
         return;
     if (a->att.n && !pt_str_contains(pt_buf_str(&a->in.text), PT_S("[image ")))
         a->att.n = 0; /* the draft lost its labels: the images go too */
+    if (ev->kind == TE_TEXT && a->menu.kind == MENU_TOOLS && pt_str_eqz(ev->text, " ")) {
+        tui_ev enter_ev = *ev;
+        enter_ev.kind = TE_KEY;
+        enter_ev.key = TK_ENTER;
+        enter_ev.mods = 0;
+        tools_key(a, &enter_ev);
+        return;
+    }
     if (ev->kind == TE_TEXT || ev->kind == TE_PASTE) {
-        if (a->menu.kind == MENU_SETTINGS)
+        if (a->menu.kind == MENU_SETTINGS || a->menu.kind == MENU_TOOLS)
             a->menu.kind = MENU_NONE;
         if (ev->kind == TE_PASTE && (!ev->text.n ? true : paste_images(a, ev->text))) {
             if (!ev->text.n) /* an empty paste: a terminal that has no text for the clipboard's image */
@@ -891,6 +946,10 @@ void app_on_key(app *a, const tui_ev *ev)
         return;
     if (a->menu.kind == MENU_SETTINGS) {
         settings_key(a, ev);
+        return;
+    }
+    if (a->menu.kind == MENU_TOOLS) {
+        tools_key(a, ev);
         return;
     }
     if (k == TK_ENTER && !ev->mods) {

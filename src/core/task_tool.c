@@ -34,6 +34,9 @@ static const char aborted_text[] = "The user aborted this tool call.";
 static const char interrupted_text[] =
     "This tool call was interrupted by a crash. It may or may not have taken effect. Check the "
     "current state before retrying.";
+static const char quit_text[] =
+    "This tool call was cut off when pytte exited. It may or may not have taken effect. Check the "
+    "current state before retrying.";
 
 void pt_tool_free_live(pt_agent *a, task *t)
 {
@@ -185,17 +188,19 @@ static bool finish_text(pt_agent *a, task *t, const pt_block *call, const char *
     return ok;
 }
 
-/* Aborted, or interrupted by a crash: the text and the output so far. */
+/* Aborted, or cut off by a crash or an exit: the text and the output so far. */
 static bool finish_cut(pt_agent *a, task *t, const pt_block *call, bool aborted, const input *consumed)
 {
     ending e;
     pt_buf b;
     pt_str tail = tail_of(a, t);
-    bool ok;
+    bool quit = t->quit, ok;
     pt_buf_init(&b, a->al);
-    pt_buf_putz(&b, aborted ? aborted_text : interrupted_text);
+    pt_buf_putz(&b, aborted ? aborted_text : quit ? quit_text : interrupted_text);
     if (tail.n) {
-        pt_buf_putz(&b, aborted ? "\n\nOutput before the abort:\n" : "\n\nThe last output before the crash:\n");
+        pt_buf_putz(&b, aborted ? "\n\nOutput before the abort:\n"
+                        : quit  ? "\n\nThe last output before pytte exited:\n"
+                                : "\n\nThe last output before the crash:\n");
         pt_buf_puts(&b, tail);
     }
     memset(&e, 0, sizeof e);
@@ -278,8 +283,8 @@ static bool call_phase(pt_agent *a, task *t, const pt_block *call)
     return pt_core_queue(a, &fx, PT_STR_NULL);
 }
 
-static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_str prompt, uint32_t attempt,
-                         const input *consumed)
+static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_str prompt, pt_str rule,
+                         uint32_t attempt, const input *consumed)
 {
     task nt = *t;
     int k;
@@ -293,6 +298,7 @@ static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_st
     nt.status = ph == PH_APPROVE ? ST_WAITING : ST_RUNNING;
     nt.args = args;
     nt.prompt = prompt;
+    nt.rule = rule;
     nt.attempt = attempt;
     if (ph == PH_EXECUTE && attempt == 1) { /* the policy at the time of the intent */
         const pt_block *call = find_call(a, t);
@@ -312,15 +318,15 @@ static bool gated(pt_agent *a, task *t, const pt_block *call)
     case PT_GATE_DENY:
         return finish_text(a, t, call, text.n ? "Permission denied: " : "Permission denied.", text);
     case PT_GATE_ASK:
-        return commit_phase(a, t, PH_APPROVE, t->args, text, 0, NULL);
+        return commit_phase(a, t, PH_APPROVE, t->args, text, PT_STR_NULL, 0, NULL);
     case PT_GATE_REWRITE:
         if (k < 0 || !check_args(a, t, call, k, text))
             return !a->fatal;
-        return commit_phase(a, t, PH_EXECUTE, text, PT_STR_NULL, 1, NULL);
+        return commit_phase(a, t, PH_EXECUTE, text, PT_STR_NULL, PT_STR_NULL, 1, NULL);
     case PT_GATE_ALLOW:
         break;
     }
-    return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, 1, NULL);
+    return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, text, 1, NULL); /* text: the rule, if any */
 }
 
 void pt_fx_gate(pt_agent *a, uint32_t fx, const pt_gate *g)
@@ -364,7 +370,7 @@ static bool approve_phase(pt_agent *a, task *t, const pt_block *call)
     pt_event ev;
     if (in) {
         if (in->yes)
-            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, 1, in);
+            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, PT_STR_NULL, 1, in);
         {
             ending e;
             pt_buf b;
@@ -656,7 +662,7 @@ static bool execute_phase(pt_agent *a, task *t, const pt_block *call, bool abort
          * stored and the current policy say that is harmless. */
         k = pt_core_find_tool(a, call->name);
         if (t->replay == PT_REPLAY_SAFE && k >= 0 && a->tool_meta[k].replay == PT_REPLAY_SAFE)
-            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, t->attempt + 1, NULL);
+            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, t->rule, t->attempt + 1, NULL);
         return finish_cut(a, t, call, false, NULL);
     }
     return start(a, t, call);
