@@ -21,6 +21,9 @@ bool pt_rt_tool_add(pt_rt *rt, const pt_rt_tool *t)
         if (!d)
             return false;
         rt->defs = d;
+        if (!(d = (pt_tool_def *)realloc(rt->on, rt->tcap * sizeof *d)))
+            return false;
+        rt->on = d;
     }
     rt->tools[rt->ntools] = *t;
     rt->defs[rt->ntools++] = t->def;
@@ -52,10 +55,55 @@ bool pt_rt_tool_has(pt_rt *rt, pt_str name)
     return false;
 }
 
-const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n)
+const pt_tool_def *pt_rt_tool_all(pt_rt *rt, uint32_t *n)
 {
     *n = rt->ntools;
     return rt->defs;
+}
+
+const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n)
+{
+    uint32_t i;
+    if (!rt->noff)
+        return pt_rt_tool_all(rt, n);
+    *n = 0;
+    for (i = 0; i < rt->ntools; i++) /* rt->on has room for every tool */
+        if (!pt_rt_tool_off(rt, rt->defs[i].name))
+            rt->on[(*n)++] = rt->defs[i];
+    return rt->on;
+}
+
+bool pt_rt_tool_off(const pt_rt *rt, pt_str name)
+{
+    uint32_t i;
+    for (i = 0; i < rt->noff; i++)
+        if (pt_str_eqz(name, rt->off[i]))
+            return true;
+    return false;
+}
+
+bool pt_rt_tool_set_off(pt_rt *rt, pt_str name, bool off)
+{
+    uint32_t i;
+    char *z;
+    for (i = 0; i < rt->noff && !pt_str_eqz(name, rt->off[i]); i++)
+        ;
+    if (!off) {
+        if (i < rt->noff) {
+            free(rt->off[i]);
+            rt->off[i] = rt->off[--rt->noff];
+        }
+        return true;
+    }
+    if (i < rt->noff)
+        return true;
+    if (!pt_rt_grow((void **)&rt->off, &rt->ocap, rt->noff + 1, sizeof *rt->off) || !(z = (char *)malloc(name.n + 1)))
+        return false;
+    if (name.n)
+        memcpy(z, name.p, name.n);
+    z[name.n] = 0;
+    rt->off[rt->noff++] = z;
+    return true;
 }
 
 void pt_rt_tool_fallback(pt_rt *rt, const pt_rt_tool *t)
@@ -395,9 +443,9 @@ static pt_str rule_text(pt_rt *rt, const char *before, const rt_rule *r)
     return s;
 }
 
-/* The decision (section 15.5): a deny rule first, then read-only mode,
- * then the tool being read-only or the mode auto or an allow rule; else
- * ask. The text of a rule that decided goes with the answer, and is
+/* The decision (section 15.5): a tool turned off first, then a deny
+ * rule, then read-only mode, then the tool being read-only or the mode
+ * auto or an allow rule; else ask. The text of a rule that decided goes with the answer, and is
  * committed with it. */
 void pt_rt_gate(pt_rt *rt, const pt_fx *fx)
 {
@@ -410,7 +458,10 @@ void pt_rt_gate(pt_rt *rt, const pt_fx *fx)
     gist = pt_rt_gist(fx->args, &rt->ar);
     memset(&g, 0, sizeof g);
     g.kind = PT_GATE_ALLOW;
-    if ((k >= 0 || claimed) && (rule = denied(rt, fx->name, gist))) {
+    if (pt_rt_tool_off(rt, fx->name)) { /* still in an epoch frozen before */
+        g.kind = PT_GATE_DENY;
+        g.text = PT_S("the user turned this tool off");
+    } else if ((k >= 0 || claimed) && (rule = denied(rt, fx->name, gist))) {
         g.kind = PT_GATE_DENY;
         g.text = rule_text(rt, "blocked by the deny rule ", rule);
         rule = NULL;
@@ -778,5 +829,9 @@ void pt_rt_tools_free(pt_rt *rt)
     free(rt->calls);
     free(rt->tools);
     free(rt->defs);
+    free(rt->on);
+    for (i = 0; i < rt->noff; i++)
+        free(rt->off[i]);
+    free(rt->off);
     free(rt->rules);
 }

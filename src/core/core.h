@@ -89,6 +89,9 @@ typedef struct task {
     pt_buf rescued; /* live file written before a crash */
     bool woke;      /* the retry sleep is over */
     bool recovered; /* the record was loaded, not committed by this process */
+    /* A loaded tool intent: whether its owner closed the session (quit)
+     * before anyone opened it again (reopened), or crashed. */
+    bool quit, reopened;
     bool asked;     /* approve: the question went out */
     bool gated;     /* call: the gate answered (gate, gate_text) */
     pt_gate_kind gate;

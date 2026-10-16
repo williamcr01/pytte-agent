@@ -25,6 +25,13 @@ typedef struct pt_rt_cfg {
     const pt_ai_catalog *catalog;
     /* The session's ID, for {session} in MCP arguments (copied); NULL: none. */
     const char *session;
+    /* web_search: the API key for a backend ("exa", "parallel") into out;
+     * false when there is none. Called for each search. NULL: no keys. */
+    bool (*search_key)(void *ud, const char *backend, char *out, size_t cap);
+    void *search_ud;
+    /* The backend to use ("exa", "parallel"); NULL or empty: the first with
+     * a key, in that order. Must outlive the runtime. */
+    const char *search_backend;
 } pt_rt_cfg;
 
 pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a);
@@ -42,6 +49,10 @@ void pt_rt_use_worker(pt_rt *rt, pt_worker *worker);
 /* Recovery (section 6.4): read the log into the agent, cut a torn tail,
  * hand over live files. False with err when the log is corrupt. */
 bool pt_rt_recover(pt_rt *rt, char *err, size_t cap);
+/* Once the session is ours (pt_open), before any tool runs: stop the
+ * process groups a dead owner left running, and forget them. A group
+ * another host started is left to it. */
+void pt_rt_stop_orphans(pt_rt *rt);
 
 /* ---- tools (section 13) ----
  * The runtime keeps a registry of tools and answers the core's GATE and
@@ -76,7 +87,8 @@ void pt_rt_tool_remove(pt_rt *rt, pt_str name);
 /* Whether a tool of that name is registered. */
 bool pt_rt_tool_has(pt_rt *rt, pt_str name);
 /* read, write, edit (tools_builtin.c); bash, bash_poll (tools_bash.c);
- * grep, find, ls (tools_search.c); web_fetch (tools_web.c). */
+ * grep, find, ls (tools_search.c); web_fetch (tools_web.c); web_search
+ * (tools_websearch.c). */
 bool pt_rt_add_builtins(pt_rt *rt);
 
 /* A bash command that went to the background. command lives until the
@@ -96,8 +108,17 @@ uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max);
  * two seconds later); a later bash_poll reads what they printed.
  * Returns how many. */
 uint32_t pt_rt_backgrounds_stop(pt_rt *rt);
-/* The registered tools, for a new session's epoch. */
+/* The registered tools that are on, for a new epoch: what the model sees.
+ * Valid until the next call that adds, removes or turns off a tool. */
 const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n);
+/* Every registered tool, on or off, in the same order and validity. */
+const pt_tool_def *pt_rt_tool_all(pt_rt *rt, uint32_t *n);
+/* Turn a tool off, or back on, by name: registered or not yet (an MCP
+ * tool may come later). An off tool is left out of the tools the next
+ * epoch freezes, and calls of it are denied from now on. False when out
+ * of memory (nothing changed). */
+bool pt_rt_tool_set_off(pt_rt *rt, pt_str name, bool off);
+bool pt_rt_tool_off(const pt_rt *rt, pt_str name);
 
 /* Output as it comes: shown live, kept for the result. */
 void pt_rt_tool_output(pt_rt *rt, uint32_t fx, const void *p, size_t n);
@@ -121,6 +142,12 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r);
 /* Store n bytes as a blob: true with ref set ("sha256:<hex>", NUL
  * terminated). False when the store keeps no blobs or writing failed. */
 bool pt_rt_put_blob(pt_rt *rt, const void *p, size_t n, char ref[72]);
+/* A process group a tool started (its pt_proc_mark), which must not
+ * outlive this process: noted in the store while it may run, so that if
+ * this process dies first the next owner stops it (pt_rt_stop_orphans).
+ * Ended: once nothing of it runs. */
+void pt_rt_proc_started(pt_rt *rt, int64_t group, pt_str mark);
+void pt_rt_proc_ended(pt_rt *rt, int64_t group);
 /* The agent the runtime drives (for a tool's lookups: pt_doc, the cwd). */
 pt_agent *pt_rt_agent(pt_rt *rt);
 /* pt_opts.blob for a store (blob_ud: the pt_store). */

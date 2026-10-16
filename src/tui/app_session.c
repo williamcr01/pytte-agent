@@ -110,6 +110,7 @@ void app_switch_session(app *a, const char *id)
     char back[64];
     snprintf(back, sizeof back, "%s", a->s.id);
     a->o.continue_current = false;
+    app_model_for(a, id, a->o.fork);
     snprintf(a->sess.fallback, sizeof a->sess.fallback, "%s", back);
     a->sess.fallback_created = a->sess.created;
     if (!app_open_session(a, id)) {
@@ -279,6 +280,10 @@ void app_finish_session(app *a)
     if (cli_session_note(&a->s)[0])
         app_out_z(a, TUI_DIM, cli_session_note(&a->s));
     app_queued_submit(a);
+    if (a->menu.tools_pending && !a->quit && a->open) {
+        a->menu.tools_pending = false;
+        app_tools_open(a);
+    }
     if (a->pager_pending && !a->quit && a->open) {
         a->pager_pending = false;
         app_pager(a);

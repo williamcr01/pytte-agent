@@ -698,6 +698,7 @@ static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
 {
     pt_arena *pa = &a->perm, *sa = &a->scratch;
     claim *c = &a->claims.newest;
+    uint32_t i;
     c->id = id;
     c->event = pt_arena_dup(pa, pt_json_gets(r, "event", sa));
     c->token = pt_arena_dup(pa, pt_json_gets(r, "token", sa));
@@ -705,6 +706,17 @@ static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
     c->boot = pt_arena_dup(pa, pt_json_gets(r, "boot", sa));
     c->pid = pt_json_geti(r, "pid", 0);
     c->opened = pt_json_geti(r, "opened", 0);
+    /* How each tool call cut off so far ended: by the first claim after
+     * its intent (a task record resets both). */
+    for (i = 0; i < a->ntasks; i++) {
+        task *t = a->tasks[i];
+        if (t->kind != TASK_TOOL || t->phase != PH_EXECUTE || t->reopened)
+            continue;
+        if (pt_str_eqz(c->event, "close"))
+            t->quit = true;
+        else if (pt_str_eqz(c->event, "open"))
+            t->reopened = true;
+    }
 }
 
 static bool apply_record(pt_agent *a, const pt_json *r)

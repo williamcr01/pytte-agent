@@ -48,11 +48,24 @@ static void status_row(app *a, int64_t now, int total, int sel)
     } else if (a->run.active && now - a->pace.esc_at < DOUBLE_MS) {
         pt_buf_putz(&a->tmp, "esc again to interrupt");
     } else if (a->ask.shown) {
-        pt_buf_putz(&a->tmp, "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
-    } else if (a->menu.kind == MENU_SETTINGS) {
-        pt_buf_putz(&a->tmp, "↑↓ select · ←→ change · enter edit · esc close");
+        pt_buf_putz(&a->tmp, a->ascii ? "1-3 or up/down enter · esc no · ctrl-c interrupt"
+                                       : "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
+    } else if (a->menu.kind == MENU_SETTINGS) { /* a value to cycle through, or one to type */
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · " : "↑↓ select · ");
+        pt_buf_putz(&a->tmp, app_settings[a->menu.set_sel].vals            ? a->ascii ? "left/right or enter change"
+                                                                                       : "←→ or enter change"
+                             : app_settings[a->menu.set_sel].k == SET_TOOLS ? "enter open"
+                                                                            : "enter edit");
+        pt_buf_putz(&a->tmp, " · esc close");
+    } else if (a->menu.kind == MENU_TOOLS) {
+        uint32_t all, on = app_tools_on(a, &all);
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · space turns on or off · esc close"
+                                       : "↑↓ select · space turns on or off · esc close");
+        snprintf(line, sizeof line, " · %u of %u on", on, all);
+        pt_buf_putz(&a->tmp, line);
     } else if (a->menu.kind != MENU_NONE) {
-        pt_buf_putz(&a->tmp, "↑↓ select · tab complete · enter run · esc close");
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · tab complete · enter run · esc close"
+                                       : "↑↓ select · tab complete · enter run · esc close");
         if (total > 1) {
             snprintf(line, sizeof line, " · %d/%d", sel + 1, total);
             pt_buf_putz(&a->tmp, line);
@@ -138,18 +151,39 @@ static void menu_row(app *a, int i)
 {
     bool on = i == a->menu.sel;
     pick(a, on);
-    if (a->menu.kind == MENU_SETTINGS) {
+    if (a->menu.kind == MENU_SETTINGS && app_settings[i].k == SET_TOOLS) {
+        uint32_t all, n = app_tools_on(a, &all);
+        char v[600];
+        snprintf(v, sizeof v, "%-14s", app_settings[i].name);
+        pt_buf_putz(&a->tmp, v);
+        tui_style(&a->tmp, TUI_CYAN);
+        snprintf(v, sizeof v, "%u of %u on", n, all);
+        pt_buf_putz(&a->tmp, v);
+    } else if (a->menu.kind == MENU_SETTINGS) {
         int k = app_settings[i].k;
         char v[600];
         snprintf(v, sizeof v, "%-14s", app_settings[i].name);
         pt_buf_putz(&a->tmp, v);
         tui_style(&a->tmp, TUI_CYAN);
-        pt_buf_putz(&a->tmp, a->cfg->val[k][0] ? a->cfg->val[k] : "(none)");
+        pt_buf_putz(&a->tmp, a->cfg->val[k][0] ? a->cfg->val[k] : "none");
         if (strcmp(a->cfg->src[k], "default") != 0 && strcmp(a->cfg->src[k], "user") != 0) {
             tui_style(&a->tmp, TUI_DIM);
             snprintf(v, sizeof v, "  (set by %s)", a->cfg->src[k]);
             pt_buf_putz(&a->tmp, v);
         }
+    } else if (a->menu.kind == MENU_TOOLS) { /* "● read   Read a text file, with line numbers" */
+        pt_str name = app_item_label(a, i);
+        bool tool_on = cli_tool_on(a->cfg, name);
+        int col = 0, pad = a->menu.label_w - tui_width(name, true);
+        tui_style(&a->tmp, tool_on ? TUI_GREEN | TUI_BOLD : TUI_DIM);
+        pt_buf_putz(&a->tmp, tool_on ? a->sy->on : a->sy->off);
+        tui_style(&a->tmp, tool_on ? (on ? TUI_BOLD : 0) : TUI_DIM);
+        pt_buf_putc(&a->tmp, ' ');
+        tui_clean(&a->tmp, name, &col);
+        tui_style(&a->tmp, TUI_DIM);
+        for (pad = pad > 0 ? pad + 2 : 2; pad > 0; pad--)
+            pt_buf_putc(&a->tmp, ' ');
+        tui_clean(&a->tmp, (pt_str){a->menu.buf.p + a->menu.items[i].dat, a->menu.items[i].dn}, &col);
     } else {
         int col = 0;
         if (a->menu.kind == MENU_CMD)

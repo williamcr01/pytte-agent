@@ -2,7 +2,8 @@
 
 pytte talks to a provider with either an **API key**, billed per token by
 the provider, or a **subscription login**: signing in with an account you
-already pay for. `/login` in the TUI does both. Today the one subscription
+already pay for. `/login` in the TUI does both. A third kind saves the API keys of the search
+services behind `web_search`. Today the one subscription
 is ChatGPT (Plus, Pro and the other plans with Codex), as the provider
 `openai-codex`; `openai` stays the API with an API key.
 
@@ -14,13 +15,14 @@ when set), created with mode 0600, by provider:
 ```json
 {
   "anthropic": {"key": "sk-ant-..."},
+  "search:exa": {"key": "..."},
   "openai-codex": {"access": "eyJ...", "refresh": "...", "expires": 1760000000000, "account_id": "..."}
 }
 ```
 
 | Member | Meaning |
 |---|---|
-| `key` | an API key saved by `/login api` |
+| `key` | an API key saved by `/login api`, or a search key saved by `/login search` (under `search:exa` or `search:parallel`, so a provider named `exa` does not share the key) |
 | `access` | a login's access token (sent as a bearer token) |
 | `refresh` | the token that gets a new access token |
 | `expires` | when the access token expires, in milliseconds since the epoch |
@@ -28,11 +30,12 @@ when set), created with mode 0600, by provider:
 
 An API key in the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `OPENROUTER_API_KEY`, or a configured provider's `key_env`) comes before a
-saved one. A subscription login has no environment variable.
+saved one. A subscription login has no environment variable. A search key
+likewise: `EXA_API_KEY` or `PARALLEL_API_KEY` comes before a saved one.
 
 ## Behavior
 
-`/login` opens a menu of two kinds:
+`/login` opens a menu of three kinds:
 
 - **`/login api <provider> [key]`**: picking a provider puts
   `/login api <provider> ` in the input, ready for the key. The key is shown
@@ -40,8 +43,18 @@ saved one. A subscription login has no environment variable.
   alone shows where each provider's key comes from.
 - **`/login oauth <provider>`**: signs in in the browser. `/login oauth`
   alone shows whether each login is there.
+- **`/login search <exa|parallel> [key]`** ("Search API keys" in the menu):
+  the same as `api`, for the key of a search service. The key is masked and
+  kept out of the input history, saved to `auth.json` under the service's
+  name, and one in the environment comes first. `/login search` alone shows
+  where each key comes from. After a key is saved, pytte asks `Turn on
+  web_search and web_fetch? (y/n)` (unless both are on already). `y` turns
+  both on like `/tools` does ([tools.md](tools.md)) and saves
+  `tools.web_search` and `tools.web_fetch` to the user config; `n`, or
+  anything else typed, leaves them as they are. See [web.md](web.md) for
+  the tool.
 
-`/login` with nothing else (the menu closed with Esc) shows both.
+`/login` with nothing else (the menu closed with Esc) shows all three.
 
 ### Sign in with ChatGPT (`openai-codex`)
 
@@ -99,6 +112,13 @@ Use a ChatGPT subscription:
 ```
 
 or start with it: `pytte -m openai-codex/gpt-6-sol`.
+
+Save an Exa key and turn on the web tools:
+
+```text
+/login search exa ...
+y
+```
 
 Save an OpenAI API key instead:
 

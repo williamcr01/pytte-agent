@@ -51,13 +51,15 @@ shown at startup. The files are read when a session opens (and by
 **Order.** For each call, pytte checks in this order and stops at the first
 that decides:
 
-1. A `deny` rule matches: the call is refused, whatever the mode, and the
+1. The tool is turned off (see [tools.md](tools.md)): the call is refused,
+   whatever the mode.
+2. A `deny` rule matches: the call is refused, whatever the mode, and the
    model is told which rule refused it.
-2. The mode is `read-only`: only the tools that change nothing run
+3. The mode is `read-only`: only the tools that change nothing run
    (`read`, `grep`, `find`, `ls`). Allow rules do not change this.
-3. The tool changes nothing, or the mode is `auto`, or an `allow` rule
+4. The tool changes nothing, or the mode is `auto`, or an `allow` rule
    matches: the call runs.
-4. Otherwise it asks (in print mode, the process ends with exit code 3).
+5. Otherwise it asks (in print mode, the process ends with exit code 3).
 
 So a `deny` rule also stops a read-only tool (`read(*.env)`) and a call in
 `auto` mode.

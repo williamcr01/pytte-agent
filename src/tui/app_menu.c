@@ -7,10 +7,9 @@
 int app_find_setting(pt_str name)
 {
     size_t i;
-    if (pt_str_eqz(name, "effort"))
-        name = PT_S("reasoning");
     for (i = 0; i < NSETTINGS; i++)
-        if (pt_str_eqz(name, app_settings[i].name) || pt_str_eqz(name, cli_config_key(app_settings[i].k)))
+        if (pt_str_eqz(name, app_settings[i].name) ||
+            (app_settings[i].k != SET_TOOLS && pt_str_eqz(name, cli_config_key(app_settings[i].k))))
             return (int)i;
     return -1;
 }
@@ -18,7 +17,8 @@ int app_find_setting(pt_str name)
 bool app_menu_takes_arg(pt_str cmd)
 {
     return pt_str_eqz(cmd, "model") || pt_str_eqz(cmd, "effort") || pt_str_eqz(cmd, "thinking") ||
-           pt_str_eqz(cmd, "resume") || pt_str_eqz(cmd, "settings") || pt_str_eqz(cmd, "login");
+           pt_str_eqz(cmd, "resume") || pt_str_eqz(cmd, "settings") || pt_str_eqz(cmd, "login") ||
+           pt_str_eqz(cmd, "tools");
 }
 
 static void add_item(app *a, const char *label, size_t ln, const char *desc)
@@ -166,9 +166,10 @@ size_t app_secret_at(pt_str d)
     return at;
 }
 
-static const char *const login_subs[] = {"api", "oauth"};
+static const char *const login_subs[] = {"api", "oauth", "search"};
 static const char *const login_descs[] = {"save an API key, billed by the provider",
-                                          "sign in with a subscription (ChatGPT)"};
+                                          "sign in with a subscription (ChatGPT)",
+                                          "Search API keys, for web_search"};
 
 /* The word being typed: after the last space or newline. */
 static pt_str last_word(pt_str d)
@@ -238,6 +239,10 @@ void app_menu_update(app *a)
     a->menu.of_sessions = a->menu.of_skills = a->menu.of_mentions = false;
     if (a->menu.kind == MENU_SETTINGS)
         return;
+    if (a->menu.kind == MENU_TOOLS) {
+        app_tools_list(a);
+        return;
+    }
     a->menu.kind = MENU_NONE;
     if (!a->menu.closed && word.n && word.p[0] == '@') { /* @server:uri anywhere */
         add_mentions(a, word);
@@ -279,13 +284,18 @@ void app_menu_update(app *a)
                 cmd = PT_STR_NULL;
                 if (st >= 0 && app_settings[st].vals)
                     add_list(a, app_settings[st].vals, (size_t)app_settings[st].nv, arg);
+                else if (st >= 0 && app_settings[st].k == SET_TOOLS)
+                    cmd = PT_S("tools");
                 else if (st >= 0 && app_settings[st].k != CFG_PAGER)
                     cmd = PT_S("model");
+                if (st >= 0 && app_settings[st].k == CFG_COMPACT_MODEL && pt_str_starts(PT_S("none"), arg))
+                    add_item(a, "none", 4, "the session's model compacts");
             } else {
                 size_t i;
                 for (i = 0; i < NSETTINGS; i++)
                     if (pt_str_starts(pt_strz(app_settings[i].name), arg))
-                        add_item(a, app_settings[i].name, strlen(app_settings[i].name), cli_config_key(app_settings[i].k));
+                        add_item(a, app_settings[i].name, strlen(app_settings[i].name),
+                                 app_settings[i].k == SET_TOOLS ? "tools.<name>" : cli_config_key(app_settings[i].k));
                 cmd = PT_STR_NULL;
             }
         }
@@ -298,11 +308,23 @@ void app_menu_update(app *a)
                     add_item(a, app_levels[i], strlen(app_levels[i]), NULL);
         } else if (pt_str_eqz(cmd, "thinking")) {
             add_list(a, app_th_names, NTH, arg);
+        } else if (pt_str_eqz(cmd, "tools")) {
+            long sp2 = pt_str_find(arg, ' ');
+            if (sp2 < 0) { /* the tools, each with its state */
+                uint32_t i, n = 0;
+                const pt_tool_def *defs = a->open ? pt_rt_tool_all(a->s.rt, &n) : NULL;
+                for (i = 0; i < n; i++)
+                    if (pt_str_starts(defs[i].name, arg) && !cli_tool_leader(defs[i].name))
+                        add_item(a, defs[i].name.p, defs[i].name.n, cli_tool_on(a->cfg, defs[i].name) ? "on" : "off");
+            } else if (pt_str_find((pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1}, ' ') < 0) {
+                static const char *const on_off[] = {"on", "off"};
+                add_list(a, on_off, 2, (pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1});
+            }
         } else if (pt_str_eqz(cmd, "login")) {
             long sp2 = pt_str_find(arg, ' ');
             if (sp2 < 0) {
                 size_t i;
-                for (i = 0; i < 2; i++)
+                for (i = 0; i < 3; i++)
                     if (pt_str_starts(pt_strz(login_subs[i]), arg))
                         add_item(a, login_subs[i], strlen(login_subs[i]), login_descs[i]);
             } else {
@@ -310,6 +332,9 @@ void app_menu_update(app *a)
                 bool oauth = pt_str_eqz(how, "oauth");
                 const pt_ai_catalog *cat = cli_catalog();
                 uint32_t i;
+                for (i = 0; pt_str_eqz(how, "search") && pt_str_find(name, ' ') < 0 && i < 2; i++)
+                    if (pt_str_starts(pt_strz(cli_search_backends[i]), name))
+                        add_item(a, cli_search_backends[i], strlen(cli_search_backends[i]), i ? "Parallel" : "Exa");
                 for (i = 0; (oauth || pt_str_eqz(how, "api")) && pt_str_find(name, ' ') < 0 && i < cat->nproviders;
                      i++) {
                     const pt_provider *q = &cat->providers[i];
@@ -357,7 +382,7 @@ bool app_complete(app *a)
     pt_str d = pt_buf_str(&a->in.text), label;
     pt_buf nd;
     bool changed;
-    if (a->menu.kind == MENU_NONE || a->menu.kind == MENU_SETTINGS || !a->menu.n)
+    if (a->menu.kind == MENU_NONE || a->menu.kind == MENU_SETTINGS || a->menu.kind == MENU_TOOLS || !a->menu.n)
         return false;
     label = app_item_label(a, a->menu.sel);
     pt_buf_init(&nd, pt_sys_allocator());
@@ -380,6 +405,7 @@ bool app_complete(app *a)
         pt_buf_puts(&nd, label);
         if ((label.n && (label.p[0] == '$' || label.p[0] == '@')) ||
             (pt_str_starts(d, PT_S("/login ")) && !pt_str_starts(d, PT_S("/login oauth "))) ||
+            (pt_str_starts(d, PT_S("/tools ")) && pt_str_find((pt_str){d.p + 7, d.n - 7}, ' ') < 0) ||
             (pt_str_starts(d, PT_S("/mcp ")) && pt_str_find((pt_str){d.p + 5, d.n - 5}, ' ') < 0 &&
              !pt_str_eqz(label, "trust") && !pt_str_eqz(label, "untrust"))) /* then the key, the name */
             pt_buf_putc(&nd, ' ');
