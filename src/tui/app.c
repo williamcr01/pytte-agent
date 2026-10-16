@@ -103,6 +103,7 @@ static void startup_free(app *a)
     pt_buf_free(&a->live_rows);
     pt_buf_free(&a->view.live);
     pt_buf_free(&a->run.retry_err);
+    pt_buf_free(&a->ask.call);
     for (i = 0; i < RUN_MAX; i++) {
         pt_buf_free(&a->run.calls[i].id);
         pt_buf_free(&a->run.calls[i].head);
@@ -129,7 +130,6 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         cli_mcp_host(&a->o.mcp_host, app_mcp_note, a);
     a->pace.interval = 33;
     a->pace.esc_at = a->pace.ctrlc_at = -DOUBLE_MS;
-    /* the watchdog first: before the store is opened */
     if (!(a->t = tui_term_new())) {
         fprintf(stderr, "pytte: not a terminal\n");
         return 1;
@@ -153,6 +153,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     pt_buf_init(&a->live_rows, pt_sys_allocator());
     pt_buf_init(&a->view.live, pt_sys_allocator());
     pt_buf_init(&a->run.retry_err, pt_sys_allocator());
+    pt_buf_init(&a->ask.call, pt_sys_allocator());
     for (slot = 0; slot < RUN_MAX; slot++) {
         pt_buf_init(&a->run.calls[slot].id, pt_sys_allocator());
         pt_buf_init(&a->run.calls[slot].head, pt_sys_allocator());
@@ -404,6 +405,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     pt_buf_free(&a->wrap);
     pt_buf_free(&a->view.live);
     pt_buf_free(&a->run.retry_err);
+    pt_buf_free(&a->ask.call);
     for (slot = 0; slot < RUN_MAX; slot++) {
         pt_buf_free(&a->run.calls[slot].id);
         pt_buf_free(&a->run.calls[slot].head);

@@ -169,8 +169,11 @@ Sessions live in `$XDG_STATE_HOME/pytte/sessions/<id>/` (by default
 `~/.local/state/pytte`). `log.jsonl` is the whole truth: one commit per line,
 readable with `jq`. Kill the process at any point and `pytte -c` continues
 from the last commit: a half-streamed answer is kept as an interrupted entry
-and the request is sent again. A watchdog process restores the terminal
-modes even after `kill -9` (run `reset` if keys still misbehave). Exit codes:
+and the request is sent again; commands a killed pytte left running are
+stopped. pytte restores the terminal modes on every
+exit it can see (quit, Ctrl-C, `kill`, a hang-up, a crash); after `kill -9`
+it cannot, so run `reset` if keys misbehave. What is kept where, and what
+recovery does, is in [docs/sessions.md](docs/sessions.md). Exit codes:
 0 done, 1 setup (such as a missing key), 3 a tool call waits for approval
 (print mode), 10 the run failed, 20 storage error, 130 detached (Ctrl-C in
 print mode).
@@ -203,7 +206,8 @@ result while it works, else in a note with what the command printed that
 starts a turn (shown as `· session 8 ended with exit code 0: make test`);
 `bash_poll` checks on one or stops it. The footer counts the ones still
 running, `/ps` lists them and `/stop` stops them; they end when pytte
-does. See [docs/bash.md](docs/bash.md). `read` shows a file with
+does (after `kill -9`, when the session is next opened). See
+[docs/bash.md](docs/bash.md). `read` shows a file with
 line numbers, up to 2000 lines or 50 KiB, cut at a whole line, and says
 where to read on; an image (PNG, JPEG, GIF, WebP, up to 3.75 MiB and 8000
 pixels a side) goes to the model as an image, or as a note to a model that
@@ -288,7 +292,8 @@ closing it; `pytte -r ID` recovers it).
 
 Recovery after a crash follows each tool's replay policy. `read`, `grep`,
 `find`, `ls` and `write` run again. A `bash` or `edit` call that was cut off is not repeated;
-the model gets an "interrupted" result and decides what to do.
+the model gets an "interrupted" result and decides what to do. `pytte ls`
+removes a session that died before its first commit.
 
 ## pytte-ai
 

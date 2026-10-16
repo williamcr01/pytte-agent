@@ -45,6 +45,8 @@ typedef struct syms {
 #define BLINK_MS 500 /* the activity mark: on for the first half of each second of the clock */
 #define TOOL_FAIL 3  /* rows of a failed tool's output kept in the scrollback */
 #define RUN_MAX 8      /* running calls the band shows; more still run */
+#define GIST_MAX 400   /* bytes of a call's gist kept for its row: more than a row shows */
+#define ASK_LINES 10   /* rows of the call a question shows */
 
 /* The slash commands, for the menu and /help (app_cmd.c). */
 typedef struct app_cmd_def {
@@ -229,6 +231,8 @@ typedef struct app_ask {
     int sel;
     bool shown; /* the band shows the question */
     char prefix[128]; /* what "allow this session" allows: "git", or "" for the whole tool */
+    pt_buf call;      /* the call, whole, wrapped to call_w columns: call_n rows (0: not yet) */
+    int call_n, call_w;
 } app_ask;
 
 /* The model in use, and what the catalog says of it. */
@@ -341,7 +345,7 @@ void app_out_z(app *a, int style, const char *z);
 void app_out_blank(pt_buf *out);
 pt_str app_call_gist(app *a, pt_str args);
 int app_tool_of(pt_str name);
-void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist);
+void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist, size_t max);
 void app_secs_short(char *out, size_t cap, int64_t ms);
 int64_t app_run_clock(const app *a, int64_t now);
 void app_run_restart(app *a, int64_t now);

@@ -320,7 +320,7 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
             break;
         done += (size_t)w;
     }
-    if (done < bytes.n || fchmod(fd, mode) != 0 || fsync(fd) != 0) {
+    if (done < bytes.n || fchmod(fd, mode) != 0 || pt_sys_sync_fd(fd, false) != 0) {
         snprintf(err, cap, "%s: %s", tmp, strerror(errno));
         close(fd);
         unlink(tmp);
@@ -332,6 +332,9 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
         unlink(tmp);
         return false;
     }
+    /* Else a power loss may undo the rename; but the file has changed, so
+     * a failure here is no failure to write it. */
+    (void)pt_sys_sync_parent(path, true);
     return true;
 }
 

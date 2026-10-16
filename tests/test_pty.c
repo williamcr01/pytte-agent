@@ -451,7 +451,7 @@ static int finish(pty *p, int ms)
         }
         pump(p, 20);
     }
-    pump(p, 100); /* the last bytes, the watchdog's */
+    pump(p, 100); /* the last bytes */
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
@@ -549,10 +549,7 @@ static void test_kill9(void)
     keys(&p, "list the files\r");
     CHECK(wait_for(&p, "No tools are available", 5000));
     kill(p.pid, SIGKILL);
-    CHECK(finish(&p, 3000) == 137);
-    CHECK(p.v->kitty == 0); /* the watchdog popped the flags */
-    CHECK(!p.v->paste);
-    modes_restored(&p);
+    CHECK(finish(&p, 3000) == 137); /* the modes stay as kill -9 left them */
     pty_free(&p);
     /* the transcript is the same after pytte -c, with the partial marked */
     pty_start(&p, 24, 80, again);
@@ -908,6 +905,34 @@ static void test_approval(void)
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
+    pty_free(&p);
+}
+
+/* A long call is asked about whole, wrapped, up to ASK_LINES rows, the
+ * last saying how many more there are; its row is cut, and says so. */
+static void test_long_approval(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/long_ask.json", NULL};
+    pty_start(&p, 30, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "go\r");
+    CHECK(wait_for(&p, "  › 1  yes", 3000));
+    CHECK(has(&p, "? bash  echo start; echo aaaaaaaaaa;"));
+    CHECK(has(&p, "echo tail-end")); /* the end, in view */
+    CHECK(!has(&p, "more lines"));
+    keys(&p, "1");
+    CHECK(wait_for(&p, "? bash  true; echo bbbbbbbbbb;", 3000));
+    CHECK(wait_for(&p, "3  no (esc)", 3000));
+    CHECK(has(&p, "… 14 more lines"));
+    CHECK(!has(&p, "hidden-end"));
+    keys(&p, "\x1b[27u");
+    CHECK(wait_for(&p, "Long ones done.", 3000));
+    CHECK(has(&p, "…\n✗ bash  true; echo bbbbbbbbbb;")); /* the first row, cut */
+    CHECK(!has(&p, "tail-end"));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
     pty_free(&p);
 }
 
@@ -1740,6 +1765,7 @@ int main(int argc, char **argv)
     RUN(test_interrupt_and_queue);
     RUN(test_steady_input);
     RUN(test_approval);
+    RUN(test_long_approval);
     RUN(test_tool_rendering);
     RUN(test_short_paths);
     RUN(test_background);

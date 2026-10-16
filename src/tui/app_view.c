@@ -198,18 +198,24 @@ static pt_str short_path(app *a, pt_str g)
     return g;
 }
 
-/* A call on one row: the tool's name, dim, in a column, then the gist of
+/* A call on one row: the tool's name, blue, in a column, then the gist of
  * its arguments; in a command, the programs stand out and the rest is dim.
- * gist, if not NULL: where in out the gist starts. */
-void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist)
+ * gist, if not NULL: where in out the gist starts. max: the gist's bytes
+ * kept, cut on a character (0: all). */
+void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist, size_t max)
 {
     pt_str g = app_call_gist(a, args);
-    bool cmd = pt_str_eqz(name, "bash"), at_cmd = true, in_word = false, prog = false;
+    bool cmd = pt_str_eqz(name, "bash"), at_cmd = true, in_word = false, prog = false, cut;
     int col = 0, cur = -1, ti = app_tool_of(name), w;
     size_t k;
     if (!cmd)
         g = short_path(a, g);
-    tui_style(out, TUI_DIM);
+    if ((cut = max && g.n > max)) {
+        g.n = max;
+        while (g.n && ((unsigned char)g.p[g.n] & 0xC0) == 0x80)
+            g.n--;
+    }
+    tui_style(out, TUI_BLUE);
     if (ti >= 0)
         name = pt_strz(tools[ti].shown);
     w = (int)(name.n > 60 ? 60 : name.n);
@@ -243,6 +249,10 @@ void app_phrase(app *a, pt_buf *out, pt_str name, pt_str args, size_t *gist)
         if (st != cur)
             tui_style(out, cur = st);
         pt_buf_putc(out, c);
+    }
+    if (cut) {
+        tui_style(out, TUI_DIM);
+        pt_buf_putz(out, a->sy->more);
     }
     tui_style(out, 0);
 }
@@ -459,7 +469,7 @@ static void group_add(app *a, const pt_entry_view *v)
     g->at = (uint32_t)a->group.buf.n;
     {
         size_t gist;
-        app_phrase(a, &a->group.buf, m->name, args, &gist);
+        app_phrase(a, &a->group.buf, m->name, args, &gist, GIST_MAX);
         g->name = (uint32_t)(gist - g->at);
     }
     if (stats) { /* "+3", "+3 -1" */
@@ -491,18 +501,32 @@ static void group_add(app *a, const pt_entry_view *v)
     a->group.n++;
 }
 
+/* Styled text, cut to cols: where it is cut, the more mark, dim. */
+static void put_fit(app *a, pt_buf *out, pt_str styled, int cols)
+{
+    size_t k;
+    if (tui_width(styled, false) <= cols) {
+        pt_buf_puts(out, styled);
+        return;
+    }
+    cols -= tui_width(pt_strz(a->sy->more), false);
+    k = tui_fit(styled, cols > 0 ? cols : 0, false);
+    pt_buf_put(out, styled.p, k);
+    tui_style(out, TUI_DIM);
+    pt_buf_putz(out, a->sy->more);
+    tui_style(out, 0);
+}
+
 /* One row: a mark in the left column, then styled text, cut to the width. */
 static void group_row(app *a, pt_buf *out, const char *mark, int mstyle, pt_str styled)
 {
-    size_t k;
     pt_buf_reset(&a->tmp2);
     tui_style(&a->tmp2, mstyle);
     pt_buf_putz(&a->tmp2, mark);
     tui_style(&a->tmp2, 0);
     pt_buf_putc(&a->tmp2, ' ');
     pt_buf_puts(&a->tmp2, styled);
-    k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
-    pt_buf_put(out, a->tmp2.p, k);
+    put_fit(a, out, pt_buf_str(&a->tmp2), width(a));
     pt_buf_putc(out, '\n');
 }
 
@@ -610,7 +634,7 @@ static void run_seg(app *a, pt_buf *out, const run_call *prev, const run_call *r
     }
     room = share - tui_width(pt_strz(count), true);
     pt_buf_reset(&a->tmp);
-    pt_buf_put(&a->tmp, head.p, tui_fit(head, room > 0 ? room : 0, false));
+    put_fit(a, &a->tmp, head, room > 0 ? room : 0);
     if (count[0]) {
         tui_style(&a->tmp, TUI_DIM);
         pt_buf_putz(&a->tmp, count);
@@ -1070,7 +1094,7 @@ void app_on_event(void *ud, const pt_event *ev)
             r->open = false;
             find_call(a, ev->call_id, &r->round);
             pt_buf_reset(&r->head);
-            app_phrase(a, &r->head, ev->name, ev->args, &r->gist);
+            app_phrase(a, &r->head, ev->name, ev->args, &r->gist, GIST_MAX);
         }
         break;
     case PT_E_TOOL_OUTPUT: {

@@ -442,7 +442,7 @@ int tui_wrap(pt_buf *out, pt_str s, int cols, int indent, bool words, bool max)
 
 void tui_sgr(pt_buf *out, pt_str s, bool color)
 {
-    static const char *const colors[] = {"", ";31", ";32", ";36", ";35", "", "", ""};
+    static const char *const colors[] = {"", ";31", ";32", ";36", ";35", ";34", "", ""};
     size_t i = 0, run = 0;
     while (i < s.n) {
         int st;

@@ -313,6 +313,74 @@ if command -v jq >/dev/null; then
 fi
 (cd "$XDG_STATE_HOME" && "$pytte" -p -c </dev/null >/dev/null 2>&1)
 check "-c only continues sessions of this directory" [ $? -eq 1 ]
+
+# ---- what a crash leaves ----
+# A bash call killed with pytte (kill -9): its processes are stopped when
+# the session is opened again, whether the shell still runs or not.
+gone() { # pid: wait up to 3 s for it to end
+    n=0
+    while kill -0 "$1" 2>/dev/null && [ $n -lt 30 ]; do
+        sleep 0.1
+        n=$((n + 1))
+    done
+    ! kill -0 "$1" 2>/dev/null
+}
+orphan() { # name command wait: kill pytte -9 once orphan.pid exists, then resume
+    rm -f orphan.pid
+    printf '{"turns":[{"content":[{"type":"tool_call","name":"bash","args":{"command":"%s"}}]},{"content":[{"type":"text","text":"ok"}]}]}' \
+        "$2" >"$XDG_STATE_HOME/orphan.json"
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script "$XDG_STATE_HOME/orphan.json" "$1" >/dev/null 2>&1 &
+    p=$!
+    n=0
+    while [ ! -s orphan.pid ] && [ $n -lt 50 ]; do
+        sleep 0.1
+        n=$((n + 1))
+    done
+    kill -9 $p
+    wait $p 2>/dev/null
+    sleep "$3"
+    pid=$(cat orphan.pid)
+    kill -0 "$pid" 2>/dev/null
+    check "$1: kill -9 leaves the command running" [ $? -eq 0 ]
+    "$pytte" -p -c --script "$XDG_STATE_HOME/orphan.json" >/dev/null 2>&1
+    check "...and resuming stops it" gone "$pid"
+}
+orphan "the shell runs on" 'sleep 31 & echo $! > orphan.pid; wait' 0
+if [ "$(uname -s)" = Linux ]; then # elsewhere a group without its shell is not found
+    orphan "the shell is gone" '(sleep 32 & echo $! > orphan.pid); sleep 1' 1.5
+    kill -9 "$pid" 2>/dev/null
+    # What a command leaves behind when its shell ends goes when pytte exits.
+    rm -f orphan.pid
+    printf '{"turns":[{"content":[{"type":"tool_call","name":"bash","args":{"command":"%s"}}]},{"content":[{"type":"text","text":"ok"}]}]}' \
+        '(sleep 33 & echo $! > orphan.pid)' >"$XDG_STATE_HOME/orphan.json"
+    PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script "$XDG_STATE_HOME/orphan.json" "left behind" >/dev/null 2>&1
+    pid=$(cat orphan.pid)
+    check "a command's leftovers stop when pytte exits" gone "$pid"
+    kill -9 "$pid" 2>/dev/null
+    check "...and its record goes" [ -z "$(find "$XDG_STATE_HOME/pytte/sessions" -path '*/procs/g*')" ]
+fi
+rm -f orphan.pid
+printf '{"turns":[{"content":[{"type":"tool_call","name":"bash","args":{"command":"sleep 1.5","yield":0}}]},{"content":[{"type":"text","text":"ok"}]}]}' \
+    >"$XDG_STATE_HOME/nohup.json"
+(trap '' HUP && PYTTE_PERMISSION_MODE=auto exec "$pytte" -p -m faux/faux --script "$XDG_STATE_HOME/nohup.json" "no hang-up") >/dev/null 2>&1 &
+p=$!
+sleep 0.4
+kill -HUP $p
+wait $p
+check "print mode started ignoring SIGHUP (nohup) runs on" [ $? -eq 0 ]
+"$pytte" -p -m faux/faux --script tests/faux/slow.json "hang up" >/dev/null 2>&1 &
+p=$!
+sleep 0.4
+kill -HUP $p
+wait $p
+check "a hang-up stops print mode as Ctrl-C does" [ $? -eq 130 ]
+"$pytte" ls | head -1 | grep -q "closed .* hang up$"
+check "...and closes the session" [ $? -eq 0 ]
+unborn="$XDG_STATE_HOME/pytte/sessions/20000101-000000-2222"
+mkdir -p "$unborn/live"
+: >"$unborn/log.jsonl"
+"$pytte" ls >/dev/null
+check "ls removes a session that died before its first commit" [ ! -e "$unborn" ]
 rm -rf "$XDG_STATE_HOME"
 
 exit $fail

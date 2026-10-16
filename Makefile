@@ -9,12 +9,8 @@ LDFLAGS  ?=
 STRIP    ?= strip
 ifeq ($(shell uname -s),Darwin)
 GC_LDFLAGS := -Wl,-dead_strip
-NOW_LDFLAGS :=
 else
 GC_LDFLAGS := -Wl,--gc-sections
-# Bind every symbol at startup: the TUI's watchdog, a fork, then never runs
-# the lazy resolver, which would fault the dynamic linker's pages into it.
-NOW_LDFLAGS := -Wl,-z,now
 endif
 CPPFLAGS += -Iinclude -Isrc
 BUILD    := build
@@ -102,7 +98,7 @@ $(BUILD)/pytte-ai: $(PYTTE_AI_OBJ) $(BUILD)/libpytte-ai.a
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
 
 $(BUILD)/pytte: $(PYTTE_OBJ) $(BUILD)/libpytte.a
-	$(CC) $(CFLAGS) $(LDFLAGS) $(NOW_LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
 
 # ---- tests: built from source with ASan and UBSan ----
 TEST_CC     ?= $(CC)
