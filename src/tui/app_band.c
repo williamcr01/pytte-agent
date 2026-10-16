@@ -48,11 +48,17 @@ static void status_row(app *a, int64_t now, int total, int sel)
     } else if (a->run.active && now - a->pace.esc_at < DOUBLE_MS) {
         pt_buf_putz(&a->tmp, "esc again to interrupt");
     } else if (a->ask.shown) {
-        pt_buf_putz(&a->tmp, "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
-    } else if (a->menu.kind == MENU_SETTINGS) {
-        pt_buf_putz(&a->tmp, "↑↓ select · ←→ change · enter edit · esc close");
+        pt_buf_putz(&a->tmp, a->ascii ? "1-3 or up/down enter · esc no · ctrl-c interrupt"
+                                       : "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
+    } else if (a->menu.kind == MENU_SETTINGS) { /* a value to cycle through, or one to type */
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · " : "↑↓ select · ");
+        pt_buf_putz(&a->tmp, app_settings[a->menu.set_sel].vals ? a->ascii ? "left/right or enter change"
+                                                                            : "←→ or enter change"
+                                                                 : "enter edit");
+        pt_buf_putz(&a->tmp, " · esc close");
     } else if (a->menu.kind != MENU_NONE) {
-        pt_buf_putz(&a->tmp, "↑↓ select · tab complete · enter run · esc close");
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · tab complete · enter run · esc close"
+                                       : "↑↓ select · tab complete · enter run · esc close");
         if (total > 1) {
             snprintf(line, sizeof line, " · %d/%d", sel + 1, total);
             pt_buf_putz(&a->tmp, line);
@@ -144,7 +150,7 @@ static void menu_row(app *a, int i)
         snprintf(v, sizeof v, "%-14s", app_settings[i].name);
         pt_buf_putz(&a->tmp, v);
         tui_style(&a->tmp, TUI_CYAN);
-        pt_buf_putz(&a->tmp, a->cfg->val[k][0] ? a->cfg->val[k] : "(none)");
+        pt_buf_putz(&a->tmp, a->cfg->val[k][0] ? a->cfg->val[k] : "none");
         if (strcmp(a->cfg->src[k], "default") != 0 && strcmp(a->cfg->src[k], "user") != 0) {
             tui_style(&a->tmp, TUI_DIM);
             snprintf(v, sizeof v, "  (set by %s)", a->cfg->src[k]);

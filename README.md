@@ -78,8 +78,10 @@ Ctrl-C clears the draft, else interrupts the run (twice with nothing to
 clear or interrupt quits), Ctrl-D quits, Ctrl-T toggles thinking (hidden or full),
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
-`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. Settings are saved to
-`~/.config/pytte/config.json`.
+`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. A change in
+`/settings` applies to the session at once and is saved to
+`~/.config/pytte/config.json`; `/model` and `/effort` switch without saving.
+See [docs/settings.md](docs/settings.md).
 
 A session is named after the first line of its first prompt; `/resume`,
 `pytte -r` and `pytte ls` show the name, and `/resume <words>` finds
@@ -150,8 +152,9 @@ window (`12k/200k`). It counts what the next request sends: the provider's
 count for the newest answer plus an estimate of what came since, so a fresh
 session already shows its system prompt, `AGENTS.md` files, skills index and
 tools. Compaction goes by the same number. Effort starts at `medium`;
-`/effort <level>` changes it for this session, and `/settings reasoning <level>`
-changes it now and saves it for future sessions. The levels are `off`,
+`/effort <level>` changes it for this session, and `/settings effort <level>`
+changes it now and saves it for future sessions (`/model` and
+`/settings model` likewise). The levels are `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The catalog knows
 which levels each model takes (from models.dev and OpenRouter); a level the
 model does not take becomes the next higher one it does, else the next lower,

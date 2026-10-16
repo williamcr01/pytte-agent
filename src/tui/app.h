@@ -145,6 +145,7 @@ typedef struct config_job {
     /* Pending values belong to the UI; the worker only reads value/key. */
     unsigned pending;
     char next[CFG_N][512];
+    const char *wins[CFG_N]; /* where a value that wins at the next start comes from: "env", "project" */
 } config_job;
 
 /* The session this TUI shows, and how it got there. */
@@ -231,6 +232,7 @@ typedef struct app_model {
     uint32_t ctx_window;
     uint8_t efforts; /* the model's levels (PT_EFF_*, resolved) */
     bool reasons;    /* the model reasons: effort means something */
+    bool pinned;     /* chosen (flag, environment, /model, /settings model): sessions opened next use it too */
 } app_model;
 
 /* Inputs waiting to be sent, and the MCP fetches they wait for. */
@@ -370,6 +372,7 @@ void app_finish_login(app *a);
 bool app_save_setting(app *a, int k, const char *v);
 void app_update_model(app *a);
 void app_set_config(app *a);
+void app_model_for(app *a, const char *id, bool fork);
 uint32_t app_bg_running(app *a);
 void app_mcp_note(void *ud, const char *server, const char *msg);
 void app_show_notes(app *a);

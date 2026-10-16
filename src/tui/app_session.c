@@ -110,6 +110,7 @@ void app_switch_session(app *a, const char *id)
     char back[64];
     snprintf(back, sizeof back, "%s", a->s.id);
     a->o.continue_current = false;
+    app_model_for(a, id, a->o.fork);
     snprintf(a->sess.fallback, sizeof a->sess.fallback, "%s", back);
     a->sess.fallback_created = a->sess.created;
     if (!app_open_session(a, id)) {

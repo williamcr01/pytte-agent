@@ -9,8 +9,8 @@ static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "�
 static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", "*", "in", "out", "*"};
 
 const app_cmd_def app_cmds[] = {
-    {"model", " [id]", "set the model of this session"},
-    {"effort", " [level]", "set the reasoning effort of this session"},
+    {"model", " [id]", "switch the model; /settings model also saves it"},
+    {"effort", " [level]", "switch the reasoning effort; /settings effort also saves it"},
     {"new", "", "start a new session"},
     {"resume", " [id]", "open another session from this directory"},
     {"fork", "", "continue in a copy of this session"},
@@ -20,12 +20,12 @@ const app_cmd_def app_cmds[] = {
     {"ps", "", "background commands"},
     {"stop", "", "stop the background commands"},
     {"usage", "", "tokens used in this session, per model"},
-    {"thinking", " [mode]", "how thinking is shown: hidden, full"},
+    {"thinking", " [mode]", "how thinking is shown: hidden, full (saved)"},
     {"login", " [api|oauth] [provider] [key]", "save an API key, or sign in with a subscription"},
     {"mcp", " [login|logout|restart name] [trust|untrust]", "MCP servers: their state, logins, trust"},
-    {"settings", "", "user settings (saved)"},
+    {"settings", " [name] [value]", "change and save settings; they apply now"},
     {"help", "", "commands and keys"},
-    {"quit", "", "exit; it prints how to continue"},
+    {"quit", "", "exit; it prints how to continue (also /exit)"},
 };
 const size_t app_ncmds = sizeof app_cmds / sizeof app_cmds[0];
 
@@ -41,7 +41,7 @@ static const char *const on_off[] = {"on", "off"};
 const app_setting app_settings[] = {{CFG_THINKING, "thinking", VALUES(app_th_names)},
                                     {CFG_SYMBOLS, "symbols", VALUES(sym_names)},
                                     {CFG_MODEL, "model", NULL, 0},
-                                    {CFG_REASONING, "reasoning", VALUES(app_levels)},
+                                    {CFG_REASONING, "effort", VALUES(app_levels)},
                                     {CFG_PAGER, "pager", NULL, 0},
                                     {CFG_PERMS, "permissions", VALUES(perm_names)},
                                     {CFG_COMPACT_MODEL, "compact-model", NULL, 0},
@@ -132,10 +132,17 @@ void app_finish_setting(app *a)
             app_group_close(a);
             app_out_note(a, &a->lines, TUI_RED, pt_strz(job->err));
         } else {
+            const char *wins = job->wins[job->key];
+            int n;
             for (i = 0; i < NSETTINGS && app_settings[i].k != job->key; i++)
                 ;
-            snprintf(msg, sizeof msg, "saved %s: %s", i < NSETTINGS ? app_settings[i].name : "setting",
-                     job->value[0] ? job->value : "(none)");
+            n = snprintf(msg, sizeof msg, "saved %s: %s", i < NSETTINGS ? app_settings[i].name : "setting",
+                         job->value[0] ? job->value : "none");
+            if (wins && n > 0 && (size_t)n < sizeof msg)
+                snprintf(msg + n, sizeof msg - (size_t)n, " (%s sets another at the next start)",
+                         strcmp(wins, "env") == 0 ? "the environment" : ".pytte/config.json");
+            else if (job->key == CFG_SKILLS && n > 0 && (size_t)n < sizeof msg)
+                snprintf(msg + n, sizeof msg - (size_t)n, " (from the next session or /compact)");
             app_out_z(a, TUI_DIM, msg);
         }
         a->pace.urgent = true;
@@ -143,13 +150,40 @@ void app_finish_setting(app *a)
     start_setting(a);
 }
 
-/* Apply now and queue a durable save; report success after it lands. */
+/* Use ref (copied) from now on; pinned: sessions opened next use it too. */
+static void set_model(app *a, const char *ref, bool pinned)
+{
+    snprintf(a->model.ref, sizeof a->model.ref, "%.255s", ref);
+    a->o.model = a->model.ref;
+    a->model.pinned = pinned;
+    app_set_config(a);
+}
+
+/* The model for the session about to open (id, else a new one or a fork):
+ * one chosen goes on; otherwise a resumed session keeps its own, a fork
+ * its original's, and a new one gets the configured default, as at start. */
+void app_model_for(app *a, const char *id, bool fork)
+{
+    if (a->model.pinned || fork)
+        return;
+    if (id) {
+        a->o.model = NULL;
+    } else {
+        snprintf(a->model.ref, sizeof a->model.ref, "%.255s",
+                 a->cfg->val[CFG_MODEL][0] ? a->cfg->val[CFG_MODEL] : DEFAULT_MODEL);
+        a->o.model = a->model.ref;
+    }
+}
+
+/* Apply now and queue a durable save; report success after it lands.
+ * Every setting takes effect in this session at once, even one the
+ * environment or the project file set: they win again at the next start. */
 bool app_save_setting(app *a, int k, const char *v)
 {
     char err[700];
     bool ok = true;
     pt_ai_target t;
-    const char *why = NULL;
+    const char *why = NULL, *src = a->cfg->src[k];
     pt_arena_reset(&a->ar);
     if ((k == CFG_MODEL || (k == CFG_COMPACT_MODEL && *v)) &&
         !pt_ai_resolve(cli_catalog(), pt_strz(v), &t, &a->ar, &why)) {
@@ -157,8 +191,7 @@ bool app_save_setting(app *a, int k, const char *v)
         app_out_z(a, TUI_RED, err);
         return false;
     }
-    if (strcmp(a->cfg->src[k], "default") == 0 || strcmp(a->cfg->src[k], "user") == 0)
-        cli_config_set(a->cfg, k, v, "user");
+    cli_config_set(a->cfg, k, v, "user");
     if (!a->saving) {
         config_job *job = (config_job *)calloc(1, sizeof *job);
         if (job) {
@@ -171,6 +204,8 @@ bool app_save_setting(app *a, int k, const char *v)
         }
         a->saving = job;
     }
+    if (a->saving && (strcmp(src, "env") == 0 || strcmp(src, "project") == 0))
+        a->saving->wins[k] = src;
     if (!a->saving) {
         app_out_z(a, TUI_RED, "not saved: could not allocate the settings worker");
         ok = false;
@@ -192,6 +227,8 @@ bool app_save_setting(app *a, int k, const char *v)
         if (a->open)
             pt_rt_skills_auto(a->s.rt, !a->o.manual_skills);
     }
+    if (k == CFG_MODEL)
+        set_model(a, a->cfg->val[k], true);
     if (k == CFG_COMPACT_MODEL) {
         a->o.compact_model = a->cfg->val[k][0] ? a->cfg->val[k] : NULL;
         app_set_config(a);
@@ -223,6 +260,10 @@ void app_update_model(app *a)
                          (int)v.msg->model.n, v.msg->model.p);
             break;
         }
+    if (!a->model.name[0] && a->open) { /* a session resumed before its first request */
+        pt_str m = pt_session_model(a->s.a);
+        snprintf(a->model.name, sizeof a->model.name, "%.*s", (int)(m.n < 255 ? m.n : 255), m.p ? m.p : "");
+    }
     a->model.ctx_used = a->open ? pt_context_tokens(a->s.a) : 0;
     a->model.ctx_window = 0;
     a->model.efforts = 0;
@@ -689,6 +730,18 @@ static bool valid_setting(int s, const char *v)
     return !app_settings[s].vals;
 }
 
+/* "not a value for effort: x (off, minimal, ...)" */
+static void bad_value(app *a, const char *what, const char *const *vals, int nv, const char *v)
+{
+    char msg[700];
+    int i, n = snprintf(msg, sizeof msg, "not a value for %s: %.100s", what, v);
+    for (i = 0; i < nv && n > 0 && (size_t)n < sizeof msg; i++)
+        n += snprintf(msg + n, sizeof msg - (size_t)n, "%s%s", i ? ", " : " (", vals[i]);
+    if (nv && n > 0 && (size_t)n < sizeof msg)
+        snprintf(msg + n, sizeof msg - (size_t)n, ")");
+    app_out_z(a, TUI_RED, msg);
+}
+
 void app_run_command(app *a, pt_str line)
 {
     pt_str cmd = line, arg = PT_S("");
@@ -713,9 +766,7 @@ void app_run_command(app *a, pt_str line)
                 app_out_z(a, TUI_RED, msg);
                 return;
             }
-            snprintf(a->model.ref, sizeof a->model.ref, "%.255s", v);
-            a->o.model = a->model.ref;
-            app_set_config(a);
+            set_model(a, v, true);
         }
         snprintf(msg, sizeof msg, "%smodel: %s", arg.n ? "switched " : "",
                  a->model.name[0] ? a->model.name : "(the session's last)");
@@ -724,7 +775,7 @@ void app_run_command(app *a, pt_str line)
         if (arg.n) {
             pt_reasoning r;
             if (!cli_effort_parse(arg, &r)) {
-                app_out_z(a, TUI_RED, "levels: off, minimal, low, medium, high, xhigh, max");
+                bad_value(a, "effort", app_levels, (int)NLEVELS, v);
                 return;
             }
             a->o.reasoning = r;
@@ -785,16 +836,14 @@ void app_run_command(app *a, pt_str line)
                  n == 1 ? "" : "s");
         app_out_z(a, TUI_DIM, said);
     } else if (pt_str_eqz(cmd, "thinking")) {
-        if (arg.n) {
-            if (!valid_setting(app_find_setting(PT_S("thinking")), v)) {
-                app_out_z(a, TUI_RED, "modes: hidden, full");
-                return;
-            }
-            if (!app_save_setting(a, CFG_THINKING, v))
-                return;
+        if (!arg.n) {
+            snprintf(msg, sizeof msg, "thinking: %s", app_th_names[a->thinking]);
+            app_out_z(a, TUI_DIM, msg);
+        } else if (!valid_setting(app_find_setting(PT_S("thinking")), v)) {
+            bad_value(a, "thinking", app_th_names, NTH, v);
+        } else {
+            app_save_setting(a, CFG_THINKING, v); /* it says when it is saved */
         }
-        snprintf(msg, sizeof msg, "%sthinking: %s", arg.n ? "switched " : "", app_th_names[a->thinking]);
-        app_out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "settings")) {
         long sp2 = pt_str_find(arg, ' ');
         int s;
@@ -815,21 +864,17 @@ void app_run_command(app *a, pt_str line)
         if (sp2 >= 0) {
             pt_str val = pt_str_trim((pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1});
             snprintf(v, sizeof v, "%.*s", (int)(val.n < sizeof v ? val.n : sizeof v - 1), val.p);
-            if (!valid_setting(s, v)) {
-                snprintf(msg, sizeof msg, "not a value for %s: %s", app_settings[s].name, v);
-                app_out_z(a, TUI_RED, msg);
-                return;
-            }
-            if (!app_save_setting(a, app_settings[s].k, v))
-                return;
+            if (app_settings[s].k == CFG_COMPACT_MODEL && strcmp(v, "none") == 0)
+                v[0] = 0; /* the session's model compacts */
+            if (!valid_setting(s, v))
+                bad_value(a, app_settings[s].name, app_settings[s].vals, app_settings[s].nv, v);
+            else
+                app_save_setting(a, app_settings[s].k, v); /* it says when it is saved */
+            return;
         }
-        if (sp2 >= 0) /* saved: the value, and where it was saved */
-            snprintf(msg, sizeof msg, "saving %s: %s", app_settings[s].name,
-                     a->cfg->val[app_settings[s].k][0] ? a->cfg->val[app_settings[s].k] : "(none)");
-        else
-            snprintf(msg, sizeof msg, "%s: %s (%s)", app_settings[s].name,
-                     a->cfg->val[app_settings[s].k][0] ? a->cfg->val[app_settings[s].k] : "(none)",
-                     a->cfg->src[app_settings[s].k]);
+        snprintf(msg, sizeof msg, "%s: %s (%s)", app_settings[s].name,
+                 a->cfg->val[app_settings[s].k][0] ? a->cfg->val[app_settings[s].k] : "none",
+                 a->cfg->src[app_settings[s].k]);
         app_out_z(a, TUI_DIM, msg);
     } else if (pt_str_eqz(cmd, "login")) {
         cmd_login(a, arg);
