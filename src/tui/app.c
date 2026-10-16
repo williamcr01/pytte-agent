@@ -130,7 +130,6 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         cli_mcp_host(&a->o.mcp_host, app_mcp_note, a);
     a->pace.interval = 33;
     a->pace.esc_at = a->pace.ctrlc_at = -DOUBLE_MS;
-    /* the watchdog first: before the store is opened */
     if (!(a->t = tui_term_new())) {
         fprintf(stderr, "pytte: not a terminal\n");
         return 1;
