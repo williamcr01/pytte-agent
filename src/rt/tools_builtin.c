@@ -1,6 +1,7 @@
 /* The built-in tools (section 13.3): read, write and edit, and the table
  * of them all. bash and bash_poll are in tools_bash.c, grep, find and ls
- * in tools_search.c, web_fetch in tools_web.c.
+ * in tools_search.c, web_fetch in tools_web.c, web_search in
+ * tools_websearch.c.
  *
  * read records a stamp (size, mtime, SHA-256) in the doc "reads:<path>";
  * edit refuses a file that changed since, so the model never edits text
@@ -31,6 +32,7 @@ typedef struct builtins {
     pt_buf spans; /* an edit's spans, reused */
     search *search; /* grep, find and ls */
     web *web;       /* web_fetch */
+    wsearch *wsearch; /* web_search */
 } builtins;
 
 /* ---- shared ---- */
@@ -902,6 +904,7 @@ static void builtins_free(void *ud)
     pt_arena_free(&b->k.ar);
     pt_rt_search_free(b->search);
     pt_rt_web_free(b->web);
+    pt_rt_wsearch_free(b->wsearch);
     free(b);
 }
 
@@ -909,17 +912,19 @@ bool pt_rt_add_builtins(pt_rt *rt)
 {
     builtins *b = (builtins *)calloc(1, sizeof *b);
     const pt_ai_catalog *cat = rt->c.catalog ? rt->c.catalog : pt_ai_builtin_catalog();
-    pt_rt_tool t[9], bt[2];
+    pt_rt_tool t[10], bt[2];
     uint32_t i, k, n = 0;
     if (!b || !(b->k.io = (char *)malloc(RT_TOOL_IO)) ||
-        !(b->k.unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *b->k.unset)) ||
+        !(b->k.unset = (const char **)calloc((size_t)cat->nproviders * 4 + 3, sizeof *b->k.unset)) ||
         !(b->search = pt_rt_search_new(rt)) || !(b->web = pt_rt_web_new(rt)) ||
+        !(b->wsearch = pt_rt_wsearch_new(rt)) ||
         !(b->bash = pt_rt_bash_new(&b->k))) {
         if (b) {
             free(b->k.io);
             free(b->k.unset);
             pt_rt_search_free(b->search);
             pt_rt_web_free(b->web);
+            pt_rt_wsearch_free(b->wsearch);
         }
         free(b);
         return false;
@@ -932,6 +937,8 @@ bool pt_rt_add_builtins(pt_rt *rt)
     for (i = 0; i < cat->nproviders; i++)
         for (k = 0; k < 4 && cat->providers[i].key_env[k]; k++)
             b->k.unset[n++] = cat->providers[i].key_env[k];
+    for (k = 0; pt_rt_search_env[k]; k++)
+        b->k.unset[n++] = pt_rt_search_env[k];
     rt->builtin.ud = b;
     rt->builtin.free = builtins_free;
     rt->builtin.idle = builtins_idle;
@@ -970,7 +977,8 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[4] = bt[1];
     pt_rt_search_tools(b->search, t + 5);
     pt_rt_web_tool(b->web, t + 8);
-    for (i = 0; i < 9; i++)
+    pt_rt_wsearch_tool(b->wsearch, t + 9);
+    for (i = 0; i < 10; i++)
         if (!pt_rt_tool_add(rt, &t[i]))
             return false;
     return true;

@@ -1,10 +1,11 @@
 # Tools
 
 The model's tools are `bash`, `read`, `write`, `edit`, `grep`, `find`,
-`ls` and `web_fetch`, plus any tools from MCP servers. You can turn each
+`ls`, `web_fetch` and `web_search`, plus any tools from MCP servers. You can turn each
 one on or off. The model is not told about a tool that is off: it is left
 out of the tool list sent with requests. Calls to it are refused. Every
-tool starts on except `web_fetch`, which you have to turn on.
+tool starts on except `web_fetch` and `web_search`, which you have to turn
+on (see [web.md](web.md)).
 
 ## Configuration
 
@@ -13,7 +14,7 @@ that is not listed keeps its default.
 
 | Key | Type | Default | Example |
 |---|---|---|---|
-| `tools.<name>` | boolean | `true`; `false` for `web_fetch` | `"tools": {"web_fetch": true, "bash": false}` |
+| `tools.<name>` | boolean | `true`; `false` for `web_fetch`, `web_search` | `"tools": {"web_fetch": true, "bash": false}` |
 
 The key can go in the user file (`~/.config/pytte/config.json`) or the
 project file (`.pytte/config.json`). The project file wins. The TUI writes
@@ -50,6 +51,11 @@ no effect.
     `/compact`. The saved line says which case applies.
 - **A tool that is off** is refused even in `auto` permission mode. The
   model is told "the user turned this tool off".
+- **`web_search`** also needs a search API key. Turning it on without one
+  says to run `/login search`; a call without a key is an error result
+  that says the same. After `/login search` saves a key, pytte asks
+  whether to turn on `web_search` and `web_fetch`; yes does what `/tools
+  web_search on` and `/tools web_fetch on` do.
 - **Print mode** (`pytte -p`) reads the same config.
 
 ## Examples
@@ -57,7 +63,7 @@ no effect.
 Let the model fetch web pages, in `~/.config/pytte/config.json`:
 
 ```json
-{"tools": {"web_fetch": true}}
+{"tools": {"web_fetch": true, "web_search": true}}
 ```
 
 A project where the model only reads and edits, without a shell, in

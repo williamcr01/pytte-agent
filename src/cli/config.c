@@ -15,7 +15,8 @@
 #include <unistd.h>
 
 static const char *const keys[CFG_N] = {"model",     "reasoning",        "tui.thinking",     "tui.symbols",
-                                        "tui.pager", "permissions.mode", "compaction.model", "skills.auto"};
+                                        "tui.pager", "permissions.mode", "compaction.model", "skills.auto",
+                                        "search.backend"};
 
 void cli_config_dir(char *out, size_t cap)
 {
@@ -388,7 +389,7 @@ bool cli_config_write(const char *path, int k, const char *v, char *err, size_t 
 
 /* ---- tools ---- */
 
-static const char *const tools_off_by_default[] = {"web_fetch"};
+static const char *const tools_off_by_default[] = {"web_fetch", "web_search"};
 /* A tool that only serves another is on and off with it. */
 static const struct {
     const char *tool, *follower;
@@ -721,6 +722,53 @@ bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap)
     pt_buf_free(&out);
     free(text);
     return ok;
+}
+
+const char *const cli_search_backends[2] = {"exa", "parallel"};
+
+const char *cli_search_env(const char *backend)
+{
+    return strcmp(backend, "exa") == 0 ? "EXA_API_KEY" : strcmp(backend, "parallel") == 0 ? "PARALLEL_API_KEY" : NULL;
+}
+
+/* "search:<backend>", the member of auth.json. */
+static bool search_slot(const char *backend, char out[32])
+{
+    return cli_search_env(backend) && snprintf(out, 32, "search:%s", backend) < 32;
+}
+
+const char *cli_search_saved(const char *backend)
+{
+    char slot[32];
+    return search_slot(backend, slot) ? cli_auth_key(slot) : NULL;
+}
+
+bool cli_search_save(const char *backend, pt_str key, char *err, size_t cap)
+{
+    char slot[32];
+    if (!search_slot(backend, slot)) {
+        snprintf(err, cap, "not a search backend: %s", backend);
+        return false;
+    }
+    return cli_auth_save(slot, key, err, cap);
+}
+
+bool cli_search_key(void *ud, const char *backend, char *out, size_t cap)
+{
+    const char *env = cli_search_env(backend), *e, *saved;
+    (void)ud;
+    if (!env)
+        return false;
+    e = getenv(env);
+    if (e && *e && strlen(e) < cap) {
+        memcpy(out, e, strlen(e) + 1);
+        return true;
+    }
+    saved = cli_search_saved(backend);
+    if (!saved || strlen(saved) >= cap)
+        return false;
+    memcpy(out, saved, strlen(saved) + 1);
+    return true;
 }
 
 bool cli_auth_login(const char *provider, bool reload, cli_login *out)

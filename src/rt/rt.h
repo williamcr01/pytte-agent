@@ -25,6 +25,13 @@ typedef struct pt_rt_cfg {
     const pt_ai_catalog *catalog;
     /* The session's ID, for {session} in MCP arguments (copied); NULL: none. */
     const char *session;
+    /* web_search: the API key for a backend ("exa", "parallel") into out;
+     * false when there is none. Called for each search. NULL: no keys. */
+    bool (*search_key)(void *ud, const char *backend, char *out, size_t cap);
+    void *search_ud;
+    /* The backend to use ("exa", "parallel"); NULL or empty: the first with
+     * a key, in that order. Must outlive the runtime. */
+    const char *search_backend;
 } pt_rt_cfg;
 
 pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a);
@@ -80,7 +87,8 @@ void pt_rt_tool_remove(pt_rt *rt, pt_str name);
 /* Whether a tool of that name is registered. */
 bool pt_rt_tool_has(pt_rt *rt, pt_str name);
 /* read, write, edit (tools_builtin.c); bash, bash_poll (tools_bash.c);
- * grep, find, ls (tools_search.c); web_fetch (tools_web.c). */
+ * grep, find, ls (tools_search.c); web_fetch (tools_web.c); web_search
+ * (tools_websearch.c). */
 bool pt_rt_add_builtins(pt_rt *rt);
 
 /* A bash command that went to the background. command lives until the

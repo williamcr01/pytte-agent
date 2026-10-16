@@ -10,8 +10,8 @@ log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
 few rows at the bottom and leaves the rest to the terminal's scrollback.
 The model works with eight tools (bash, bash_poll, read, write, edit, grep,
-find, ls), plus web_fetch once turned on (`/tools`, see
-[docs/tools.md](docs/tools.md));
+find, ls), plus web_fetch and web_search once turned on (`/tools`, see
+[docs/tools.md](docs/tools.md) and [docs/web.md](docs/web.md));
 each call is a durable task, so a crash never runs an unsafe call twice.
 When the conversation nears the model's context window, pytte compacts it
 into a summary and carries on, so sessions outlive any one window.
@@ -94,12 +94,13 @@ git worktree at `<repo>/.pytte/worktrees/<name>`, on a new branch
 [name]` (or `--worktree`) starts in one; `--worktree=<name>` or `--` keeps
 a one-word prompt from being taken for the name.
 
-`/login` offers two kinds: `/login api <provider>` asks for an API key
+`/login` offers three kinds: `/login api <provider>` asks for an API key
 (shown masked, kept out of the input history) and saves it to
 `~/.config/pytte/auth.json` (mode 0600), so no exported variable is needed;
 a key in the environment still comes first. `/login oauth openai-codex`
 signs in with a ChatGPT subscription in the browser, for the
-`openai-codex/...` models (`openai/...` is the API, with a key). See
+`openai-codex/...` models (`openai/...` is the API, with a key). `/login search exa` (or
+`parallel`) saves the key for `web_search`, and then offers to turn it on. See
 [docs/login.md](docs/login.md).
 
 Any server that speaks one of the supported APIs can be added as a provider
@@ -230,14 +231,17 @@ navigation dropped, links made absolute. Plain text and JSON come as they
 are, Latin-1 converted to UTF-8, an image as an image; other binary types
 are refused. It shows 50 KiB (`max_bytes` up to 256 KiB) from `offset`;
 a longer text is kept whole as a blob, and the result says how to read
-on. The result tells the model that the page is data, not instructions. A prompt of 16 KB or more (a big paste) is
+on. The result tells the model that the page is data, not instructions.
+`web_search` (also off until turned on) searches through Exa or Parallel with
+your own key and gives titles, URLs and excerpts, marked the same way
+([docs/web.md](docs/web.md)). A prompt of 16 KB or more (a big paste) is
 stored the same way, once, and the log refers to it. Arguments are checked against each tool's JSON
 schema before anything runs.
 
 Permissions (`--permission-mode`, `$PYTTE_PERMISSION_MODE` or
 `permissions.mode` in the config): `ask` (the default) runs `read`, `grep`,
 `find`, `ls` and `bash_poll` freely and asks before `bash`, `write`,
-`edit`, `web_fetch` (a page can carry what it is sent off the machine) and
+`edit`, `web_fetch` and `web_search` (a page can carry what it is sent off the machine) and
 MCP tools. The TUI asks inline: 1 yes,
 2 yes and allow the same command word, host (for `web_fetch`) or tool for
 this session, 3 or Esc no. Allowing `git` never allows `git status; rm -rf x`. `auto` runs

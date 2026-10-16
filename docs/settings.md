@@ -19,7 +19,7 @@ running session at once and is saved for later sessions. `/model` and
 | `permissions` | `permissions.mode` | `ask`, `auto`, `read-only` | `ask` | `--permission-mode`, `PYTTE_PERMISSION_MODE` |
 | `compact-model` | `compaction.model` | a model ref, or `none` | `none`: the session's model | `--compact-model`, `PYTTE_COMPACT_MODEL` |
 | `skills` | `skills.auto` | `on`, `off` (or `true`, `false`) | `on` | |
-| `tools` | `tools.<name>` | `true`, `false` per tool | all on but `web_fetch` | `/tools`; see [tools.md](tools.md) |
+| `tools` | `tools.<name>` | `true`, `false` per tool | all on but `web_fetch`, `web_search` | `/tools`; see [tools.md](tools.md) |
 
 They are read, each later one winning: the built-in default, the user file
 `~/.config/pytte/config.json`, the project file `.pytte/config.json`, the

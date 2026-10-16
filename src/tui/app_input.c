@@ -407,6 +407,11 @@ void app_submit(app *a)
     bool command;
     if (!text.n)
         return;
+    if (a->web_prompt && app_web_answer(a, text)) {
+        tui_input_set(&a->in, PT_STR_NULL);
+        a->draft.dirty = true;
+        return;
+    }
     if (app_secret_at(text)) {
         /* the key stays out of the history */
     } else if (a->hist.ready) {

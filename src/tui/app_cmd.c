@@ -21,7 +21,7 @@ const app_cmd_def app_cmds[] = {
     {"stop", "", "stop the background commands"},
     {"usage", "", "tokens used in this session, per model"},
     {"thinking", " [mode]", "how thinking is shown: hidden, full (saved)"},
-    {"login", " [api|oauth] [provider] [key]", "save an API key, or sign in with a subscription"},
+    {"login", " [api|oauth|search] [name] [key]", "save an API key, or sign in with a subscription"},
     {"mcp", " [login|logout|restart name] [trust|untrust]", "MCP servers: their state, logins, trust"},
     {"tools", " [name] [on|off]", "turn the model's tools on or off (saved)"},
     {"settings", " [name] [value]", "change and save settings; they apply now"},
@@ -501,7 +501,99 @@ void app_finish_login(app *a)
     app_out_z(a, ok ? TUI_DIM : TUI_RED, msg);
 }
 
-/* "/login": api or oauth. "/login api": where each provider's key comes
+/* Where each search key comes from. */
+static void search_status(app *a)
+{
+    char msg[400], k[4200];
+    int i;
+    for (i = 0; i < 2; i++) {
+        const char *env = cli_search_env(cli_search_backends[i]);
+        snprintf(msg, sizeof msg, "%s: %s%s", cli_search_backends[i],
+                 getenv(env) && *getenv(env) ? "from " : cli_search_saved(cli_search_backends[i]) ? "saved in auth.json" : "no key",
+                 getenv(env) && *getenv(env) ? env : "");
+        app_out_z(a, TUI_DIM, msg);
+    }
+    if (!cli_search_key(NULL, "exa", k, sizeof k) && !cli_search_key(NULL, "parallel", k, sizeof k))
+        app_out_z(a, TUI_DIM, "/login search <exa|parallel> saves a key for web_search (one in the environment comes first)");
+}
+
+/* Whether either search backend has a key. */
+static bool search_has_key(void)
+{
+    char k[4200];
+    return cli_search_key(NULL, "exa", k, sizeof k) || cli_search_key(NULL, "parallel", k, sizeof k);
+}
+
+/* "/login search": where each key comes from. "/login search <backend>":
+ * ready for the key. "/login search <backend> <key>": save it, then ask
+ * about turning the web tools on. */
+static void login_search(app *a, pt_str name, pt_str key)
+{
+    char msg[4400], err[600], path[4200], lbl[16];
+    const char *backend = NULL;
+    int i;
+    if (!name.n) {
+        search_status(a);
+        return;
+    }
+    for (i = 0; i < 2; i++)
+        if (pt_str_eqz(name, cli_search_backends[i]))
+            backend = cli_search_backends[i];
+    if (!backend) {
+        snprintf(msg, sizeof msg, "no search backend %.*s: exa or parallel", (int)(name.n > 100 ? 100 : name.n), name.p);
+        app_out_z(a, TUI_RED, msg);
+        return;
+    }
+    snprintf(lbl, sizeof lbl, "%s", backend);
+    lbl[0] = (char)(lbl[0] - 'a' + 'A');
+    if (!key.n) {
+        snprintf(msg, sizeof msg, "/login search %s ", backend);
+        tui_input_set(&a->in, pt_strz(msg));
+        snprintf(msg, sizeof msg, "paste the %s API key and press enter", lbl);
+        app_out_z(a, TUI_DIM, msg);
+        return;
+    }
+    if (!cli_auth_valid(key)) {
+        app_out_z(a, TUI_RED, "not an API key: it has spaces or control characters");
+        return;
+    }
+    if (!cli_search_save(backend, key, err, sizeof err)) {
+        app_out_z(a, TUI_RED, err);
+        return;
+    }
+    cli_auth_path(path, sizeof path);
+    snprintf(msg, sizeof msg, "saved the %s key to %s", lbl, path);
+    app_out_z(a, TUI_DIM, msg);
+    if (err[0])
+        app_out_z(a, TUI_RED, err);
+    if (getenv(cli_search_env(backend)) && *getenv(cli_search_env(backend))) {
+        snprintf(msg, sizeof msg, "%s is set in the environment and is used instead", cli_search_env(backend));
+        app_out_z(a, TUI_DIM, msg);
+    }
+    if (!cli_tool_on(a->cfg, PT_S("web_search")) || !cli_tool_on(a->cfg, PT_S("web_fetch"))) {
+        a->web_prompt = true;
+        app_out_z(a, 0, "Turn on web_search and web_fetch? (y/n)");
+    }
+}
+
+/* The answer to that question, when text is one: true if it was taken.
+ * Anything else drops the question and is handled as usual. */
+bool app_web_answer(app *a, pt_str text)
+{
+    bool yes = pt_str_ieq(text, PT_S("y")) || pt_str_ieq(text, PT_S("yes"));
+    if (!a->web_prompt)
+        return false;
+    a->web_prompt = false;
+    if (!yes && !pt_str_ieq(text, PT_S("n")) && !pt_str_ieq(text, PT_S("no")))
+        return false;
+    if (yes) {
+        app_tool_set(a, PT_S("web_search"), true);
+        app_tool_set(a, PT_S("web_fetch"), true);
+    }
+    return true;
+}
+
+/* "/login": api, oauth or search. "/login api": where each provider's key comes
  * from. "/login api <provider>": ready for the key. "/login api <provider>
  * <key>": save it. "/login oauth ...": login_oauth. */
 static void cmd_login(app *a, pt_str arg)
@@ -524,13 +616,19 @@ static void cmd_login(app *a, pt_str arg)
     if (!how.n) {
         login_status(a, false);
         login_status(a, true);
+        search_status(a);
         app_out_z(a, TUI_DIM,
                   "/login api <provider> saves an API key (one in the environment comes first); "
-                  "/login oauth <provider> signs in with a subscription");
+                  "/login oauth <provider> signs in with a subscription; "
+                  "/login search <exa|parallel> saves a key for web_search");
+        return;
+    }
+    if (pt_str_eqz(how, "search")) {
+        login_search(a, name, key);
         return;
     }
     if (!pt_str_eqz(how, "api") && !pt_str_eqz(how, "oauth")) {
-        app_out_z(a, TUI_RED, "/login api <provider> [key], or /login oauth <provider>");
+        app_out_z(a, TUI_RED, "/login api <provider> [key], /login oauth <provider>, or /login search <exa|parallel> [key]");
         return;
     }
     oauth = pt_str_eqz(how, "oauth");
@@ -838,6 +936,8 @@ void app_tool_set(app *a, pt_str name, bool on)
     job->tq[i].now = a->open && pt_epoch_provisional(a->s.a); /* before the first request */
     job->tq[i].wins = wins;
     start_setting(a);
+    if (on && pt_str_eqz(name, "web_search") && !search_has_key())
+        app_out_z(a, TUI_DIM, "web_search has no search API key yet: run /login search exa (or parallel)");
 }
 
 /* "/tools": the menu. "/tools <name>": its state. "/tools <name> on|off". */

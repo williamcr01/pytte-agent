@@ -165,9 +165,10 @@ size_t app_secret_at(pt_str d)
     return at;
 }
 
-static const char *const login_subs[] = {"api", "oauth"};
+static const char *const login_subs[] = {"api", "oauth", "search"};
 static const char *const login_descs[] = {"save an API key, billed by the provider",
-                                          "sign in with a subscription (ChatGPT)"};
+                                          "sign in with a subscription (ChatGPT)",
+                                          "Search API keys, for web_search"};
 
 /* The word being typed: after the last space or newline. */
 static pt_str last_word(pt_str d)
@@ -322,7 +323,7 @@ void app_menu_update(app *a)
             long sp2 = pt_str_find(arg, ' ');
             if (sp2 < 0) {
                 size_t i;
-                for (i = 0; i < 2; i++)
+                for (i = 0; i < 3; i++)
                     if (pt_str_starts(pt_strz(login_subs[i]), arg))
                         add_item(a, login_subs[i], strlen(login_subs[i]), login_descs[i]);
             } else {
@@ -330,6 +331,9 @@ void app_menu_update(app *a)
                 bool oauth = pt_str_eqz(how, "oauth");
                 const pt_ai_catalog *cat = cli_catalog();
                 uint32_t i;
+                for (i = 0; pt_str_eqz(how, "search") && pt_str_find(name, ' ') < 0 && i < 2; i++)
+                    if (pt_str_starts(pt_strz(cli_search_backends[i]), name))
+                        add_item(a, cli_search_backends[i], strlen(cli_search_backends[i]), i ? "Parallel" : "Exa");
                 for (i = 0; (oauth || pt_str_eqz(how, "api")) && pt_str_find(name, ' ') < 0 && i < cat->nproviders;
                      i++) {
                     const pt_provider *q = &cat->providers[i];

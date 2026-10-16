@@ -1187,6 +1187,78 @@ static bool first_request_has(pty *p, const char *tool)
     return found;
 }
 
+/* /login search: the key is masked and saved; then the question about
+ * turning on the web tools, answered with y (saved like /tools does) or n. */
+static void test_login_search(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
+    char path[300], *cfg;
+    size_t n;
+    unsetenv("EXA_API_KEY");
+    unsetenv("PARALLEL_API_KEY");
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
+    unlink(path);
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "/login ");
+    CHECK(wait_for(&p, "Search API keys, for web_search", 1000)); /* the third kind */
+    keys(&p, "\x15/login search\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "exa: no key", 1000));
+    CHECK(wait_for(&p, "parallel: no key", 1000));
+    keys(&p, "/login search ex\t");
+    CHECK(wait_for(&p, "› /login search exa ", 1000));
+    keys(&p, "exa-secret-1");
+    CHECK(wait_for(&p, "› /login search exa ************", 1000));
+    CHECK(!has(&p, "exa-secret"));
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "saved the Exa key to ", DURABLE_MS));
+    CHECK(wait_for(&p, "Turn on web_search and web_fetch? (y/n)", 1000));
+    snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(cfg && strstr(cfg, "\"search:exa\": {\n    \"key\": \"exa-secret-1\"\n  }"));
+    free(cfg);
+    snprintf(path, sizeof path, "%s/pytte/history", state_dir);
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(!cfg || !strstr(cfg, "exa-secret"));
+    free(cfg);
+    keys(&p, "y\r");
+    CHECK(wait_for(&p, "saved web_search: on", DURABLE_MS));
+    CHECK(wait_for(&p, "saved web_fetch: on", DURABLE_MS));
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(cfg && strstr(cfg, "\"web_search\": true") && strstr(cfg, "\"web_fetch\": true"));
+    free(cfg);
+    keys(&p, "/login search\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "exa: saved in auth.json", 1000));
+    /* n leaves them alone; the question is not asked of a key already used */
+    keys(&p, "/login search parallel par-secret-2\r");
+    CHECK(wait_for(&p, "saved the Parallel key to ", DURABLE_MS));
+    CHECK(!has(&p, "par-secret"));
+    keys(&p, "/tools web_search off\r");
+    CHECK(wait_for(&p, "saved web_search: off", DURABLE_MS));
+    keys(&p, "/login search exa exa-secret-1\r");
+    CHECK(wait_for(&p, "Turn on web_search and web_fetch? (y/n)", 1000));
+    keys(&p, "n\r");
+    pump(&p, 300);
+    keys(&p, "/tools web_search\r");
+    CHECK(wait_for(&p, "web_search: off (user)", 1000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    unlink(path);
+    snprintf(path, sizeof path, "%s/pytte/auth.json", config_dir);
+    unlink(path);
+}
+
 /* /tools: a menu of the tools, on or off; web_fetch starts off, bash_poll
  * goes with bash. */
 static void test_tools(void)
@@ -1200,13 +1272,15 @@ static void test_tools(void)
     pty_start(&p, 30, 100, args);
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "/tools\r");
-    CHECK(wait_for(&p, "↑↓ select · space turns on or off · esc close · 7 of 8 on", 1000));
+    CHECK(wait_for(&p, "↑↓ select · space turns on or off · esc close · 7 of 9 on", 1000));
     CHECK(wait_for(&p, "● read ", 1000));
     CHECK(has(&p, "○ web_fetch"));
     CHECK(!has(&p, "bash_poll")); /* listed as bash */
-    keys(&p, "\x1b[A "); /* up from the top: the last, web_fetch */
+    keys(&p, "\x1b[A"); /* up from the top: the last */
+    CHECK(wait_for(&p, "○ web_search", 1000));
+    keys(&p, "\x1b[A "); /* then web_fetch */
     CHECK(wait_for(&p, "\n· saved web_fetch: on\n", DURABLE_MS)); /* nothing sent yet: the first request gets it */
-    CHECK(wait_for(&p, "8 of 8 on", 1000));
+    CHECK(wait_for(&p, "8 of 9 on", 1000));
     CHECK(wait_for(&p, "● web_fetch", 1000));
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "\"tools\": {\n    \"web_fetch\": true\n  }"));
@@ -1238,11 +1312,11 @@ static void test_tools(void)
     keys(&p, "/tools bash_poll off\r");
     CHECK(wait_for(&p, "bash_poll goes with bash", 1000));
     keys(&p, "/tools we");
-    CHECK(wait_for(&p, "  › web_fetch  off", 1000)); /* the state beside each */
+    CHECK(wait_for(&p, "  › web_fetch   off", 1000)); /* the state beside each */
     keys(&p, "\x15"); /* clear the draft */
     /* /settings shows how many are on, and opens the menu */
     keys(&p, "/settings\r\x1b[A");
-    CHECK(wait_for(&p, "tools         7 of 8 on", 1000));
+    CHECK(wait_for(&p, "tools         7 of 9 on", 1000));
     CHECK(wait_for(&p, "enter open · esc close", 1000));
     keys(&p, "\r");
     CHECK(wait_for(&p, "space turns on or off", 1000));
@@ -1270,7 +1344,7 @@ static void test_tools(void)
     keys(&p, "/tools web_fetch on\r"); /* queued if the session still opens */
     CHECK(wait_for(&p, "\n· saved web_fetch: on\n", DURABLE_MS));
     keys(&p, "/settings\r\x1b[A\r"); /* and the menu from /settings */
-    CHECK(wait_for(&p, "space turns on or off · esc close · 8 of 8 on", 1000));
+    CHECK(wait_for(&p, "space turns on or off · esc close · 8 of 9 on", 1000));
     keys(&p, "\x1b");
     pump(&p, 100);
     keys(&p, "hi\r");
@@ -1701,6 +1775,7 @@ int main(int argc, char **argv)
     RUN(test_commands);
     RUN(test_skills);
     RUN(test_session_model);
+    RUN(test_login_search);
     RUN(test_tools);
     RUN(test_fork_worktree);
     RUN(test_history_pager_draft);
