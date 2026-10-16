@@ -1,6 +1,10 @@
 /* What the user types: keys, the queue of inputs waiting for the run,
- * and the MCP prompts and @-mentions an input waits for before it goes. */
+ * the MCP prompts and @-mentions an input waits for before it goes, and
+ * the images attached to the draft. */
 #define _POSIX_C_SOURCE 200809L
+#include <poll.h>
+#include <unistd.h>
+
 #include "tui/app.h"
 
 static bool queue_text(app *a, pt_str text, bool command)
@@ -35,6 +39,7 @@ static bool queue_text(app *a, pt_str text, bool command)
     q->xid = 0;
     q->want = q->got = 0;
     q->failed = q->prompt = false;
+    q->natt = 0;
     q->err[0] = 0;
     pt_buf_reset(&q->names);
     {
@@ -252,7 +257,8 @@ static int expand_start(app *a, queued_input *q)
         q->prompt = true;
         q->want = 1;
     }
-    /* @server:uri, at a word's start, for a ready server */
+    /* @server:uri, at a word's start, for a ready server; else @path, for
+     * a file or directory that exists (anything else stays plain text) */
     for (at = 0; at < t.n; at++) {
         size_t e;
         long colon;
@@ -264,14 +270,35 @@ static int expand_start(app *a, queued_input *q)
         tok = (pt_str){t.p + at + 1, e - at - 1};
         while (tok.n && strchr(".,;!?)", tok.p[tok.n - 1]))
             tok.n--;
-        if ((colon = pt_str_find(tok, ':')) <= 0)
-            continue;
-        server = (pt_str){tok.p, (size_t)colon};
-        uri = (pt_str){tok.p + colon + 1, tok.n - (size_t)colon - 1};
-        for (i = 0; i < ns && !pt_str_eqz(server, in[i].name); i++)
+        colon = pt_str_find(tok, ':');
+        server = (pt_str){tok.p, colon > 0 ? (size_t)colon : 0};
+        uri = colon > 0 ? (pt_str){tok.p + colon + 1, tok.n - (size_t)colon - 1} : PT_STR_NULL;
+        for (i = 0; i < ns && !(server.n && pt_str_eqz(server, in[i].name)); i++)
             ;
-        if (i == ns || !uri.n)
+        if (i == ns || !uri.n) {
+            int got;
+            if (!tok.n || !a->open)
+                continue;
+            pt_buf_reset(&a->tmp2);
+            pt_buf_putc(&a->tmp2, '\t');
+            pt_buf_puts(&a->tmp2, tok);
+            pt_buf_putc(&a->tmp2, '\n');
+            if (pt_str_contains(pt_buf_str(&q->names), pt_buf_str(&a->tmp2)))
+                continue; /* named twice: once */
+            if (q->want == XPARTS) {
+                snprintf(q->err, sizeof q->err, "at most %d mentions in a message", XPARTS - 1);
+                return -1;
+            }
+            got = pt_rt_mention_path(a->s.rt, tok, &q->parts[q->want], q->err, sizeof q->err);
+            if (got < 0)
+                return -1;
+            if (got > 0) { /* read now: nothing to wait for */
+                pt_buf_puts(&q->names, pt_buf_str(&a->tmp2));
+                q->want++;
+                q->got++;
+            }
             continue;
+        }
         if (in[i].state != PT_MCP_READY) {
             snprintf(q->err, sizeof q->err, "the MCP server %s is not ready (/mcp says why): @%.*s", in[i].name,
                      (int)(tok.n > 200 ? 200 : tok.n), tok.p);
@@ -306,7 +333,8 @@ static int expand_start(app *a, queued_input *q)
 }
 
 /* What q sends: base (the prompt's text, or what was typed), then each
- * mention's contents. */
+ * mention's contents: resources as <resource> blocks, files and
+ * directories as the blocks pt_rt_mention_path made. */
 static void expand_text(queued_input *q, pt_str base, pt_buf *out)
 {
     uint32_t k = q->prompt ? 1 : 0;
@@ -319,6 +347,12 @@ static void expand_text(queued_input *q, pt_str base, pt_buf *out)
             e++;
         for (tab = at; tab < e && names.p[tab] != '\t'; tab++)
             ;
+        if (tab == at) { /* a file or directory: the part is the whole block */
+            pt_buf_putz(out, "\n\n");
+            pt_buf_puts(out, pt_buf_str(&q->parts[k]));
+            at = e + 1;
+            continue;
+        }
         pt_buf_putz(out, "\n\n<resource server=\"");
         pt_buf_put(out, names.p + at, tab - at);
         pt_buf_putz(out, "\" uri=\"");
@@ -349,8 +383,10 @@ void app_queued_submit(app *a)
             app_menu_update(a);
         } else {
             pt_input in;
+            pt_input_image imgs[PT_INPUT_IMAGES];
             pt_buf text, full;
             char err[600];
+            uint32_t k;
             bool ok;
             if (!q->xid && expand_start(a, q) < 0) {
                 app_out_z(a, TUI_RED, q->err);
@@ -366,6 +402,13 @@ void app_queued_submit(app *a)
             }
             memset(&in, 0, sizeof in);
             in.text = pt_buf_str(&q->text);
+            for (k = 0; k < q->natt; k++) {
+                imgs[k].blob = pt_strz(q->att[k].ref);
+                imgs[k].mime = pt_strz(q->att[k].mime);
+                imgs[k].name = pt_strz(q->att[k].name);
+            }
+            in.images = imgs;
+            in.nimages = q->natt;
             pt_buf_init(&full, pt_sys_allocator());
             pt_buf_init(&text, pt_sys_allocator());
             /* skills in what was typed; not in what servers sent */
@@ -401,6 +444,252 @@ void app_queued_submit(app *a)
     }
 }
 
+/* ---- images ---- */
+
+#define CLIP_MS 1500 /* a clipboard tool has this long to answer */
+#define CLIP_MAX (4u * 1024u * 1024u) /* bytes read from it: a little over what an image may be */
+
+static void label_put(pt_buf *b, uint32_t n, const char *name)
+{
+    pt_buf_putz(b, "[image ");
+    pt_buf_u64(b, n);
+    pt_buf_putz(b, ": ");
+    pt_buf_putz(b, name);
+    pt_buf_putc(b, ']');
+}
+
+/* The text to send for a draft: its image labels still in place, numbered
+ * from 1 in the order they stand, and the images they hold in used. A label
+ * that was edited is plain text, and an image without a label is dropped. */
+static void take_images(const app *a, pt_str text, pt_buf *out, attach *used, uint32_t *nused)
+{
+    size_t i = 0;
+    *nused = 0;
+    while (i < text.n) {
+        size_t j = i + 7;
+        uint32_t num = 0;
+        if (text.p[i] == '[' && j <= text.n && memcmp(text.p + i, "[image ", 7) == 0) {
+            while (j < text.n && text.p[j] >= '0' && text.p[j] <= '9' && num < 100)
+                num = num * 10 + (uint32_t)(text.p[j++] - '0');
+            if (num >= 1 && num <= a->att.n && j + 1 < text.n && text.p[j] == ':' && text.p[j + 1] == ' ') {
+                const attach *at = &a->att.v[num - 1];
+                size_t nl = strlen(at->name);
+                j += 2;
+                if (j + nl < text.n && memcmp(text.p + j, at->name, nl) == 0 && text.p[j + nl] == ']' &&
+                    *nused < PT_INPUT_IMAGES) {
+                    used[(*nused)++] = *at;
+                    label_put(out, *nused, at->name);
+                    i = j + nl + 1;
+                    continue;
+                }
+            }
+        }
+        pt_buf_putc(out, text.p[i++]);
+    }
+}
+
+/* Attach an image to the draft: its label goes in at the cursor. */
+static void attach_add(app *a, const char *ref, const char *mime, const char *name)
+{
+    attach *at = &a->att.v[a->att.n++];
+    size_t i, n = 0;
+    snprintf(at->ref, sizeof at->ref, "%s", ref);
+    at->mime = mime;
+    for (i = 0; name[i] && n < sizeof at->name - 1; i++) /* a name that cannot break its label */
+        at->name[n++] = (unsigned char)name[i] < 32 || name[i] == ']' ? '_' : name[i];
+    at->name[n] = 0;
+    pt_buf_reset(&a->tmp);
+    label_put(&a->tmp, a->att.n, at->name);
+    pt_buf_putc(&a->tmp, ' ');
+    tui_input_insert(&a->in, pt_buf_str(&a->tmp));
+}
+
+/* The path a terminal pasted for a dropped file: quotes, backslash
+ * escapes, file:// and %XX undone, ~/ and relative paths made absolute.
+ * False when it is not a path. */
+static bool dropped_path(const app *a, pt_str line, char *out, size_t cap)
+{
+    char raw[4096], *p = raw;
+    size_t i, n = 0;
+    line = pt_str_trim(line);
+    if (!line.n || line.n >= sizeof raw)
+        return false;
+    if (line.n >= 2 && (line.p[0] == '\'' || line.p[0] == '"') && line.p[line.n - 1] == line.p[0])
+        line = (pt_str){line.p + 1, line.n - 2};
+    if (pt_str_starts(line, PT_S("file://")))
+        line = (pt_str){line.p + 7, line.n - 7};
+    for (i = 0; i < line.n; i++) {
+        char c = line.p[i];
+        if (c == '\\' && i + 1 < line.n)
+            c = line.p[++i];
+        else if (c == '%' && i + 2 < line.n && strchr("0123456789abcdefABCDEF", line.p[i + 1]) &&
+                 strchr("0123456789abcdefABCDEF", line.p[i + 2])) {
+            char hex[3] = {line.p[i + 1], line.p[i + 2], 0};
+            c = (char)strtol(hex, NULL, 16);
+            i += 2;
+        }
+        p[n++] = c;
+    }
+    p[n] = 0;
+    if (!n)
+        return false;
+    if (p[0] == '~' && p[1] == '/' && getenv("HOME"))
+        return snprintf(out, cap, "%s/%s", getenv("HOME"), p + 2) < (int)cap;
+    if (p[0] != '/') {
+        pt_str cwd = a->open ? pt_session_cwd(pt_rt_agent(a->s.rt)) : PT_STR_NULL;
+        return snprintf(out, cap, "%.*s%s%s", (int)cwd.n, cwd.p, cwd.n ? "/" : "", p) < (int)cap;
+    }
+    return snprintf(out, cap, "%s", p) < (int)cap;
+}
+
+/* A paste whose every line is the path of an image file attaches them.
+ * True when taken (also when an image was refused: that is said); false
+ * when it is text, and goes into the draft as it is. */
+static bool paste_images(app *a, pt_str paste)
+{
+    uint32_t before = a->att.n;
+    size_t at = 0, e;
+    if (!a->open || !paste.n || paste.n > 8192)
+        return false;
+    while (at < paste.n) {
+        char path[4200], ref[72], err[300];
+        const char *mime, *base;
+        int got;
+        for (e = at; e < paste.n && paste.p[e] != '\n'; e++)
+            ;
+        if (pt_str_trim((pt_str){paste.p + at, e - at}).n) {
+            if (!dropped_path(a, (pt_str){paste.p + at, e - at}, path, sizeof path))
+                goto text;
+            got = pt_rt_attach_file(a->s.rt, path, ref, &mime, err, sizeof err);
+            if (got == 0)
+                goto text;
+            if (got < 0) {
+                app_out_z(a, TUI_RED, err);
+                goto drop;
+            }
+            if (a->att.n == PT_INPUT_IMAGES) {
+                app_out_z(a, TUI_RED, "at most 8 images in a message");
+                goto drop;
+            }
+            base = strrchr(path, '/');
+            attach_add(a, ref, mime, base ? base + 1 : path);
+        }
+        at = e + 1;
+    }
+    return a->att.n > before;
+text:
+    a->att.n = before;
+    return false;
+drop: /* the labels already put in stay, with their images */
+    return true;
+}
+
+/* The path of the program name in PATH's directories. */
+static bool on_path(const char *name, char *out, size_t cap)
+{
+    const char *dirs = getenv("PATH"), *e;
+    for (; dirs && *dirs; dirs = *e ? e + 1 : e) {
+        size_t n;
+        e = strchr(dirs, ':');
+        e = e ? e : dirs + strlen(dirs);
+        n = (size_t)(e - dirs);
+        if (n && snprintf(out, cap, "%.*s/%s", (int)n, dirs, name) < (int)cap && access(out, X_OK) == 0)
+            return true;
+    }
+    return false;
+}
+
+/* The clipboard's PNG into out, from the first of these tools that is
+ * installed and has an image: wl-paste (Wayland), xclip (X11), pngpaste
+ * (macOS). 1 read; 0 no tool has an image; -1 none is installed. */
+static int clipboard_image(pt_buf *out)
+{
+    static const char *const cmds[][8] = {
+        {"wl-paste", "--no-newline", "--type", "image/png", NULL},
+        {"xclip", "-selection", "clipboard", "-t", "image/png", "-o", NULL},
+        {"pngpaste", "-", NULL},
+    };
+    size_t c;
+    bool any = false;
+    for (c = 0; c < sizeof cmds / sizeof cmds[0]; c++) {
+        char err[200], exe[4096];
+        const char *argv[8];
+        pt_proc *p;
+        int64_t end = pt_sys_now_ms() + CLIP_MS;
+        int status = 127;
+        bool timed_out = false;
+        if (!on_path(cmds[c][0], exe, sizeof exe))
+            continue;
+        memcpy(argv, cmds[c], sizeof argv);
+        argv[0] = exe; /* the driver runs the path it is given */
+        if (!(p = pt_proc_spawn(argv, NULL, NULL, NULL, NULL, err, sizeof err)))
+            continue;
+        pt_buf_reset(out);
+        for (;;) {
+            struct pollfd pf;
+            int64_t left = end - pt_sys_now_ms();
+            long got;
+            if (left <= 0) {
+                timed_out = true;
+                break;
+            }
+            pf.fd = pt_proc_out_fd(p);
+            pf.events = POLLIN;
+            if (poll(&pf, 1, (int)left) <= 0)
+                continue;
+            if (!pt_buf_reserve(out, 65536))
+                break;
+            got = pt_proc_read(p, out->p + out->n, 65536);
+            if (got == 0)
+                break;
+            if (got > 0)
+                out->n += (size_t)got;
+            if (out->n > CLIP_MAX) /* more than any image may be */
+                break;
+        }
+        if (timed_out || out->n > CLIP_MAX)
+            pt_proc_stop(p, true);
+        if (!pt_proc_reap(p, true, &status))
+            status = 1;
+        pt_proc_free(p);
+        if (status == 127) /* not installed: the shell-less spawn says so by exit code */
+            continue;
+        any = true;
+        if (!timed_out && out->n)
+            return 1;
+    }
+    return any ? 0 : -1;
+}
+
+static void paste_clipboard(app *a)
+{
+    char ref[72], err[300];
+    const char *mime;
+    pt_buf img;
+    int got;
+    if (!a->open) {
+        app_out_z(a, TUI_RED, "no session to keep the image in yet");
+        return;
+    }
+    if (a->att.n == PT_INPUT_IMAGES) {
+        app_out_z(a, TUI_RED, "at most 8 images in a message");
+        return;
+    }
+    pt_buf_init(&img, pt_sys_allocator());
+    got = clipboard_image(&img);
+    if (got < 0) {
+        app_out_z(a, TUI_RED, "ctrl+v attaches a clipboard image with wl-paste, xclip or pngpaste: none is installed");
+    } else if (got == 0) {
+        app_out_z(a, TUI_RED, "no image on the clipboard");
+    } else if (pt_rt_attach_bytes(a->s.rt, img.p, img.n, ref, &mime, err, sizeof err)) {
+        attach_add(a, ref, mime, strcmp(mime, "image/png") == 0 ? "clipboard.png" : "clipboard");
+        a->draft.dirty = true;
+    } else {
+        app_out_z(a, TUI_RED, err);
+    }
+    pt_buf_free(&img);
+}
+
 void app_submit(app *a)
 {
     pt_str text = pt_str_trim(pt_buf_str(&a->in.text));
@@ -431,6 +720,7 @@ void app_submit(app *a)
             return;
         }
         tui_input_set(&a->in, PT_STR_NULL);
+        a->att.n = 0;
         a->menu.kind = MENU_NONE;
         a->menu.closed = false;
         app_run_command(a, pt_buf_str(&a->command));
@@ -442,9 +732,25 @@ void app_submit(app *a)
         app_out_z(a, TUI_RED, "no session");
         return;
     }
-    if (!queue_text(a, text, command)) {
-        app_out_z(a, TUI_RED, "out of memory queuing input");
-        return;
+    {
+        attach used[PT_INPUT_IMAGES];
+        uint32_t nused = 0;
+        if (a->att.n && !command) { /* the labels still there, renumbered, with their images */
+            pt_buf_reset(&a->tmp);
+            take_images(a, text, &a->tmp, used, &nused);
+            if (a->tmp.oom) {
+                app_out_z(a, TUI_RED, "out of memory queuing input");
+                return;
+            }
+            text = pt_buf_str(&a->tmp);
+        }
+        if (!queue_text(a, text, command)) {
+            app_out_z(a, TUI_RED, "out of memory queuing input");
+            return;
+        }
+        memcpy(a->queue.items[a->queue.n - 1].att, used, nused * sizeof used[0]);
+        a->queue.items[a->queue.n - 1].natt = nused;
+        a->att.n = 0;
     }
     tui_input_set(&a->in, PT_STR_NULL);
     app_queued_submit(a);
@@ -612,6 +918,8 @@ void app_on_key(app *a, const tui_ev *ev)
     a->pace.urgent = true;
     if (ask_key(a, ev))
         return;
+    if (a->att.n && !pt_str_contains(pt_buf_str(&a->in.text), PT_S("[image ")))
+        a->att.n = 0; /* the draft lost its labels: the images go too */
     if (ev->kind == TE_TEXT && a->menu.kind == MENU_TOOLS && pt_str_eqz(ev->text, " ")) {
         tui_ev enter_ev = *ev;
         enter_ev.kind = TE_KEY;
@@ -623,7 +931,12 @@ void app_on_key(app *a, const tui_ev *ev)
     if (ev->kind == TE_TEXT || ev->kind == TE_PASTE) {
         if (a->menu.kind == MENU_SETTINGS || a->menu.kind == MENU_TOOLS)
             a->menu.kind = MENU_NONE;
-        tui_input_insert(&a->in, ev->text);
+        if (ev->kind == TE_PASTE && (!ev->text.n ? true : paste_images(a, ev->text))) {
+            if (!ev->text.n) /* an empty paste: a terminal that has no text for the clipboard's image */
+                paste_clipboard(a);
+        } else {
+            tui_input_insert(&a->in, ev->text);
+        }
         a->menu.closed = false;
         a->draft.dirty = true;
         app_menu_update(a);
@@ -681,6 +994,13 @@ void app_on_key(app *a, const tui_ev *ev)
     }
     if (ctrl && k == 'l') {
         tui_band_redraw(&a->band);
+        return;
+    }
+    if (ctrl && k == 'v') {
+        paste_clipboard(a);
+        a->menu.closed = false;
+        a->draft.dirty = true;
+        app_menu_update(a);
         return;
     }
     if (ctrl && k == 'z') {

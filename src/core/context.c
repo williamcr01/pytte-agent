@@ -33,6 +33,7 @@ uint64_t pt_core_sent_bytes(const pt_agent *a, const entry *e)
         n += 16 + m->blocks[i].text.n + m->blocks[i].args.n + m->blocks[i].signature.n / 4;
     if (m->image.n)
         n += 3 * PT_IMAGE_TOKENS; /* counted as bytes / 3, below */
+    n += (uint64_t)e->nimgs * (16 + 3 * PT_IMAGE_TOKENS);
     if (e->kind == ENT_EPOCH)
         for (i = 0; i < a->ntools; i++)
             n += 32 + a->tools[i].name.n + a->tools[i].description.n + a->tools[i].schema.n;
@@ -125,8 +126,11 @@ static bool summary_msg(const entry *e, bool kept, pt_msg *m, pt_arena *ar)
 
 bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena *ar)
 {
-    uint32_t i, n = 0;
-    pt_msg *msgs = (pt_msg *)pt_arena_alloc(ar, sizeof(pt_msg) * (a->nentries + 1));
+    uint32_t i, n = 0, room = a->nentries + 1;
+    pt_msg *msgs;
+    for (i = 0; i < a->nentries; i++)
+        room += a->entries[i].nimgs;
+    msgs = (pt_msg *)pt_arena_alloc(ar, sizeof(pt_msg) * room);
     if (!msgs)
         return false;
     for (i = 0; i < a->nentries && a->entries[i].id <= cutoff; i++) {
@@ -134,6 +138,9 @@ bool pt_core_context(pt_agent *a, uint32_t cutoff, pt_ai_context *out, pt_arena 
         if (e->kind == ENT_TOOL_RESULT || !pt_core_sent(e))
             continue; /* results are placed after their calls */
         msgs[n++] = e->msg;
+        if (e->nimgs)
+            memcpy(msgs + n, e->imgs, sizeof(pt_msg) * e->nimgs); /* an input's images follow its text */
+        n += e->nimgs;
         if (e->kind == ENT_EPOCH && e->summary.n &&
             !summary_msg(e, i + 1 < a->nentries && a->entries[i + 1].kept, &msgs[n++], ar))
             return false;

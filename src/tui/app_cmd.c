@@ -419,6 +419,7 @@ static void cmd_help(app *a)
         app_out_z(a, TUI_DIM, line);
     }
     app_out_z(a, TUI_DIM, "$name anywhere in a message, or /skill:name first, gives the model a skill's instructions");
+    app_out_z(a, TUI_DIM, "@path adds a file or directory to a message; paste an image's path or press ctrl-v to attach an image");
     if (a->mcp && a->mcp->nall)
         app_out_z(a, TUI_DIM, "/server:prompt [args] sends an MCP server's prompt; @server:uri adds a resource to a message");
     app_out_z(a, TUI_DIM,

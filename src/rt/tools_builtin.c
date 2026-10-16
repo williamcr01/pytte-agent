@@ -20,8 +20,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define READ_BYTES (50u * 1024u) /* text a read shows at most */
-#define READ_LIMIT 2000 /* lines a read shows unless it asks for more */
+#define READ_BYTES PT_RT_READ_BYTES /* text a read shows at most */
+#define READ_LIMIT PT_RT_READ_LINES /* lines a read shows unless it asks for more */
 #define IMAGE_MAX 3932160u /* bytes: 5 MB in base64, Anthropic's limit */
 #define IMAGE_SIDE_MAX 8000u /* pixels */
 
@@ -381,6 +381,84 @@ static void read_image(builtins *b, pt_rt *rt, const pt_fx *fx, int fd, const st
     r.image = pt_strz(ref);
     r.image_mime = pt_strz(mime);
     pt_rt_tool_done(rt, fx->id, &r);
+}
+
+/* ---- images for a message ---- */
+
+/* The image in p: its type, or false with err saying why it cannot go. */
+static bool image_ok(const unsigned char *p, size_t n, const char **mime, char *err, size_t cap)
+{
+    uint32_t w = 0, h = 0;
+    if (!(*mime = pt_rt_image_type(p, n))) {
+        snprintf(err, cap, "not a PNG, JPEG, GIF or WebP image");
+        return false;
+    }
+    if (n > IMAGE_MAX) {
+        snprintf(err, cap, "this image is %llu bytes; at most %u go to the model", (unsigned long long)n, IMAGE_MAX);
+        return false;
+    }
+    if (pt_rt_image_size(p, n, *mime, &w, &h) && (w > IMAGE_SIDE_MAX || h > IMAGE_SIDE_MAX)) {
+        snprintf(err, cap, "this image is %ux%u pixels; providers take at most %u on a side", w, h, IMAGE_SIDE_MAX);
+        return false;
+    }
+    return true;
+}
+
+bool pt_rt_attach_bytes(pt_rt *rt, const void *p, size_t n, char ref[72], const char **mime, char *err, size_t cap)
+{
+    if (!image_ok((const unsigned char *)p, n, mime, err, cap))
+        return false;
+    if (!pt_rt_put_blob(rt, p, n, ref)) {
+        snprintf(err, cap, "cannot keep the image: the session's store holds no blobs, or writing failed");
+        return false;
+    }
+    return true;
+}
+
+int pt_rt_attach_file(pt_rt *rt, const char *path, char ref[72], const char **mime, char *err, size_t cap)
+{
+    unsigned char head[16];
+    struct stat st;
+    pt_buf img;
+    ssize_t got;
+    int fd, ret = -1;
+    if ((fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
+        return 0;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || (got = read(fd, head, sizeof head)) < 0 ||
+        !pt_rt_image_type(head, (size_t)got)) {
+        close(fd);
+        return 0;
+    }
+    if ((uint64_t)st.st_size > IMAGE_MAX) {
+        close(fd);
+        snprintf(err, cap, "this image is %llu bytes; at most %u go to the model", (unsigned long long)st.st_size,
+                 IMAGE_MAX);
+        return -1;
+    }
+    pt_buf_init(&img, pt_sys_allocator());
+    /* Its size, once; one byte more shows that it grew while being read. */
+    if (!pt_buf_reserve(&img, (size_t)st.st_size + 1) || lseek(fd, 0, SEEK_SET) != 0) {
+        snprintf(err, cap, "cannot read the image");
+        goto out;
+    }
+    for (;;) {
+        got = read(fd, img.p + img.n, (size_t)st.st_size + 1 - img.n);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        img.n += (size_t)got;
+        if (img.n > (size_t)st.st_size)
+            break;
+    }
+    if (got < 0 || img.n != (size_t)st.st_size)
+        snprintf(err, cap, "cannot read the image");
+    else
+        ret = pt_rt_attach_bytes(rt, img.p, img.n, ref, mime, err, cap) ? 1 : -1;
+out:
+    close(fd);
+    pt_buf_free(&img);
+    return ret;
 }
 
 /* Text: the lines from offset, at most limit of them and READ_BYTES of
