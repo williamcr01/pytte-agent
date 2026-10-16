@@ -41,8 +41,8 @@ const char cli_default_system[] =
     "You are an expert assistant operating inside pytte, an agent harness. You help users with their "
     "requests with the tools you have at your disposal.\n\n"
     "Make independent tool calls together, in one response: calls that may run alongside others "
-    "(bash, read, grep, find, ls) then run at the same time. Make a call that needs another's result "
-    "in a later response.";
+    "(shell commands, reading and searching files) then run at the same time. Make a call that needs "
+    "another's result in a later response.";
 
 void cli_sessions_dir(char *out, size_t cap)
 {
@@ -437,6 +437,8 @@ void cli_session_discard(const char *dir)
     }
     snprintf(p, sizeof p, "%s/live", dir);
     rmdir(p);
+    snprintf(p, sizeof p, "%s/procs", dir);
+    rmdir(p);
     rmdir(dir);
 }
 
@@ -496,13 +498,23 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
     rc.stop = o->stop;
     rc.catalog = cli_catalog();
     rc.session = s->id;
+    rc.search_key = cli_search_key;
+    rc.search_backend = o->search_backend;
     if (!(s->a = pt_new(&ao)) || !(s->rt = pt_rt_new(&rc, s->a))) {
         st->close(st);
         return fail(s, 1, err, cap, "out of memory");
     }
     if (!pt_rt_add_builtins(s->rt)) /* the store is the runtime's now */
         return fail(s, 1, err, cap, "out of memory");
+    {
+        const char *name = o->tools_off, *nl;
+        for (; (nl = strchr(name, '\n')); name = nl + 1)
+            if (!pt_rt_tool_set_off(s->rt, (pt_str){name, (size_t)(nl - name)}, true))
+                return fail(s, 1, err, cap, "out of memory");
+    }
     pt_rt_set_perm(s->rt, o->perm);
+    if (!cli_perms_apply(s->rt, getcwd(cwd, sizeof cwd) ? cwd : ".")) /* rules of the config files (15.5) */
+        return fail(s, 1, err, cap, "out of memory");
     if (o->nmcp && !pt_rt_mcp_setup(s->rt, &o->mcp_host, o->mcp, o->nmcp))
         return fail(s, 1, err, cap, "out of memory");
     {
@@ -550,7 +562,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
         c.system = pt_buf_str(&sys);
         c.skills = pt_buf_str(&skills);
         c.tools = pt_rt_tool_defs(s->rt, &c.ntools);
-        c.provisional = o->nmcp > 0; /* settled once the servers listed their tools */
+        c.provisional = true; /* settled at the first request: tools turned on or off before it, and MCP servers' tools, make it in */
         ok = ok && pt_create(s->a, &c);
         pt_buf_free(&sys);
         pt_buf_free(&skills);
@@ -568,6 +580,9 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
         snprintf(err, cap, "session %s: %s", s->id, pt_error(s->a));
         return fail(s, 1, err, cap, NULL);
     }
+    /* What a call cut off by a crash started ends now, rather than going
+     * on behind its "interrupted" result. */
+    pt_rt_stop_orphans(s->rt);
     return 0;
 }
 
@@ -575,11 +590,7 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
 
 static bool sync_dir(const char *dir)
 {
-    int fd = open(dir, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    bool ok = fd >= 0 && fsync(fd) == 0;
-    if (fd >= 0)
-        close(fd);
-    return ok;
+    return pt_sys_sync_dir(dir, false) == 0;
 }
 
 /* The file's first limit bytes (all of it for UINT64_MAX), synced. A file
@@ -612,7 +623,7 @@ static bool copy_file(const char *from, const char *to, bool must, uint64_t limi
                 at += w;
         }
     }
-    ok = ok && fsync(out) == 0;
+    ok = ok && pt_sys_sync_fd(out, false) == 0;
     ok = close(out) == 0 && ok;
     close(in);
     return ok;

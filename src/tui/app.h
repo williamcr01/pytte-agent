@@ -22,7 +22,7 @@
 enum { TH_HIDDEN, TH_FULL };
 enum { PH_WAIT, PH_THINK, PH_WRITE, PH_RETRY, PH_TOOL, PH_COMPACT };
 enum { LIVE_NONE, LIVE_TEXT, LIVE_THINK };
-enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS };
+enum { MENU_NONE, MENU_CMD, MENU_ARG, MENU_SETTINGS, MENU_TOOLS };
 
 #define MAX_ITEMS 400
 #define DOUBLE_MS 1000
@@ -34,6 +34,7 @@ typedef struct syms {
     const char *prompt, *think, *note, *ok, *fail, *ask, *sel, *bar, *more, *dot;
     const char *up, *down; /* tokens read and written */
     const char *join;      /* between calls of one round on a row */
+    const char *on, *off;  /* a tool turned on or off (/tools) */
 } syms;
 
 
@@ -62,7 +63,9 @@ extern const size_t app_nlevels;
 extern const char *const app_th_names[]; /* by TH_*, as configured: NTH of them */
 
 /* The settings menu: config index, short name, and the values to cycle
- * through (none: edited as a command). */
+ * through (none: edited as a command). SET_TOOLS: the tools, which open
+ * their own menu. */
+#define SET_TOOLS CFG_N
 typedef struct app_setting {
     int k;
     const char *name;
@@ -106,9 +109,18 @@ typedef struct run_call {
     bool open;      /* and one more is under way */
 } run_call;
 
-/* An input that names an MCP prompt (/server:prompt) or resources
- * (@server:uri) waits for them, then goes as the text they make. */
-#define XPARTS 9 /* the prompt, and up to 8 resources */
+/* An image attached to the draft: its bytes are a stored blob. The draft
+ * shows it as "[image N: name]"; the label is what holds it there. */
+typedef struct attach {
+    char ref[72];
+    const char *mime; /* static */
+    char name[48];
+} attach;
+
+/* An input that names an MCP prompt (/server:prompt), resources
+ * (@server:uri) or files (@path) waits for them, then goes as the text
+ * they make. */
+#define XPARTS 9 /* the prompt, and up to 8 mentions */
 
 typedef struct queued_input {
     pt_buf text;
@@ -118,7 +130,9 @@ typedef struct queued_input {
     bool failed, prompt; /* prompt: parts[0] is the prompt's text */
     char err[300];
     pt_buf parts[XPARTS];
-    pt_buf names; /* "server\turi\n" of each resource part */
+    pt_buf names; /* "server\turi\n" of each resource part; "\tpath\n" of a file's (its part is the whole block) */
+    attach att[PT_INPUT_IMAGES]; /* the images it carries, as numbered in its text */
+    uint32_t natt;
 } queued_input;
 
 /* A fetch on its way: its answer goes to the queued input of id. */
@@ -145,6 +159,15 @@ typedef struct config_job {
     /* Pending values belong to the UI; the worker only reads value/key. */
     unsigned pending;
     char next[CFG_N][512];
+    const char *wins[CFG_N]; /* where a value that wins at the next start comes from: "env", "project" */
+    /* Tools turned on or off, waiting to be saved: one entry per tool, its
+     * newest state. key SET_TOOLS: the worker writes tool. */
+    struct tool_save {
+        char name[128];
+        bool on, now; /* now: the session had sent nothing, so its first request gets it */
+        const char *wins;
+    } tq[CLI_TOOLS_MAX], tool;
+    uint32_t ntq;
 } config_job;
 
 /* The session this TUI shows, and how it got there. */
@@ -231,6 +254,7 @@ typedef struct app_model {
     uint32_t ctx_window;
     uint8_t efforts; /* the model's levels (PT_EFF_*, resolved) */
     bool reasons;    /* the model reasons: effort means something */
+    bool pinned;     /* chosen (flag, environment, /model, /settings model): sessions opened next use it too */
 } app_model;
 
 /* Inputs waiting to be sent, and the MCP fetches they wait for. */
@@ -250,11 +274,13 @@ typedef struct app_menu {
     int n, sel, label_w; /* label_w: the widest label shown, for the column */
     int top;             /* the first row of the menu's window */
     pt_buf buf;          /* the items' labels and descriptions */
+    pt_buf paths;        /* the paths under cwd, a line each, while an @-menu is open */
     int set_sel;         /* the selection in the settings menu */
-    bool of_mentions;    /* it lists @-mentions */
+    bool of_mentions;    /* it lists @-mentions: resources, then paths */
     bool of_sessions;    /* ...sessions (/resume) */
     bool of_rewind;      /* ...user messages (/rewind) */
     bool of_skills;      /* ...skills (read when it opens) */
+    bool tools_pending;  /* the tools menu opens once the session has */
     session_list *sessions;
 } app_menu;
 
@@ -270,6 +296,11 @@ typedef struct app_rewind {
     uint64_t keep;      /* ...whose log is this long */
     pt_buf text;        /* the message, for the fork's input box */
 } app_rewind;
+/* The images attached to the draft, in the order of their labels. */
+typedef struct app_attach {
+    attach v[PT_INPUT_IMAGES];
+    uint32_t n;
+} app_attach;
 
 /* When to paint, and double presses. */
 typedef struct app_pace {
@@ -298,6 +329,7 @@ typedef struct app {
     pt_buf command;
     config_job *saving;
     cli_oauth *login; /* a /login oauth waiting for the browser */
+    bool web_prompt;  /* asked "Turn on web_search and web_fetch?": the next line answers */
     bool pager_pending;
     tui_term *t;
     tui_keys keys;
@@ -321,6 +353,7 @@ typedef struct app {
     app_model model;
     app_queue queue;
     app_menu menu;
+    app_attach att;
     app_pace pace;
     app_rewind rw;
     bool quit;
@@ -363,6 +396,12 @@ void app_out_tail(app *a);
 /* app_band.c: the band: the frame under the scrollback, and painting it */
 void app_tokens_short(char *out, size_t cap, uint64_t n);
 bool app_asking(app *a);
+/* Say when the project's allow rules wait for trust. */
+void app_perms_note(app *a);
+/* The rule "always allow" saves for the question, as in the config file
+ * ("bash(git:*)", "web_fetch(docs.python.org)", "mcp__a__b"); false when
+ * no rule fits it (a bash command with no first word). */
+bool app_ask_rule(const app *a, char *out, size_t cap);
 void app_flush_out(app *a);
 void app_paint(app *a);
 
@@ -383,13 +422,22 @@ void app_apply_thinking(app *a);
 void app_finish_setting(app *a);
 /* A /login oauth that ended: say how. */
 void app_finish_login(app *a);
+/* The answer to the question after a search key is saved (y or n). True
+ * when text was an answer; any other text drops the question. */
+bool app_web_answer(app *a, pt_str text);
 bool app_save_setting(app *a, int k, const char *v);
 void app_update_model(app *a);
 void app_set_config(app *a);
+void app_model_for(app *a, const char *id, bool fork);
 uint32_t app_bg_running(app *a);
 void app_mcp_note(void *ud, const char *server, const char *msg);
 void app_show_notes(app *a);
 void app_run_command(app *a, pt_str line);
+/* /tools: the registered tools, on or off */
+void app_tools_list(app *a);
+void app_tool_set(app *a, pt_str name, bool on);
+void app_tools_open(app *a);
+uint32_t app_tools_on(app *a, uint32_t *all);
 bool app_mcp_known(app *a, pt_str name);
 /* /rewind: the menu's messages (a fresh scan when refresh), the end of a
  * rewind seen between steps, and Esc Esc on an empty draft. */

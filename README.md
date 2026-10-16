@@ -10,7 +10,8 @@ log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
 few rows at the bottom and leaves the rest to the terminal's scrollback.
 The model works with eight tools (bash, bash_poll, read, write, edit, grep,
-find, ls);
+find, ls), plus web_fetch and web_search once turned on (`/tools`, see
+[docs/tools.md](docs/tools.md) and [docs/web.md](docs/web.md));
 each call is a durable task, so a crash never runs an unsafe call twice.
 When the conversation nears the model's context window, pytte compacts it
 into a summary and carries on, so sessions outlive any one window.
@@ -76,10 +77,12 @@ In the TUI: Enter sends (queued while a run is active or the session is
 still opening), Shift+Enter or Ctrl-J adds a newline, Esc Esc interrupts,
 Ctrl-C clears the draft, else interrupts the run (twice with nothing to
 clear or interrupt quits), Ctrl-D quits, Ctrl-T toggles thinking (hidden or full),
-Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
+Ctrl-O opens the full transcript in a pager, Ctrl-V attaches a clipboard image, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
-`/status`, `/thinking`, `/compact`, `/rewind` ([docs](docs/rewind.md)), `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. Settings are saved to
-`~/.config/pytte/config.json`.
+`/status`, `/thinking`, `/compact`, `/rewind` ([docs](docs/rewind.md)), `/ps`, `/stop`, `/usage`, `/tools`, `/settings`, `/login`, `/mcp`, `/permissions`, `/help`, `/quit`. A change in
+`/settings` applies to the session at once and is saved to
+`~/.config/pytte/config.json`; `/model` and `/effort` switch without saving.
+See [docs/settings.md](docs/settings.md).
 
 A session is named after the first line of its first prompt; `/resume`,
 `pytte -r` and `pytte ls` show the name, and `/resume <words>` finds
@@ -91,12 +94,13 @@ git worktree at `<repo>/.pytte/worktrees/<name>`, on a new branch
 [name]` (or `--worktree`) starts in one; `--worktree=<name>` or `--` keeps
 a one-word prompt from being taken for the name.
 
-`/login` offers two kinds: `/login api <provider>` asks for an API key
+`/login` offers three kinds: `/login api <provider>` asks for an API key
 (shown masked, kept out of the input history) and saves it to
 `~/.config/pytte/auth.json` (mode 0600), so no exported variable is needed;
 a key in the environment still comes first. `/login oauth openai-codex`
 signs in with a ChatGPT subscription in the browser, for the
-`openai-codex/...` models (`openai/...` is the API, with a key). See
+`openai-codex/...` models (`openai/...` is the API, with a key). `/login search exa` (or
+`parallel`) saves the key for `web_search`, and then offers to turn it on. See
 [docs/login.md](docs/login.md).
 
 Any server that speaks one of the supported APIs can be added as a provider
@@ -150,8 +154,9 @@ window (`12k/200k`). It counts what the next request sends: the provider's
 count for the newest answer plus an estimate of what came since, so a fresh
 session already shows its system prompt, `AGENTS.md` files, skills index and
 tools. Compaction goes by the same number. Effort starts at `medium`;
-`/effort <level>` changes it for this session, and `/settings reasoning <level>`
-changes it now and saves it for future sessions. The levels are `off`,
+`/effort <level>` changes it for this session, and `/settings effort <level>`
+changes it now and saves it for future sessions (`/model` and
+`/settings model` likewise). The levels are `off`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The catalog knows
 which levels each model takes (from models.dev and OpenRouter); a level the
 model does not take becomes the next higher one it does, else the next lower,
@@ -164,8 +169,11 @@ Sessions live in `$XDG_STATE_HOME/pytte/sessions/<id>/` (by default
 `~/.local/state/pytte`). `log.jsonl` is the whole truth: one commit per line,
 readable with `jq`. Kill the process at any point and `pytte -c` continues
 from the last commit: a half-streamed answer is kept as an interrupted entry
-and the request is sent again. A watchdog process restores the terminal
-modes even after `kill -9` (run `reset` if keys still misbehave). Exit codes:
+and the request is sent again; commands a killed pytte left running are
+stopped. pytte restores the terminal modes on every
+exit it can see (quit, Ctrl-C, `kill`, a hang-up, a crash); after `kill -9`
+it cannot, so run `reset` if keys misbehave. What is kept where, and what
+recovery does, is in [docs/sessions.md](docs/sessions.md). Exit codes:
 0 done, 1 setup (such as a missing key), 3 a tool call waits for approval
 (print mode), 10 the run failed, 20 storage error, 130 detached (Ctrl-C in
 print mode).
@@ -198,7 +206,8 @@ result while it works, else in a note with what the command printed that
 starts a turn (shown as `· session 8 ended with exit code 0: make test`);
 `bash_poll` checks on one or stops it. The footer counts the ones still
 running, `/ps` lists them and `/stop` stops them; they end when pytte
-does. See [docs/bash.md](docs/bash.md). `read` shows a file with
+does (after `kill -9`, when the session is next opened). See
+[docs/bash.md](docs/bash.md). `read` shows a file with
 line numbers, up to 2000 lines or 50 KiB, cut at a whole line, and says
 where to read on; an image (PNG, JPEG, GIF, WebP, up to 3.75 MiB and 8000
 pixels a side) goes to the model as an image, or as a note to a model that
@@ -214,29 +223,42 @@ ignore, from the repository's root down. Each result is bounded (matches,
 entries, 50 KiB) and says when it was cut. For `bash`, the model sees up
 to 16 KB of output: the first 4 KB and the last 12 KB. Longer output is kept whole in the session's
 `blobs/` (content-addressed, SHA-256), and the cut result names that file
-so the model can `read` or `grep` it. `web_fetch` gets a URL (http
+so the model can `read` or `grep` it. `web_fetch` (off until turned on:
+`/tools web_fetch on`, or `"tools": {"web_fetch": true}`) gets a URL (http
 becomes https, except for localhost; up to 5 redirects, never down from
 https to http) and gives the page as Markdown: scripts, styles and
 navigation dropped, links made absolute. Plain text and JSON come as they
 are, Latin-1 converted to UTF-8, an image as an image; other binary types
 are refused. It shows 50 KiB (`max_bytes` up to 256 KiB) from `offset`;
 a longer text is kept whole as a blob, and the result says how to read
-on. The result tells the model that the page is data, not instructions. A prompt of 16 KB or more (a big paste) is
+on. The result tells the model that the page is data, not instructions.
+`web_search` (also off until turned on) searches through Exa or Parallel with
+your own key and gives titles, URLs and excerpts, marked the same way
+([docs/web.md](docs/web.md)). A prompt of 16 KB or more (a big paste) is
 stored the same way, once, and the log refers to it. Arguments are checked against each tool's JSON
 schema before anything runs.
 
 Permissions (`--permission-mode`, `$PYTTE_PERMISSION_MODE` or
 `permissions.mode` in the config): `ask` (the default) runs `read`, `grep`,
 `find`, `ls` and `bash_poll` freely and asks before `bash`, `write`,
-`edit`, `web_fetch` (a page can carry what it is sent off the machine) and
+`edit`, `web_fetch` and `web_search` (a page can carry what it is sent off the machine) and
 MCP tools. The TUI asks inline: 1 yes,
 2 yes and allow the same command word, host (for `web_fetch`) or tool for
-this session, 3 or Esc no. Allowing `git` never allows `git status; rm -rf x`. `auto` runs
+this session, 3 or Esc no, 4 yes and always allow (saved to the config).
+Allowing `git` never allows `git status; rm -rf x`. `auto` runs
 everything. `read-only` runs only the tools that change nothing (`read`,
 `grep`, `find` and `ls`) and refuses the rest, `bash_poll` (which can
 stop a command) and allowed tools included. In print mode
 a question ends the process with exit code 3 and prints the
 `pytte approve` command that answers it.
+
+Rules in the config keep what you decide: `permissions.allow` and
+`permissions.deny` are lists of `tool(pattern)`, such as `bash(git diff:*)`,
+`web_fetch(docs.python.org)` and `mcp__github__*`. Deny beats allow and
+both beat the mode (`read-only` stays read-only). A project's `deny` rules
+apply at once; its `allow` rules only after `/permissions trust`, and
+`/permissions` lists the rules in force. Every key is in
+[docs/permissions.md](docs/permissions.md).
 
 MCP servers (the Model Context Protocol) add tools, prompts and
 resources. They go in `mcpServers` of `~/.config/pytte/config.json`:
@@ -257,6 +279,15 @@ project's servers (`.mcp.json`) run once trusted (`/mcp trust`), remote
 servers can log in with OAuth (`/mcp login <name>`), and `arguments` fills
 in tool arguments the model should not choose, such as the calling
 model's name. Every key and rule is in [docs/mcp.md](docs/mcp.md).
+
+Mentions and attachments: `@path` anywhere in a message adds that file (up
+to `read`'s limits, with a note when cut) or directory listing to it; typing
+`@` lists the paths under the working directory (the walk `find` uses), Tab
+completes a directory. A pasted or dropped path to a PNG, JPEG, GIF or WebP
+file, or `Ctrl-V` with an image on the clipboard (`wl-paste`, `xclip` or
+`pngpaste`), attaches the image as `[image 1: name.png]`, with `read`'s size
+and pixel limits. The log keeps the message as sent. See
+[docs/mentions.md](docs/mentions.md).
 
 Long sessions: before a request that would not fit the context window
 (less 24k tokens, or a quarter of a small window), or after the provider
@@ -279,7 +310,8 @@ closing it; `pytte -r ID` recovers it).
 
 Recovery after a crash follows each tool's replay policy. `read`, `grep`,
 `find`, `ls` and `write` run again. A `bash` or `edit` call that was cut off is not repeated;
-the model gets an "interrupted" result and decides what to do.
+the model gets an "interrupted" result and decides what to do. `pytte ls`
+removes a session that died before its first commit.
 
 ## pytte-ai
 

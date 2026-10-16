@@ -9,12 +9,8 @@ LDFLAGS  ?=
 STRIP    ?= strip
 ifeq ($(shell uname -s),Darwin)
 GC_LDFLAGS := -Wl,-dead_strip
-NOW_LDFLAGS :=
 else
 GC_LDFLAGS := -Wl,--gc-sections
-# Bind every symbol at startup: the TUI's watchdog, a fork, then never runs
-# the lazy resolver, which would fault the dynamic linker's pages into it.
-NOW_LDFLAGS := -Wl,-z,now
 endif
 CPPFLAGS += -Iinclude -Isrc
 BUILD    := build
@@ -38,12 +34,12 @@ CORE_SRC := $(wildcard src/core/*.c)
 LIB_SRC  := $(BASE_SRC) $(AI_SRC) $(CORE_SRC)
 # Host parts.
 DRV_SRC  := src/drv/sys_posix.c src/drv/http_faux.c src/drv/store_posix.c src/drv/store_memory.c src/drv/worker_posix.c src/drv/proc_posix.c
-RT_SRC   := src/rt/rt.c src/rt/tools.c src/rt/tools_builtin.c src/rt/tools_bash.c src/rt/tools_search.c src/rt/tools_web.c src/rt/rewind.c src/rt/prompt.c src/rt/mcp.c src/rt/mcp_io.c src/rt/mcp_proto.c src/rt/mcp_oauth.c
+RT_SRC   := src/rt/rt.c src/rt/tools.c src/rt/tools_builtin.c src/rt/tools_bash.c src/rt/tools_search.c src/rt/tools_web.c src/rt/tools_websearch.c src/rt/rewind.c src/rt/prompt.c src/rt/mcp.c src/rt/mcp_io.c src/rt/mcp_proto.c src/rt/mcp_oauth.c
 SYS_SRC  := $(DRV_SRC) $(RT_SRC)
 CURL_SRC := src/drv/http_curl.c
 # The TUI's parts; app*.c (the app and its loop) only go into pytte.
 TUI_SRC  := $(filter-out src/tui/app%,$(wildcard src/tui/*.c))
-CLI_SRC  := src/cli/config.c src/cli/providers.c src/cli/mcp_cfg.c
+CLI_SRC  := src/cli/config.c src/cli/providers.c src/cli/mcp_cfg.c src/cli/perm_cfg.c
 APP_SRC  := $(wildcard src/tui/app*.c) src/cli/session.c src/cli/oauth.c src/cli/main.c src/cli/print.c src/cli/commands.c
 
 AI_OBJ   := $(BASE_SRC:%.c=$(BUILD)/obj/%.o) $(AI_SRC:%.c=$(BUILD)/obj/%.o)
@@ -102,7 +98,7 @@ $(BUILD)/pytte-ai: $(PYTTE_AI_OBJ) $(BUILD)/libpytte-ai.a
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
 
 $(BUILD)/pytte: $(PYTTE_OBJ) $(BUILD)/libpytte.a
-	$(CC) $(CFLAGS) $(LDFLAGS) $(NOW_LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(CURL_LDLIBS) -pthread -o $@
 
 # ---- tests: built from source with ASan and UBSan ----
 TEST_CC     ?= $(CC)

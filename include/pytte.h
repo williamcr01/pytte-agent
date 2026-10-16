@@ -216,10 +216,22 @@ bool pt_closed(const pt_agent *a);
 
 /* ---- work ----------------------------------------------------------------------- */
 
+/* An image attached to a user input: its bytes are a stored blob (the
+ * host wrote it first), shown to the model after the text. */
+typedef struct pt_input_image {
+    pt_str blob; /* "sha256:<hex>", durable before the submit */
+    pt_str mime;
+    pt_str name; /* what the user sees: a file name */
+} pt_input_image;
+
+#define PT_INPUT_IMAGES 8 /* at most this many to an input */
+
 typedef struct pt_input {
     pt_str text;
     pt_str req; /* optional request ID: submitting it twice is a no-op */
     bool note;  /* pytte wrote it, not the user: its entry says "from":"pytte" */
+    const pt_input_image *images; /* copied; the text names them as "[image N: name]" */
+    uint32_t nimages;
 } pt_input;
 
 bool pt_submit(pt_agent *a, const pt_input *in);
@@ -253,7 +265,7 @@ typedef enum { PT_GATE_ALLOW, PT_GATE_DENY, PT_GATE_ASK, PT_GATE_REWRITE } pt_ga
 
 typedef struct pt_gate {
     pt_gate_kind kind;
-    pt_str text; /* DENY: why; ASK: the question */
+    pt_str text; /* DENY: why; ASK: the question; ALLOW: the rule that allowed it, if one did */
     pt_str args; /* REWRITE: the arguments to run with instead (a JSON object) */
 } pt_gate;
 
@@ -352,6 +364,10 @@ pt_str pt_session_cwd(const pt_agent *a);
  * first, the one the session was created with (pt_config.model), or
  * empty. Lives until the next commit applies. */
 pt_str pt_session_model(const pt_agent *a);
+/* Whether the first epoch's materials (its tools, system prompt) are still
+ * provisional: asked for at the first request, so what the host changes
+ * before it makes it in (pt_session_cfg.provisional). */
+bool pt_epoch_provisional(const pt_agent *a);
 /* The host's prompt settings from the session header (pt_session_cfg.prompt),
  * or empty. */
 pt_str pt_session_prompt(const pt_agent *a);

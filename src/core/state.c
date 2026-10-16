@@ -68,6 +68,10 @@ static void write_state(pt_jw *w, const task *t)
             pt_jw_key(w, "prompt");
             pt_jw_str(w, t->prompt);
         } else if (t->phase == PH_EXECUTE) {
+            if (t->rule.n) {
+                pt_jw_key(w, "rule");
+                pt_jw_str(w, t->rule);
+            }
             pt_jw_key(w, "replay");
             pt_jw_strz(w, t->replay == PT_REPLAY_SAFE ? "safe" : "unsafe");
             pt_jw_key(w, "attempt");
@@ -211,6 +215,10 @@ void pt_write_input(pt_jw *w, const input *in)
         pt_jw_key(w, "text");
         pt_jw_str(w, in->text);
     }
+    if (in->images.n) {
+        pt_jw_key(w, "images");
+        pt_jw_raw(w, in->images);
+    }
     pt_jw_key(w, "status");
     pt_jw_strz(w, input_status_names[in->status]);
     if (in->run) {
@@ -287,6 +295,7 @@ static bool read_task(const pt_json *r, task *t, pt_arena *ar)
         t->call_id = pt_json_gets(st, "call_id", ar);
         t->args = pt_json_is(args, PT_J_OBJ) ? args->raw : PT_STR_NULL;
         t->prompt = pt_json_gets(st, "prompt", ar);
+        t->rule = pt_json_gets(st, "rule", ar);
         t->replay = pt_str_eqz(pt_json_gets(st, "replay", ar), "safe") ? PT_REPLAY_SAFE : PT_REPLAY_UNSAFE;
         if (pt_json_is(pt_json_get(st, "snap"), PT_J_OBJ)) {
             const pt_json *snap = pt_json_get(st, "snap");
@@ -428,6 +437,8 @@ static bool apply_task(pt_agent *a, const pt_json *r, uint32_t id)
                 }
             nt.files = fl;
         }
+        if (nt.rule.n)
+            nt.rule = pt_arena_dup(&nt.a, nt.rule);
         if (nt.ncalls) {
             uint32_t *c = (uint32_t *)pt_arena_alloc(&nt.a, sizeof(uint32_t) * nt.ncalls);
             bool *par = (bool *)pt_arena_alloc(&nt.a, sizeof(bool) * nt.ncalls);
@@ -509,6 +520,15 @@ static bool apply_input(pt_agent *a, const pt_json *r, uint32_t id)
         in->blob = PT_STR_NULL;
         if (in->a.oom)
             goto oom;
+    }
+    {
+        const pt_json *im = pt_json_get(r, "images");
+        pt_str raw = pt_json_is(im, PT_J_ARR) ? im->raw : PT_STR_NULL;
+        if (!pt_str_eq(in->images, raw)) { /* logged once, then repeated by each rewrite */
+            in->images = raw.n ? pt_arena_dup(&in->a, raw) : PT_STR_NULL;
+            if (in->a.oom)
+                goto oom;
+        }
     }
     in->id = id;
     in->kind = kind;
@@ -689,6 +709,38 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
         } else {
             e->msg.text = pt_arena_dup(ea, pt_json_str(c, sa));
         }
+        if (pt_json_is(pt_json_get(d, "images"), PT_J_ARR)) { /* one message each, bytes from blobs */
+            const pt_json *list = pt_json_get(d, "images"), *im;
+            uint32_t n = 0, i;
+            while (pt_json_at(list, n))
+                n++;
+            e->imgs = (pt_msg *)pt_arena_zalloc(ea, sizeof(pt_msg) * (n ? n : 1));
+            if (!e->imgs)
+                goto oom;
+            for (i = 0; i < n; i++) {
+                pt_msg *m = &e->imgs[i];
+                pt_str name = pt_json_gets(pt_json_at(list, i), "name", sa);
+                static const char lead[] = "[image "; /* PT_INPUT_IMAGES is a digit */
+                size_t lead_n = sizeof lead - 1, at = lead_n + 3;
+                char *p = (char *)pt_arena_alloc(ea, at + name.n + 1);
+                im = pt_json_at(list, i);
+                if (!p)
+                    goto oom;
+                memcpy(p, lead, lead_n);
+                p[lead_n] = (char)('1' + i % 9);
+                p[lead_n + 1] = ':';
+                p[lead_n + 2] = ' ';
+                if (name.n)
+                    memcpy(p + at, name.p, name.n);
+                p[at + name.n] = ']';
+                m->role = PT_ROLE_USER;
+                m->text = (pt_str){p, at + name.n + 1};
+                m->image_mime = pt_arena_dup(ea, pt_json_gets(im, "mime", sa));
+                if (!blob_text(a, pt_json_gets(im, "blob", sa), ea, &m->image))
+                    return false;
+            }
+            e->nimgs = n;
+        }
         break;
     }
     case ENT_ASSISTANT:
@@ -716,12 +768,13 @@ static bool apply_entry(pt_agent *a, const pt_json *r, uint32_t id)
     case ENT_ERROR:
         break;
     }
-    if (ea->oom) {
-        pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
-        return false;
-    }
+    if (ea->oom)
+        goto oom;
     a->nentries++;
     return true;
+oom:
+    pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);
+    return false;
 }
 
 /* The settled materials of a provisional epoch: they replace its entry's
@@ -768,6 +821,7 @@ static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
 {
     pt_arena *pa = &a->perm, *sa = &a->scratch;
     claim *c = &a->claims.newest;
+    uint32_t i;
     c->id = id;
     c->event = pt_arena_dup(pa, pt_json_gets(r, "event", sa));
     c->token = pt_arena_dup(pa, pt_json_gets(r, "token", sa));
@@ -775,6 +829,17 @@ static void apply_claim(pt_agent *a, const pt_json *r, uint32_t id)
     c->boot = pt_arena_dup(pa, pt_json_gets(r, "boot", sa));
     c->pid = pt_json_geti(r, "pid", 0);
     c->opened = pt_json_geti(r, "opened", 0);
+    /* How each tool call cut off so far ended: by the first claim after
+     * its intent (a task record resets both). */
+    for (i = 0; i < a->ntasks; i++) {
+        task *t = a->tasks[i];
+        if (t->kind != TASK_TOOL || t->phase != PH_EXECUTE || t->reopened)
+            continue;
+        if (pt_str_eqz(c->event, "close"))
+            t->quit = true;
+        else if (pt_str_eqz(c->event, "open"))
+            t->reopened = true;
+    }
 }
 
 static bool apply_record(pt_agent *a, const pt_json *r)

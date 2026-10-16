@@ -2,7 +2,7 @@
   "turns": [
     {"content": [{"type": "tool_call", "id": "bg", "name": "bash", "args": {"command": "sleep 1.5; seq 1 3000", "yield": 1}}]},
     {"content": [{"type": "text", "text": "Waiting for it."}]},
-    {"content": [{"type": "tool_call", "id": "read", "name": "bash_poll", "args": {"session": 8}}]},
+    {"content": [{"type": "tool_call", "id": "read", "name": "bash_poll", "args": {"session": 9}}]},
     {"content": [{"type": "text", "text": "Read it all."}]}
   ]
 }

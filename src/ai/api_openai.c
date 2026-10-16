@@ -200,7 +200,27 @@ static bool build(const pt_ai_target *t, const pt_ai_context *ctx, const pt_ai_o
             pt_jw_key(&w, "role");
             pt_jw_strz(&w, "user");
             pt_jw_key(&w, "content");
-            pt_jw_str(&w, m->text);
+            if (pt_ai_sends_image(t, m)) { /* an attached image, after its label */
+                pt_jw_arr(&w);
+                pt_jw_obj(&w);
+                pt_jw_key(&w, "type");
+                pt_jw_strz(&w, "text");
+                pt_jw_key(&w, "text");
+                pt_jw_str(&w, m->text);
+                pt_jw_obj_end(&w);
+                pt_jw_obj(&w);
+                pt_jw_key(&w, "type");
+                pt_jw_strz(&w, "image_url");
+                pt_jw_key(&w, "image_url");
+                pt_jw_obj(&w);
+                pt_jw_key(&w, "url");
+                pt_ai_image_url(&w, m, a);
+                pt_jw_obj_end(&w);
+                pt_jw_obj_end(&w);
+                pt_jw_arr_end(&w);
+            } else {
+                pt_jw_str(&w, pt_ai_result_text(t, m, a)); /* with a note when an image was left out */
+            }
             pt_jw_obj_end(&w);
             break;
         case PT_ROLE_ASSISTANT:

@@ -7,7 +7,10 @@
  * new process). When it ends, the model is told: in the next tool result
  * while it works, else in a note that starts a turn, so it need not poll.
  * bash_poll reads what it printed since, at once, or stops it.
- * Background processes die with this process. */
+ * Background processes die with this process, and so do the processes a
+ * command left behind when its shell ended (cmd &), where they can be
+ * told apart (pt_proc_marked_runs); when this process dies first (kill
+ * -9), the next process to open the session stops them. */
 #define _POSIX_C_SOURCE 200809L
 #include "rt/rt_int.h"
 
@@ -22,9 +25,19 @@
 
 typedef struct job job;
 
+/* A group whose shell ended and was freed while processes it started run
+ * on: stopped when this process ends. Its store record stays until then. */
+typedef struct linger {
+    struct linger *next;
+    int64_t group;
+    size_t n;
+    char mark[160];
+} linger;
+
 struct bash {
     rt_tool_kit *k; /* borrowed: the builtins' */
     job *jobs;
+    linger *lingering;
 };
 
 struct job {
@@ -35,6 +48,8 @@ struct job {
     uint32_t timer;   /* the timeout, then the SIGKILL after a stop */
     uint32_t yield;   /* when the reading call ends while it runs on */
     pt_proc *p;
+    char mark[160]; /* pt_proc_mark: its store record */
+    size_t mark_n;
     char *command;
     int out_fd, exit_fd;
     int64_t started, read_at; /* read_at: when the reading call began */
@@ -107,13 +122,27 @@ static void unwatch(job *j)
 static void job_free(job *j)
 {
     job **pp;
+    int64_t group = pt_proc_group(j->p);
+    pt_str mark = {j->mark, j->mark_n};
+    linger *l = NULL;
     for (pp = &j->b->jobs; *pp != j; pp = &(*pp)->next)
         ;
     *pp = j->next;
     unwatch(j);
     if (j->yield)
         pt_rt_timer_cancel(j->b->k->rt, j->yield);
-    pt_proc_free(j->p);
+    pt_proc_free(j->p); /* a shell that still runs: kills its whole group */
+    /* A shell that ended may have left processes behind: the record stays
+     * while they run (else on a malloc failure, for the next owner). */
+    if (j->mark_n && (!j->ended || pt_proc_marked_runs(mark) != 1))
+        pt_rt_proc_ended(j->b->k->rt, group);
+    else if (j->mark_n && (l = (linger *)malloc(sizeof *l)) != NULL) {
+        l->group = group;
+        l->n = j->mark_n;
+        memcpy(l->mark, j->mark, j->mark_n);
+        l->next = j->b->lingering;
+        j->b->lingering = l;
+    }
     pt_buf_free(&j->held);
     free(j->command);
     free(j);
@@ -285,6 +314,7 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     int64_t timeout = pt_json_geti(args, "timeout", 0), yield = pt_json_geti(args, "yield", YIELD_S);
     pt_str cwd = pt_session_cwd(pt_rt_agent(rt));
     char err[300], call_id[200], attempt[40];
+    pt_proc_opts po;
     job *j;
     if (!cmd) {
         pt_rt_kit_done(rt, fx->id, PT_S("command is required"), true);
@@ -307,13 +337,17 @@ static void t_bash(void *ud, pt_rt *rt, const pt_fx *fx)
     add[1] = attempt;
     add[2] = "PYTTE_TOOL=bash";
     add[3] = NULL;
-    j->p = pt_proc_spawn(argv, cwd.n ? pt_arena_cstr(&b->k->ar, cwd) : NULL, b->k->unset, add, NULL, err, sizeof err);
+    memset(&po, 0, sizeof po);
+    po.marked = true; /* what it leaves running is found by its PYTTE_GROUP */
+    j->p = pt_proc_spawn(argv, cwd.n ? pt_arena_cstr(&b->k->ar, cwd) : NULL, b->k->unset, add, &po, err, sizeof err);
     if (!j->p) {
         free(j->command);
         free(j);
         pt_rt_kit_done(rt, fx->id, pt_strz(err), true);
         return;
     }
+    j->mark_n = pt_proc_mark(j->p, j->mark, sizeof j->mark);
+    pt_rt_proc_started(rt, pt_proc_group(j->p), (pt_str){j->mark, j->mark_n});
     j->b = b;
     j->fx = fx->id;
     j->session = fx->task;
@@ -607,6 +641,13 @@ void pt_rt_bash_free(bash *b)
             job_end(j);
         else
             job_free(j);
+    }
+    while (b->lingering) {
+        linger *l = b->lingering;
+        b->lingering = l->next;
+        pt_proc_stop_marked((pt_str){l->mark, l->n});
+        pt_rt_proc_ended(b->k->rt, l->group);
+        free(l);
     }
     free(b);
 }

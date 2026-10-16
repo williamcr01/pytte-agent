@@ -110,6 +110,7 @@ static void startup_free(app *a)
     }
     pt_buf_free(&a->group.buf);
     pt_buf_free(&a->menu.buf);
+    pt_buf_free(&a->menu.paths);
     pt_buf_free(&a->hist.pending);
     pt_buf_free(&a->command);
     pt_arena_free(&a->ar);
@@ -130,7 +131,6 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
         cli_mcp_host(&a->o.mcp_host, app_mcp_note, a);
     a->pace.interval = 33;
     a->pace.esc_at = a->pace.ctrlc_at = -DOUBLE_MS;
-    /* the watchdog first: before the store is opened */
     if (!(a->t = tui_term_new())) {
         fprintf(stderr, "pytte: not a terminal\n");
         return 1;
@@ -138,6 +138,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     if (o->model)
         snprintf(a->model.ref, sizeof a->model.ref, "%s", o->model);
     a->o.model = o->model ? a->model.ref : NULL;
+    a->model.pinned = o->model && (strcmp(cfg->src[CFG_MODEL], "flag") == 0 || strcmp(cfg->src[CFG_MODEL], "env") == 0);
     tui_set_ambiguous_wide(amb && strcmp(amb, "wide") == 0);
     a->color = !getenv("NO_COLOR") || !*getenv("NO_COLOR");
     app_apply_symbols(a);
@@ -160,6 +161,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     }
     pt_buf_init(&a->group.buf, pt_sys_allocator());
     pt_buf_init(&a->menu.buf, pt_sys_allocator());
+    pt_buf_init(&a->menu.paths, pt_sys_allocator());
     pt_buf_init(&a->hist.pending, pt_sys_allocator());
     pt_buf_init(&a->command, pt_sys_allocator());
     pt_buf_init(&a->rw.text, pt_sys_allocator());
@@ -414,6 +416,7 @@ int tui_run(const cli_opts *o, cli_config *cfg, cli_mcp *mcp, const char *id, co
     }
     pt_buf_free(&a->group.buf);
     pt_buf_free(&a->menu.buf);
+    pt_buf_free(&a->menu.paths);
     pt_buf_free(&a->hist.pending);
     pt_buf_free(&a->command);
     pt_buf_free(&a->rw.text);

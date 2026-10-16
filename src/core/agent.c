@@ -548,6 +548,10 @@ static void write_placement(pt_agent *a, input *in)
     } else {
         pt_jw_str(w, in->text);
     }
+    if (in->images.n) {
+        pt_jw_key(w, "images");
+        pt_jw_raw(w, in->images);
+    }
     pt_jw_key(w, "input");
     pt_jw_uint(w, in->id);
     if (in->note) {
@@ -591,6 +595,7 @@ static bool build_submit(pt_agent *a)
     in.yes = s.yes;
     in.note = s.note;
     in.blob = s.blob;
+    in.images = s.images;
     in.status = IN_QUEUED;
     if (place && s.kind == INK_USER)
         write_placement(a, &in);
@@ -1084,6 +1089,10 @@ bool pt_submit(pt_agent *a, const pt_input *in)
             if (pt_str_eq(a->subs.v[i].req, in->req))
                 return true;
     }
+    if (in->nimages > PT_INPUT_IMAGES || (in->nimages && !in->images)) {
+        pt_core_seterr(a, "too many images in one input", PT_STR_NULL);
+        return false;
+    }
     if (!pt_core_grow(a, (void **)&a->subs.v, &a->subs.cap, a->subs.n + 1, sizeof(sub)))
         return false;
     {
@@ -1092,6 +1101,28 @@ bool pt_submit(pt_agent *a, const pt_input *in)
         pending.text = pt_arena_dup(&a->subs.ar, in->text);
         pending.req = pt_arena_dup(&a->subs.ar, in->req);
         pending.note = in->note;
+        if (in->nimages) {
+            pt_buf b;
+            pt_jw w;
+            pt_buf_init(&b, a->al);
+            pt_jw_init(&w, &b);
+            pt_jw_arr(&w);
+            for (i = 0; i < in->nimages; i++) {
+                pt_jw_obj(&w);
+                pt_jw_key(&w, "blob");
+                pt_jw_str(&w, in->images[i].blob);
+                pt_jw_key(&w, "mime");
+                pt_jw_str(&w, in->images[i].mime);
+                pt_jw_key(&w, "name");
+                pt_jw_str(&w, in->images[i].name);
+                pt_jw_obj_end(&w);
+            }
+            pt_jw_arr_end(&w);
+            pending.images = b.oom ? PT_STR_NULL : pt_arena_dup(&a->subs.ar, pt_buf_str(&b));
+            if (b.oom)
+                a->subs.ar.oom = true;
+            pt_buf_free(&b);
+        }
         if (a->subs.ar.oom) {
             pt_core_fail(a, PT_FATAL_OOM, "out of memory queueing submission", PT_STR_NULL);
             return false;
@@ -1178,6 +1209,11 @@ pt_str pt_session_cwd(const pt_agent *a)
 pt_str pt_session_model(const pt_agent *a)
 {
     return a->last_model;
+}
+
+bool pt_epoch_provisional(const pt_agent *a)
+{
+    return a->nentries && a->entries[0].kind == ENT_EPOCH && a->entries[0].provisional;
 }
 
 uint64_t pt_context_tokens(const pt_agent *a)

@@ -551,6 +551,54 @@ static void test_images(void)
     CHECK_STR(jget(b, "input.4.output.1.image_url"), "data:image/png;base64,YWJjZA==");
 }
 
+/* An attached image is a user message after the input's text: an image
+ * part where the model takes images, its label and a note where not. */
+static void test_user_images(void)
+{
+    pt_ai_target t = target("anthropic/claude-opus-5-5");
+    pt_msg m[3];
+    pt_ai_context c;
+    pt_http_req r;
+    pt_json *b;
+    memset(m, 0, sizeof m);
+    m[0].role = PT_ROLE_SYSTEM;
+    m[0].text = PT_S("sys");
+    m[1].role = PT_ROLE_USER;
+    m[1].text = PT_S("look [image 1: a.png]");
+    m[2].role = PT_ROLE_USER;
+    m[2].text = PT_S("[image 1: a.png]");
+    m[2].image = PT_S("abcd");
+    m[2].image_mime = PT_S("image/png");
+    memset(&c, 0, sizeof c);
+    c.msgs = m;
+    c.nmsgs = 3;
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "messages.0.content.0.text"), "look [image 1: a.png]");
+    CHECK_STR(jget(b, "messages.0.content.1.text"), "[image 1: a.png]");
+    CHECK_STR(jget(b, "messages.0.content.2.type"), "image");
+    CHECK_STR(jget(b, "messages.0.content.2.source.data"), "YWJjZA==");
+    t.model.images = false;
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "messages.0.content.1.text"),
+              "[image 1: a.png]\n[an image was omitted: this model does not take images]");
+    CHECK(!pt_str_contains(r.body, PT_S("YWJjZA")));
+
+    t = target("openai/gpt-5");
+    CHECK(pt_ai_retarget(&t, PT_S("openai-completions")));
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "messages.2.content.1.type"), "image_url");
+    CHECK_STR(jget(b, "messages.2.content.1.image_url.url"), "data:image/png;base64,YWJjZA==");
+
+    t = target("openai/gpt-5");
+    CHECK(pt_ai_build(&t, &c, NULL, NULL, &r, &A));
+    b = body_of(&r);
+    CHECK_STR(jget(b, "input.1.content.1.type"), "input_image");
+    CHECK_STR(jget(b, "input.1.content.1.image_url"), "data:image/png;base64,YWJjZA==");
+}
+
 static void test_tool_ids(void)
 {
     pt_str id = PT_S("call:with.bad/chars-and-a-very-long-tail-0123456789");
@@ -821,6 +869,7 @@ int main(void)
     RUN(test_codex_errors);
     RUN(test_efforts);
     RUN(test_images);
+    RUN(test_user_images);
     RUN(test_tool_ids);
     RUN(test_cross_provider_view);
     RUN(test_faux);

@@ -6,7 +6,7 @@
  *   md.c     line-based Markdown to styled text
  *   band.c   the frame model: repaint, commit, resize
  *   input.c  the input box
- *   term.c   raw mode, queries, signals, the watchdog
+ *   term.c   raw mode, queries, signals
  *   app*.c   the app: the event loop, the display model, slash commands
  *            (only in pytte; app.h lists its files) */
 #ifndef PT_TUI_H
@@ -283,10 +283,8 @@ enum { /* signals, as tui_term_signals reports them */
     TS_HUP = 16
 };
 
-/* Start the watchdog: before the store is opened, before curl, before
- * anything else holds a file (it must not inherit the session's lock),
- * while this process has a single thread. Then install the signal
- * handlers. NULL when stdin or stdout is not a terminal. */
+/* Install the signal handlers. NULL when stdin or stdout is not a
+ * terminal. */
 tui_term *tui_term_new(void);
 /* Raw mode, bracketed paste, and the startup queries: cursor position,
  * kitty keyboard (when kitty is true) and DA1. */
@@ -314,7 +312,7 @@ void tui_term_resume(tui_term *t);
 /* Stop this process (SIGTSTP with the default action), between suspend
  * and resume. */
 void tui_term_stop_self(void);
-/* Restore, tell the watchdog the exit is clean, and free. */
+/* Restore and free. */
 void tui_term_free(tui_term *t);
 
 #endif

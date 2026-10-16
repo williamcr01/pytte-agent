@@ -24,6 +24,8 @@ typedef struct entry {
     uint32_t id, epoch;
     ent_kind kind;
     pt_msg msg; /* epoch: the system prompt; notes: role system */
+    pt_msg *imgs; /* user: the attached images, one message each (role user, image set, text its label) */
+    uint32_t nimgs;
     pt_str summary, request; /* epoch after compaction: the summary, the request being worked on */
     pt_str files;            /* epoch after compaction: the files read and modified, as text */
     bool to_model;
@@ -76,6 +78,7 @@ typedef struct task {
     pt_str call_id;     /* tool */
     pt_str args;        /* tool: arguments a gate rewrote; empty: as called */
     pt_str prompt;      /* tool approve */
+    pt_str rule;        /* tool execute: the permission rule that allowed it, or empty */
     pt_replay replay;   /* tool execute */
     pt_str snap_path, snap_blob; /* tool execute: the file saved before the call (blob empty: it did not exist) */
     pt_restore *files;  /* rewind: what to put back, in order */
@@ -91,6 +94,9 @@ typedef struct task {
     pt_buf rescued; /* live file written before a crash */
     bool woke;      /* the retry sleep is over */
     bool recovered; /* the record was loaded, not committed by this process */
+    /* A loaded tool intent: whether its owner closed the session (quit)
+     * before anyone opened it again (reopened), or crashed. */
+    bool quit, reopened;
     bool asked;     /* approve: the question went out */
     bool gated;     /* call: the gate answered (gate, gate_text) */
     bool snapping;  /* call: the file is being saved (snap_fx is the SNAPSHOT) */
@@ -114,6 +120,7 @@ typedef struct input {
     bool note;     /* user: from pytte, not the user */
     pt_str req, text; /* approve: text is the reason */
     pt_str blob;      /* "sha256:…" when the log holds text as a blob */
+    pt_str images;    /* the attached images: a JSON array as logged, or empty */
     pt_arena a;
 } input;
 
@@ -147,6 +154,7 @@ typedef struct sub { /* a submission waiting for its commit */
     uint32_t task; /* approve */
     bool yes;
     bool note;        /* from pytte, not the user */
+    pt_str images;    /* the attached images: a JSON array, or empty */
     pt_str blob;      /* the stored text's ref, once PT_FX_BLOB completed */
     uint32_t blob_fx; /* the PT_FX_BLOB in flight */
     bool blob_tried;  /* done storing (blob empty: it failed; keep the text inline) */
