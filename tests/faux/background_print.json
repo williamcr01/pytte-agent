@@ -8,7 +8,7 @@
     },
     {
       "content": [
-        {"type": "tool_call", "id": "now", "name": "bash_poll", "args": {"session": 8}}
+        {"type": "tool_call", "id": "now", "name": "bash_poll", "args": {"session": 9}}
       ]
     },
     {
@@ -18,18 +18,18 @@
     },
     {
       "content": [
-        {"type": "tool_call", "id": "end", "name": "bash_poll", "args": {"session": 8}}
+        {"type": "tool_call", "id": "end", "name": "bash_poll", "args": {"session": 9}}
       ]
     },
     {
       "content": [
-        {"type": "tool_call", "id": "gone", "name": "bash_poll", "args": {"session": 8}},
+        {"type": "tool_call", "id": "gone", "name": "bash_poll", "args": {"session": 9}},
         {"type": "tool_call", "id": "up", "name": "bash", "args": {"command": "echo up; sleep 100", "yield": 1}}
       ]
     },
     {
       "content": [
-        {"type": "tool_call", "id": "stop", "name": "bash_poll", "args": {"session": 22, "stop": true}},
+        {"type": "tool_call", "id": "stop", "name": "bash_poll", "args": {"session": 23, "stop": true}},
         {"type": "tool_call", "id": "left", "name": "bash", "args": {"command": "echo left; sleep 100", "yield": 1}}
       ]
     },

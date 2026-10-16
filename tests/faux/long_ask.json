@@ -1,0 +1,34 @@
+{
+  "turns": [
+    {
+      "content": [
+        {
+          "type": "tool_call",
+          "name": "bash",
+          "args": {
+            "command": "echo start; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo aaaaaaaaaa; echo tail-end"
+          }
+        }
+      ]
+    },
+    {
+      "content": [
+        {
+          "type": "tool_call",
+          "name": "bash",
+          "args": {
+            "command": "true; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo bbbbbbbbbb; echo hidden-end"
+          }
+        }
+      ]
+    },
+    {
+      "content": [
+        {
+          "type": "text",
+          "text": "Long ones done."
+        }
+      ]
+    }
+  ]
+}

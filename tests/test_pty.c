@@ -820,7 +820,7 @@ static void test_background_note(void)
     CHECK(has(&p, "It runs in the background.\n\n"
                   "· worked for "));
     CHECK(has(&p, "· worked for 1s\n\n"
-                  "· session 8 ended with exit code 0: sleep 2; echo built; echo '- not a session'\n\n"
+                  "· session 9 ended with exit code 0: sleep 2; echo built; echo '- not a session'\n\n"
                   "  It printed built."));
     CHECK(!has(&p, "[pytte]"));          /* the note is not shown as typed */
     CHECK(!has(&p, "· not a session")); /* nor its output */
@@ -849,28 +849,28 @@ static void test_background(void)
     CHECK(wait_for(&p, "Done.", 20000));
     /* a poll returns at once; the end is told in the next result */
     CHECK(has(&p, "Starting it.\n\n"
-                  "✓ bash  echo first; sleep 2; echo second; exit 3 · still running as session 8\n"
-                  "✓ poll  session 8 · still running\n"
+                  "✓ bash  echo first; sleep 2; echo second; exit 3 · still running as session 9\n"
+                  "✓ poll  session 9 · still running\n"
                   "✓ bash  sleep 2.5"));
-    CHECK(has(&p, "✗ poll  session 8 · exit 3\n"
+    CHECK(has(&p, "✗ poll  session 9 · exit 3\n"
                   "        second\n"
-                  "✗ poll  session 8 · failed ▪ bash echo up; sleep 100 · still running as session 22\n"));
+                  "✗ poll  session 9 · failed ▪ bash echo up; sleep 100 · still running as session 23\n"));
     /* one round, which ends in either order */
-    CHECK(has(&p, "✓ poll  session 22 (stop) ▪ bash echo left; sleep 100 · still running as session 27\n") ||
-          has(&p, "✓ bash  echo left; sleep 100 · still running as session 27 ▪ poll session 22 (stop)\n"));
+    CHECK(has(&p, "✓ poll  session 23 (stop) ▪ bash echo left; sleep 100 · still running as session 28\n") ||
+          has(&p, "✓ bash  echo left; sleep 100 · still running as session 28 ▪ poll session 23 (stop)\n"));
     CHECK(!has(&p, "[still running"));
     CHECK(wait_idle(&p, 3000));
     /* one left running: the footer counts it, /ps lists it, /stop ends it */
     CHECK(wait_for(&p, "· 1 in background (/ps)", 2000));
     keys(&p, "/ps\r");
-    CHECK(wait_for(&p, "session 27 · running ", 2000));
+    CHECK(wait_for(&p, "session 28 · running ", 2000));
     CHECK(has(&p, "· echo left; sleep 100"));
     keys(&p, "/stop\r");
     CHECK(wait_for(&p, "stopping 1 background command\n", 2000));
     pump(&p, 300);
     CHECK(!has(&p, "in background (/ps)"));
     keys(&p, "/ps\r");
-    CHECK(wait_for(&p, "session 27 · ended (exit 143), not read yet · echo left; sleep 100", 2000));
+    CHECK(wait_for(&p, "session 28 · ended (exit 143), not read yet · echo left; sleep 100", 2000));
     keys(&p, "/stop\r");
     CHECK(wait_for(&p, "no background commands running", 2000));
     keys(&p, "\x04");
@@ -905,6 +905,34 @@ static void test_approval(void)
     keys(&p, "\x04");
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
+    pty_free(&p);
+}
+
+/* A long call is asked about whole, wrapped, up to ASK_LINES rows, the
+ * last saying how many more there are; its row is cut, and says so. */
+static void test_long_approval(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/long_ask.json", NULL};
+    pty_start(&p, 30, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "go\r");
+    CHECK(wait_for(&p, "  › 1  yes", 3000));
+    CHECK(has(&p, "? bash  echo start; echo aaaaaaaaaa;"));
+    CHECK(has(&p, "echo tail-end")); /* the end, in view */
+    CHECK(!has(&p, "more lines"));
+    keys(&p, "1");
+    CHECK(wait_for(&p, "? bash  true; echo bbbbbbbbbb;", 3000));
+    CHECK(wait_for(&p, "3  no (esc)", 3000));
+    CHECK(has(&p, "… 14 more lines"));
+    CHECK(!has(&p, "hidden-end"));
+    keys(&p, "\x1b[27u");
+    CHECK(wait_for(&p, "Long ones done.", 3000));
+    CHECK(has(&p, "…\n✗ bash  true; echo bbbbbbbbbb;")); /* the first row, cut */
+    CHECK(!has(&p, "tail-end"));
+    CHECK(wait_idle(&p, 3000));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
     pty_free(&p);
 }
 
@@ -1009,20 +1037,21 @@ static void test_commands(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
-    CHECK(wait_for(&p, "  › /model     set the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/17", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "  › /model     switch the model", 1000)); /* descriptions in a column */
+    CHECK(wait_for(&p, "enter run · esc close · 1/18", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "  › /quit", 1000));
-    CHECK(wait_for(&p, "17/17", 1000));
+    CHECK(wait_for(&p, "18/18", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");
     CHECK(wait_for(&p, "› /thinking ", 1000));
     CHECK(wait_for(&p, "hidden", 1000));
     keys(&p, "full\r");
-    CHECK(wait_for(&p, "\n· switched thinking: full\n", 1000));
+    CHECK(wait_for(&p, "\n· saved thinking: full\n", DURABLE_MS)); /* written by a worker */
     CHECK(!has(&p, "› /thinking")); /* a command is not echoed, only what it did */
-    CHECK(wait_for(&p, "saved thinking: full", DURABLE_MS)); /* written by a worker */
+    keys(&p, "/thinking some\r");
+    CHECK(wait_for(&p, "not a value for thinking: some (hidden, full)", 1000));
     snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
     cfg = pt_sys_read_file(path, &n);
     CHECK(cfg && strstr(cfg, "\"tui\": {\n    \"thinking\": \"full\"\n  }"));
@@ -1030,21 +1059,23 @@ static void test_commands(void)
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "switched effort: high", 1000));
     keys(&p, "/effort default\r");
-    CHECK(wait_for(&p, "levels: off, minimal, low, medium, high, xhigh, max", 1000));
+    CHECK(wait_for(&p, "not a value for effort: default (off, minimal, low, medium, high, xhigh, max)", 1000));
     CHECK(has(&p, "faux · high"));
-    keys(&p, "/settings reasoning default\r");
-    CHECK(wait_for(&p, "not a value for reasoning: default", 1000));
-    keys(&p, "/settings reasoning max\r");
-    CHECK(wait_for(&p, "saved reasoning: max", DURABLE_MS));
+    keys(&p, "/settings effort default\r");
+    CHECK(wait_for(&p, "not a value for effort: default (off,", 1000));
+    keys(&p, "/settings reasoning max\r"); /* the config key names it too */
+    CHECK(wait_for(&p, "saved effort: max", DURABLE_MS));
+    CHECK(!has(&p, "saving")); /* one line: when it is saved */
     CHECK(wait_for(&p, "faux · max", 1000));
     keys(&p, "/settings\r\x1b[B\x1b[B\x1b[B\x1b[C");
-    CHECK(wait_for(&p, "saved reasoning: off", DURABLE_MS)); /* max wraps straight to off */
+    CHECK(wait_for(&p, "←→ or enter change · esc close", 1000));
+    CHECK(wait_for(&p, "saved effort: off", DURABLE_MS)); /* max wraps straight to off */
     keys(&p, "\x1b[D");
     keys(&p, "\x1b");
     pump(&p, 100);
     CHECK(wait_for(&p, "faux · max", 1000)); /* off wraps straight to max */
-    keys(&p, "/settings reasoning low\r");
-    CHECK(wait_for(&p, "saved reasoning: low", DURABLE_MS));
+    keys(&p, "/settings effort low\r");
+    CHECK(wait_for(&p, "saved effort: low", DURABLE_MS));
     CHECK(wait_for(&p, "faux · low", 1000));
     keys(&p, "/effort high\r");
     CHECK(wait_for(&p, "faux · high", 1000));
@@ -1068,6 +1099,19 @@ static void test_commands(void)
     keys(&p, "\r");
     CHECK(wait_for(&p, "\n\n✗ anthropic: no model given", 1000));
     CHECK(!has(&p, "saved model")); /* refused: nothing was saved */
+    /* the default model switches this session too, as the default effort does */
+    keys(&p, "/settings model anthropic/claude-fable-5\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "saved model: anthropic/claude-fable-5", DURABLE_MS));
+    CHECK(wait_for(&p, "claude-fable-5 · high", 1000));
+    keys(&p, "/settings model faux/faux\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "saved model: faux/faux", DURABLE_MS));
+    CHECK(wait_for(&p, "faux · high", 1000));
+    keys(&p, "/settings compact-model none\r");
+    CHECK(wait_for(&p, "saved compact-model: none", DURABLE_MS));
     keys(&p, "/status\r");
     CHECK(wait_for(&p, "kitty keys on", 1000));
     keys(&p, "/help\r");
@@ -1115,6 +1159,189 @@ static void test_commands(void)
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
     pty_free(&p);
+}
+
+/* The tools the first request of the session p shows had, as its log's
+ * settled materials record them: whether tool is among them. */
+static bool first_request_has(pty *p, const char *tool)
+{
+    char dir[4300], *log, *line, *end, want[160];
+    const char *at;
+    size_t n;
+    bool found;
+    keys(p, "/status\r");
+    if (!wait_for(p, "\n  store /", 1000) || !(at = strstr(p->scratch.p, "\n  store /")))
+        return false;
+    sscanf(at + strlen("\n  store "), "%4095s", dir);
+    strcat(dir, "/log.jsonl");
+    if (!(log = pt_sys_read_file(dir, &n)))
+        return false;
+    snprintf(want, sizeof want, "\"name\":\"%s\"", tool);
+    line = strstr(log, "\"t\":\"materials\"");
+    end = line ? strchr(line, '\n') : NULL;
+    if (end)
+        *end = 0;
+    found = line && strstr(line, want);
+    CHECK(line != NULL); /* settled at the first request */
+    free(log);
+    return found;
+}
+
+/* /tools: a menu of the tools, on or off; web_fetch starts off, bash_poll
+ * goes with bash. */
+static void test_tools(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/hello.json", NULL};
+    char path[300], *cfg;
+    size_t n;
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    unlink(path);
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "/tools\r");
+    CHECK(wait_for(&p, "↑↓ select · space turns on or off · esc close · 7 of 8 on", 1000));
+    CHECK(wait_for(&p, "● read ", 1000));
+    CHECK(has(&p, "○ web_fetch"));
+    CHECK(!has(&p, "bash_poll")); /* listed as bash */
+    keys(&p, "\x1b[A "); /* up from the top: the last, web_fetch */
+    CHECK(wait_for(&p, "\n· saved web_fetch: on\n", DURABLE_MS)); /* nothing sent yet: the first request gets it */
+    CHECK(wait_for(&p, "8 of 8 on", 1000));
+    CHECK(wait_for(&p, "● web_fetch", 1000));
+    cfg = pt_sys_read_file(path, &n);
+    CHECK(cfg && strstr(cfg, "\"tools\": {\n    \"web_fetch\": true\n  }"));
+    free(cfg);
+    keys(&p, "\x1b");
+    pump(&p, 100);
+    CHECK(!has(&p, "space turns on or off"));
+    keys(&p, "/tools bash off\r"); /* the command, before the first prompt too */
+    CHECK(wait_for(&p, "\n· saved bash: off\n", DURABLE_MS));
+    keys(&p, "hi\r");
+    CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
+    CHECK(wait_idle(&p, 5000));
+    /* what the first request had: web_fetch, and no bash nor bash_poll */
+    CHECK(first_request_has(&p, "web_fetch"));
+    CHECK(first_request_has(&p, "read"));
+    CHECK(!first_request_has(&p, "bash"));
+    CHECK(!first_request_has(&p, "bash_poll"));
+    keys(&p, "/tools bash on\r"); /* after it: from the next session */
+    CHECK(wait_for(&p, "saved bash: on (the model gets it at the next session or /compact)", DURABLE_MS));
+    keys(&p, "/tools web_fetch off\r");
+    CHECK(wait_for(&p, "saved web_fetch: off (refused now; the model forgets it at the next session or /compact)",
+                   DURABLE_MS));
+    keys(&p, "/tools web_fetch\r");
+    CHECK(wait_for(&p, "web_fetch: off (user)", 1000));
+    keys(&p, "/tools read maybe\r");
+    CHECK(wait_for(&p, "not a value for read: maybe (on, off)", 1000));
+    keys(&p, "/tools nope on\r");
+    CHECK(wait_for(&p, "no tool named nope; /tools lists them", 1000));
+    keys(&p, "/tools bash_poll off\r");
+    CHECK(wait_for(&p, "bash_poll goes with bash", 1000));
+    keys(&p, "/tools we");
+    CHECK(wait_for(&p, "  › web_fetch  off", 1000)); /* the state beside each */
+    keys(&p, "\x15"); /* clear the draft */
+    /* /settings shows how many are on, and opens the menu */
+    keys(&p, "/settings\r\x1b[A");
+    CHECK(wait_for(&p, "tools         7 of 8 on", 1000));
+    CHECK(wait_for(&p, "enter open · esc close", 1000));
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "space turns on or off", 1000));
+    keys(&p, "\x1b"); /* alone: before ctrl-d, it would read as alt */
+    pump(&p, 100);
+    CHECK(!has(&p, "space turns on or off"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+
+    /* A session kept empty and resumed has sent nothing either: a tool
+     * turned on there, even by a command typed while it opens, reaches its
+     * first request. */
+    pty_start(&p, 30, 100, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "/quit\r");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    {
+        const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
+        pty_start(&p, 30, 100, again);
+    }
+    CHECK(wait_for(&p, "/help for commands", 3000)); /* the terminal is raw: Enter is Enter */
+    keys(&p, "/tools web_fetch on\r"); /* queued if the session still opens */
+    CHECK(wait_for(&p, "\n· saved web_fetch: on\n", DURABLE_MS));
+    keys(&p, "/settings\r\x1b[A\r"); /* and the menu from /settings */
+    CHECK(wait_for(&p, "space turns on or off · esc close · 8 of 8 on", 1000));
+    keys(&p, "\x1b");
+    pump(&p, 100);
+    keys(&p, "hi\r");
+    CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
+    CHECK(wait_idle(&p, 5000));
+    CHECK(first_request_has(&p, "web_fetch"));
+    CHECK(first_request_has(&p, "bash"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    unlink(path);
+}
+
+/* With no model chosen, sessions opened in the TUI get theirs as at start:
+ * a new one the configured default, a resumed one its own. */
+static void test_session_model(void)
+{
+    pty p;
+    const char *args[] = {"--script", "tests/faux/hello.json", NULL};
+    const char *again[] = {"-c", "--script", "tests/faux/hello.json", NULL};
+    static const char fable[] = "{\"model\": \"anthropic/claude-fable-5\"}\n";
+    static const char faux[] = "{\"model\": \"faux/faux\"}\n";
+    char path[400], first[64] = "", cmd[100], *at;
+    int fd;
+    snprintf(path, sizeof path, "%s/pytte/config.json", config_dir);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        put(fd, faux, sizeof faux - 1);
+        close(fd);
+    }
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "ask · faux · ", 3000)); /* the configured default */
+    keys(&p, "hi\r");
+    CHECK(wait_for(&p, "Hello from the faux provider!", 5000));
+    CHECK(wait_idle(&p, 5000));
+    keys(&p, "/status\r");
+    CHECK(wait_for(&p, "· session ", 1000));
+    if ((at = strstr(p.scratch.p, "· session ")))
+        sscanf(at + strlen("· session "), "%63[^,]", first);
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    pty_free(&p);
+    fd = open(path, O_WRONLY | O_TRUNC);
+    CHECK(fd >= 0);
+    if (fd >= 0) {
+        put(fd, fable, sizeof fable - 1);
+        close(fd);
+    }
+    pty_start(&p, 24, 80, again);
+    CHECK(wait_for(&p, "ask · faux · ", 3000)); /* resumed: its own model */
+    keys(&p, "/new\r");
+    CHECK(wait_for(&p, "ask · claude-fable-5 · ", 3000)); /* new: the default */
+    snprintf(cmd, sizeof cmd, "/resume %s\r", first);
+    keys(&p, cmd);
+    CHECK(wait_for(&p, "ask · faux · ", 3000)); /* its own again, not the new one's */
+    keys(&p, "/new\r");
+    CHECK(wait_for(&p, "ask · claude-fable-5 · ", 3000));
+    keys(&p, "/model faux/faux\x1b");
+    pump(&p, 100);
+    keys(&p, "\r");
+    CHECK(wait_for(&p, "switched model: faux/faux", 1000));
+    keys(&p, "/new\r"); /* a chosen model goes on */
+    CHECK(wait_for(&p, "ask · faux · ", 3000));
+    CHECK(!has(&p, "switched model"));
+    keys(&p, "\x04");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+    unlink(path);
 }
 
 /* The first prompt names a session; /fork continues a copy of it; /resume
@@ -1464,6 +1691,7 @@ int main(int argc, char **argv)
     RUN(test_interrupt_and_queue);
     RUN(test_steady_input);
     RUN(test_approval);
+    RUN(test_long_approval);
     RUN(test_tool_rendering);
     RUN(test_short_paths);
     RUN(test_background);
@@ -1472,6 +1700,8 @@ int main(int argc, char **argv)
     RUN(test_resize_while_streaming);
     RUN(test_commands);
     RUN(test_skills);
+    RUN(test_session_model);
+    RUN(test_tools);
     RUN(test_fork_worktree);
     RUN(test_history_pager_draft);
     RUN(test_sigterm);

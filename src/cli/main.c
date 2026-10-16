@@ -281,6 +281,7 @@ void apply_config(opts *o, cli_config *cfg, bool create)
         exit(1);
     }
     o->c.manual_skills = strcmp(cfg->val[CFG_SKILLS], "off") == 0;
+    cli_tools_off(cfg, o->c.tools_off);
     if (o->compact_flag)
         cli_config_set(cfg, CFG_COMPACT_MODEL, o->c.compact_model, "flag");
     else if (cfg->val[CFG_COMPACT_MODEL][0])

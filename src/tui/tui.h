@@ -60,6 +60,7 @@ enum {
     TUI_GREEN = 2 << 2,
     TUI_CYAN = 3 << 2,
     TUI_MAGENTA = 4 << 2,
+    TUI_BLUE = 5 << 2,
     TUI_COLOR_MASK = 7 << 2
 };
 

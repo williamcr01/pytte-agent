@@ -462,7 +462,7 @@ static void enter(app *a)
         bool needs = false;
         for (k = 0; p && k < p->nargs; k++)
             needs = needs || p->args[k].required;
-        if ((app_menu_takes_arg(label) && !pt_str_eqz(label, "settings")) || needs) {
+        if ((app_menu_takes_arg(label) && !pt_str_eqz(label, "settings") && !pt_str_eqz(label, "tools")) || needs) {
             /* /model and friends: show their arguments first */
             if (app_complete(a))
                 return;
@@ -498,7 +498,9 @@ static void settings_key(app *a, const tui_ev *ev)
     }
     if (ev->key != TK_LEFT && ev->key != TK_RIGHT && ev->key != TK_ENTER)
         return;
-    if (vals) {
+    if (k == SET_TOOLS) {
+        app_tools_open(a);
+    } else if (vals) {
         for (i = 0; i < nv && strcmp(a->cfg->val[k], vals[i]) != 0; i++)
             ;
         app_save_setting(a, k, vals[((i < nv ? i : 0) + dir + nv) % nv]);
@@ -508,6 +510,32 @@ static void settings_key(app *a, const tui_ev *ev)
         a->menu.closed = false;
         tui_input_set(&a->in, pt_strz(d));
         app_menu_update(a);
+    }
+}
+
+/* The tools menu: space, enter, or left and right turn the selected one
+ * on or off. */
+static void tools_key(app *a, const tui_ev *ev)
+{
+    pt_str name;
+    bool on;
+    if (ev->key == TK_ESC || (ev->key == 'c' && ev->mods == TM_CTRL)) {
+        a->menu.kind = MENU_NONE;
+        app_menu_update(a);
+        return;
+    }
+    if (!a->menu.n)
+        return;
+    if (ev->key == TK_UP || ev->key == TK_DOWN) {
+        a->menu.sel = (a->menu.sel + (ev->key == TK_UP ? -1 : 1) + a->menu.n) % a->menu.n;
+        return;
+    }
+    name = app_item_label(a, a->menu.sel);
+    on = cli_tool_on(a->cfg, name);
+    if (ev->key == TK_ENTER || (ev->key == TK_LEFT && on) || (ev->key == TK_RIGHT && !on)) {
+        char z[128]; /* the label goes with the rebuilt menu */
+        snprintf(z, sizeof z, "%.*s", (int)name.n, name.p);
+        app_tool_set(a, pt_strz(z), !on);
     }
 }
 
@@ -565,8 +593,16 @@ void app_on_key(app *a, const tui_ev *ev)
     a->pace.urgent = true;
     if (ask_key(a, ev))
         return;
+    if (ev->kind == TE_TEXT && a->menu.kind == MENU_TOOLS && pt_str_eqz(ev->text, " ")) {
+        tui_ev enter_ev = *ev;
+        enter_ev.kind = TE_KEY;
+        enter_ev.key = TK_ENTER;
+        enter_ev.mods = 0;
+        tools_key(a, &enter_ev);
+        return;
+    }
     if (ev->kind == TE_TEXT || ev->kind == TE_PASTE) {
-        if (a->menu.kind == MENU_SETTINGS)
+        if (a->menu.kind == MENU_SETTINGS || a->menu.kind == MENU_TOOLS)
             a->menu.kind = MENU_NONE;
         tui_input_insert(&a->in, ev->text);
         a->menu.closed = false;
@@ -578,6 +614,10 @@ void app_on_key(app *a, const tui_ev *ev)
         return;
     if (a->menu.kind == MENU_SETTINGS) {
         settings_key(a, ev);
+        return;
+    }
+    if (a->menu.kind == MENU_TOOLS) {
+        tools_key(a, ev);
         return;
     }
     if (k == TK_ENTER && !ev->mods) {

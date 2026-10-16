@@ -48,11 +48,24 @@ static void status_row(app *a, int64_t now, int total, int sel)
     } else if (a->run.active && now - a->pace.esc_at < DOUBLE_MS) {
         pt_buf_putz(&a->tmp, "esc again to interrupt");
     } else if (a->ask.shown) {
-        pt_buf_putz(&a->tmp, "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
-    } else if (a->menu.kind == MENU_SETTINGS) {
-        pt_buf_putz(&a->tmp, "↑↓ select · ←→ change · enter edit · esc close");
+        pt_buf_putz(&a->tmp, a->ascii ? "1-3 or up/down enter · esc no · ctrl-c interrupt"
+                                       : "1-3 or ↑↓ enter · esc no · ctrl-c interrupt");
+    } else if (a->menu.kind == MENU_SETTINGS) { /* a value to cycle through, or one to type */
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · " : "↑↓ select · ");
+        pt_buf_putz(&a->tmp, app_settings[a->menu.set_sel].vals            ? a->ascii ? "left/right or enter change"
+                                                                                       : "←→ or enter change"
+                             : app_settings[a->menu.set_sel].k == SET_TOOLS ? "enter open"
+                                                                            : "enter edit");
+        pt_buf_putz(&a->tmp, " · esc close");
+    } else if (a->menu.kind == MENU_TOOLS) {
+        uint32_t all, on = app_tools_on(a, &all);
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · space turns on or off · esc close"
+                                       : "↑↓ select · space turns on or off · esc close");
+        snprintf(line, sizeof line, " · %u of %u on", on, all);
+        pt_buf_putz(&a->tmp, line);
     } else if (a->menu.kind != MENU_NONE) {
-        pt_buf_putz(&a->tmp, "↑↓ select · tab complete · enter run · esc close");
+        pt_buf_putz(&a->tmp, a->ascii ? "up/down select · tab complete · enter run · esc close"
+                                       : "↑↓ select · tab complete · enter run · esc close");
         if (total > 1) {
             snprintf(line, sizeof line, " · %d/%d", sel + 1, total);
             pt_buf_putz(&a->tmp, line);
@@ -138,18 +151,39 @@ static void menu_row(app *a, int i)
 {
     bool on = i == a->menu.sel;
     pick(a, on);
-    if (a->menu.kind == MENU_SETTINGS) {
+    if (a->menu.kind == MENU_SETTINGS && app_settings[i].k == SET_TOOLS) {
+        uint32_t all, n = app_tools_on(a, &all);
+        char v[600];
+        snprintf(v, sizeof v, "%-14s", app_settings[i].name);
+        pt_buf_putz(&a->tmp, v);
+        tui_style(&a->tmp, TUI_CYAN);
+        snprintf(v, sizeof v, "%u of %u on", n, all);
+        pt_buf_putz(&a->tmp, v);
+    } else if (a->menu.kind == MENU_SETTINGS) {
         int k = app_settings[i].k;
         char v[600];
         snprintf(v, sizeof v, "%-14s", app_settings[i].name);
         pt_buf_putz(&a->tmp, v);
         tui_style(&a->tmp, TUI_CYAN);
-        pt_buf_putz(&a->tmp, a->cfg->val[k][0] ? a->cfg->val[k] : "(none)");
+        pt_buf_putz(&a->tmp, a->cfg->val[k][0] ? a->cfg->val[k] : "none");
         if (strcmp(a->cfg->src[k], "default") != 0 && strcmp(a->cfg->src[k], "user") != 0) {
             tui_style(&a->tmp, TUI_DIM);
             snprintf(v, sizeof v, "  (set by %s)", a->cfg->src[k]);
             pt_buf_putz(&a->tmp, v);
         }
+    } else if (a->menu.kind == MENU_TOOLS) { /* "● read   Read a text file, with line numbers" */
+        pt_str name = app_item_label(a, i);
+        bool tool_on = cli_tool_on(a->cfg, name);
+        int col = 0, pad = a->menu.label_w - tui_width(name, true);
+        tui_style(&a->tmp, tool_on ? TUI_GREEN | TUI_BOLD : TUI_DIM);
+        pt_buf_putz(&a->tmp, tool_on ? a->sy->on : a->sy->off);
+        tui_style(&a->tmp, tool_on ? (on ? TUI_BOLD : 0) : TUI_DIM);
+        pt_buf_putc(&a->tmp, ' ');
+        tui_clean(&a->tmp, name, &col);
+        tui_style(&a->tmp, TUI_DIM);
+        for (pad = pad > 0 ? pad + 2 : 2; pad > 0; pad--)
+            pt_buf_putc(&a->tmp, ' ');
+        tui_clean(&a->tmp, (pt_str){a->menu.buf.p + a->menu.items[i].dat, a->menu.items[i].dn}, &col);
     } else {
         int col = 0;
         if (a->menu.kind == MENU_CMD)
@@ -176,6 +210,7 @@ bool app_asking(app *a)
         size_t n = 0;
         a->ask.task = a->ask.view.task;
         a->ask.sel = 0;
+        a->ask.call_n = 0;
         /* bash: allow commands with the same first word; web_fetch: the
          * same host; others: the tool */
         if (pt_str_eqz(a->ask.view.name, "bash"))
@@ -208,16 +243,15 @@ static void ask_row(app *a, int i)
     row(a, pt_buf_str(&a->tmp));
 }
 
-/* The question: a blank row while there is room, the call on one row
- * ("? bash  make test"), then the choices. */
-static void ask_rows(app *a, int n)
+/* The call a question asks about, whole, wrapped to the width ("? bash
+ * make test", its later rows under the gist), into ask.call: built once
+ * for each question and width. */
+static void ask_call(app *a)
 {
-    int col = 0, i;
+    int col = 0;
     size_t k;
-    if (n > 4) {
-        blank_row(a);
-        n--;
-    }
+    if (a->ask.call_n && a->ask.call_w == width(a))
+        return;
     pt_buf_reset(&a->tmp2);
     tui_style(&a->tmp2, ACCENT | TUI_BOLD);
     pt_buf_putz(&a->tmp2, a->sy->ask);
@@ -234,12 +268,51 @@ static void ask_rows(app *a, int n)
             if (a->tmp2.p[k] == '\n')
                 a->tmp2.p[k] = ' ';
     } else {
-        app_phrase(a, &a->tmp2, a->ask.view.name, a->ask.view.args, NULL);
+        app_phrase(a, &a->tmp2, a->ask.view.name, a->ask.view.args, NULL, 0);
     }
-    k = tui_fit(pt_buf_str(&a->tmp2), width(a), false);
-    a->tmp2.n = k;
-    row(a, pt_buf_str(&a->tmp2));
-    for (i = 0; i < 3 && i + 1 < n; i++)
+    pt_buf_reset(&a->ask.call);
+    a->ask.call_n = tui_wrap(&a->ask.call, pt_buf_str(&a->tmp2), width(a), MARGIN, false, false);
+    a->ask.call_w = width(a);
+}
+
+/* The rows a question wants: a blank, the call, the three choices. */
+static int ask_want(app *a)
+{
+    ask_call(a);
+    return 4 + (a->ask.call_n < ASK_LINES ? a->ask.call_n : ASK_LINES);
+}
+
+/* The question in n rows: a blank row while there is room, the call
+ * (when it is cut, its last row says how many more there are), then the
+ * choices. */
+static void ask_rows(app *a, int n)
+{
+    pt_str all = pt_buf_str(&a->ask.call);
+    int i, choices = n - 1 < 3 ? n - 1 : 3, room = n - choices, total = a->ask.call_n, show;
+    size_t at = 0;
+    if (room > (total < ASK_LINES ? total : ASK_LINES)) {
+        blank_row(a);
+        room--;
+    }
+    show = total < room ? total : room;
+    for (i = 0; i < show && at < all.n; i++) {
+        size_t e = at;
+        char more[64];
+        while (e < all.n && all.p[e] != '\n')
+            e++;
+        if (i == show - 1 && show < total && show > 1) {
+            pt_buf_reset(&a->tmp);
+            pt_buf_putz(&a->tmp, "  ");
+            tui_style(&a->tmp, TUI_DIM);
+            snprintf(more, sizeof more, "%s %d more lines", a->sy->more, total - i);
+            pt_buf_putz(&a->tmp, more);
+            row(a, pt_buf_str(&a->tmp));
+            break;
+        }
+        row(a, (pt_str){all.p + at, e - at});
+        at = e + 1;
+    }
+    for (i = 0; i < choices; i++)
         ask_row(a, i);
 }
 
@@ -277,7 +350,7 @@ static void build_frame(app *a, int64_t now)
         a->run.at += now - a->run.wait_at;
         a->run.wait_at = 0;
     }
-    nask = a->ask.shown ? 5 : 0;
+    nask = a->ask.shown ? ask_want(a) : 0;
     act = a->run.active ? 1 : 0;
     /* what waits: for the run, for the session to open, or for its fetches */
     nq = a->run.active || a->sess.opening ||
