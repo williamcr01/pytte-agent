@@ -155,6 +155,7 @@ typedef struct result {
 } result;
 
 static result res;
+static bool fetch_off; /* turned off once the session's epoch froze it */
 
 static void run_fetch(const char *args, pt_perm_mode perm, const char *allow_host)
 {
@@ -200,6 +201,18 @@ static void run_fetch(const char *args, pt_perm_mode perm, const char *allow_hos
     c.system = PT_S("Test.");
     c.tools = pt_rt_tool_defs(rt, &c.ntools);
     CHECK(pt_create(a, &c));
+    if (fetch_off) {
+        uint32_t n, all, k;
+        const pt_tool_def *d;
+        CHECK(pt_rt_tool_set_off(rt, PT_S("web_fetch"), true));
+        CHECK(pt_rt_tool_set_off(rt, PT_S("web_fetch"), true)); /* twice: still one entry */
+        CHECK(pt_rt_tool_off(rt, PT_S("web_fetch")));
+        d = pt_rt_tool_defs(rt, &n);
+        pt_rt_tool_all(rt, &all);
+        CHECK(n + 1 == all); /* the next epoch's tools leave it out */
+        for (k = 0; k < n; k++)
+            CHECK(!pt_str_eqz(d[k].name, "web_fetch"));
+    }
     memset(&me, 0, sizeof me);
     me.host = PT_S("test");
     CHECK(pt_open(a, &me, false));
@@ -338,6 +351,10 @@ static void test_permissions(void)
     CHECK(res.asked);
     run_fetch("{\"url\":\"https://example.com/\"}", PT_PERM_READ_ONLY, NULL);
     CHECK(res.is_error && res.started == 0);
+    fetch_off = true; /* refused even where it would run without asking */
+    run_fetch("{\"url\":\"https://example.com/\"}", PT_PERM_AUTO, NULL);
+    CHECK(res.is_error && !res.asked && res.started == 0 && has(res.text, "the user turned this tool off"));
+    fetch_off = false;
 
     CHECK_STR(pt_rt_url_host(PT_S("https://docs.python.org/3/")), "docs.python.org");
     CHECK_STR(pt_rt_url_host(PT_S("http://user:pw@h.com:8080/x")), "h.com");

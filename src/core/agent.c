@@ -1129,6 +1129,11 @@ pt_str pt_session_model(const pt_agent *a)
     return a->last_model;
 }
 
+bool pt_epoch_provisional(const pt_agent *a)
+{
+    return a->nentries && a->entries[0].kind == ENT_EPOCH && a->entries[0].provisional;
+}
+
 uint64_t pt_context_tokens(const pt_agent *a)
 {
     return pt_core_estimate(a, UINT32_MAX);

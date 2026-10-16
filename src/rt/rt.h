@@ -96,8 +96,17 @@ uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max);
  * two seconds later); a later bash_poll reads what they printed.
  * Returns how many. */
 uint32_t pt_rt_backgrounds_stop(pt_rt *rt);
-/* The registered tools, for a new session's epoch. */
+/* The registered tools that are on, for a new epoch: what the model sees.
+ * Valid until the next call that adds, removes or turns off a tool. */
 const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n);
+/* Every registered tool, on or off, in the same order and validity. */
+const pt_tool_def *pt_rt_tool_all(pt_rt *rt, uint32_t *n);
+/* Turn a tool off, or back on, by name: registered or not yet (an MCP
+ * tool may come later). An off tool is left out of the tools the next
+ * epoch freezes, and calls of it are denied from now on. False when out
+ * of memory (nothing changed). */
+bool pt_rt_tool_set_off(pt_rt *rt, pt_str name, bool off);
+bool pt_rt_tool_off(const pt_rt *rt, pt_str name);
 
 /* Output as it comes: shown live, kept for the result. */
 void pt_rt_tool_output(pt_rt *rt, uint32_t fx, const void *p, size_t n);

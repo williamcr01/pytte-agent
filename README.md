@@ -10,7 +10,8 @@ log before it happens, so a session survives `kill -9` at any point and
 `pytte -c` carries on. `pytte` is an inline terminal UI that redraws only a
 few rows at the bottom and leaves the rest to the terminal's scrollback.
 The model works with eight tools (bash, bash_poll, read, write, edit, grep,
-find, ls);
+find, ls), plus web_fetch once turned on (`/tools`, see
+[docs/tools.md](docs/tools.md));
 each call is a durable task, so a crash never runs an unsafe call twice.
 When the conversation nears the model's context window, pytte compacts it
 into a summary and carries on, so sessions outlive any one window.
@@ -78,7 +79,7 @@ Ctrl-C clears the draft, else interrupts the run (twice with nothing to
 clear or interrupt quits), Ctrl-D quits, Ctrl-T toggles thinking (hidden or full),
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
-`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. A change in
+`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/tools`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. A change in
 `/settings` applies to the session at once and is saved to
 `~/.config/pytte/config.json`; `/model` and `/effort` switch without saving.
 See [docs/settings.md](docs/settings.md).
@@ -218,7 +219,8 @@ ignore, from the repository's root down. Each result is bounded (matches,
 entries, 50 KiB) and says when it was cut. For `bash`, the model sees up
 to 16 KB of output: the first 4 KB and the last 12 KB. Longer output is kept whole in the session's
 `blobs/` (content-addressed, SHA-256), and the cut result names that file
-so the model can `read` or `grep` it. `web_fetch` gets a URL (http
+so the model can `read` or `grep` it. `web_fetch` (off until turned on:
+`/tools web_fetch on`, or `"tools": {"web_fetch": true}`) gets a URL (http
 becomes https, except for localhost; up to 5 redirects, never down from
 https to http) and gives the page as Markdown: scripts, styles and
 navigation dropped, links made absolute. Plain text and JSON come as they

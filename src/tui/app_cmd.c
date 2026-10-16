@@ -5,8 +5,8 @@
 
 #include <unistd.h>
 
-static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "…", "•", "↑", "↓", "▪"};
-static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", "*", "in", "out", "*"};
+static const syms uni = {"›", "∴", "·", "✓", "✗", "?", "›", "│", "…", "•", "↑", "↓", "▪", "●", "○"};
+static const syms asc = {">", "~", "-", "+", "x", "?", ">", "|", "...", "*", "in", "out", "*", "[x]", "[ ]"};
 
 const app_cmd_def app_cmds[] = {
     {"model", " [id]", "switch the model; /settings model also saves it"},
@@ -23,6 +23,7 @@ const app_cmd_def app_cmds[] = {
     {"thinking", " [mode]", "how thinking is shown: hidden, full (saved)"},
     {"login", " [api|oauth] [provider] [key]", "save an API key, or sign in with a subscription"},
     {"mcp", " [login|logout|restart name] [trust|untrust]", "MCP servers: their state, logins, trust"},
+    {"tools", " [name] [on|off]", "turn the model's tools on or off (saved)"},
     {"settings", " [name] [value]", "change and save settings; they apply now"},
     {"help", "", "commands and keys"},
     {"quit", "", "exit; it prints how to continue (also /exit)"},
@@ -45,7 +46,8 @@ const app_setting app_settings[] = {{CFG_THINKING, "thinking", VALUES(app_th_nam
                                     {CFG_PAGER, "pager", NULL, 0},
                                     {CFG_PERMS, "permissions", VALUES(perm_names)},
                                     {CFG_COMPACT_MODEL, "compact-model", NULL, 0},
-                                    {CFG_SKILLS, "skills", VALUES(on_off)}};
+                                    {CFG_SKILLS, "skills", VALUES(on_off)},
+                                    {SET_TOOLS, "tools", NULL, 0}};
 const size_t app_nsettings = sizeof app_settings / sizeof app_settings[0];
 
 /* The level requests use: the chosen one, moved to one the model takes. */
@@ -101,21 +103,30 @@ void app_apply_thinking(app *a)
 static void write_setting(void *ud)
 {
     config_job *job = (config_job *)ud;
-    job->ok = cli_config_write(job->path, job->key, job->value, job->err, sizeof job->err);
+    if (job->key == SET_TOOLS)
+        job->ok = cli_config_write_tool(job->path, job->tool.name, job->tool.on, job->err, sizeof job->err);
+    else
+        job->ok = cli_config_write(job->path, job->key, job->value, job->err, sizeof job->err);
 }
 
 static void start_setting(app *a)
 {
     config_job *job = a->saving;
     int k;
-    if (!job || job->active || !job->pending)
+    if (!job || job->active || (!job->pending && !job->ntq))
         return;
     for (k = 0; k < CFG_N; k++)
         if (job->pending & (1u << k))
             break;
     job->key = k;
-    memcpy(job->value, job->next[k], sizeof job->value);
-    job->pending &= ~(1u << k);
+    if (k == CFG_N) { /* a tool: the first waiting */
+        job->key = SET_TOOLS;
+        job->tool = job->tq[0];
+        memmove(&job->tq[0], &job->tq[1], --job->ntq * sizeof job->tq[0]);
+    } else {
+        memcpy(job->value, job->next[k], sizeof job->value);
+        job->pending &= ~(1u << k);
+    }
     job->active = pt_worker_start(job->worker, write_setting, job);
     if (!job->active)
         app_out_z(a, TUI_RED, "not saved: could not schedule the settings write");
@@ -131,6 +142,13 @@ void app_finish_setting(app *a)
         if (!job->ok) {
             app_group_close(a);
             app_out_note(a, &a->lines, TUI_RED, pt_strz(job->err));
+        } else if (job->key == SET_TOOLS) {
+            snprintf(msg, sizeof msg, "saved %s: %s%s", job->tool.name, job->tool.on ? "on" : "off",
+                     job->tool.wins ? " (.pytte/config.json sets another at the next start)"
+                     : job->tool.now ? "" /* the session's first request gets it */
+                     : job->tool.on ? " (the model gets it at the next session or /compact)"
+                                    : " (refused now; the model forgets it at the next session or /compact)");
+            app_out_z(a, TUI_DIM, msg);
         } else {
             const char *wins = job->wins[job->key];
             int n;
@@ -175,6 +193,26 @@ void app_model_for(app *a, const char *id, bool fork)
     }
 }
 
+/* The settings worker, made at the first save; NULL (said) when it cannot be. */
+static config_job *saver(app *a)
+{
+    if (!a->saving) {
+        config_job *job = (config_job *)calloc(1, sizeof *job);
+        if (job) {
+            job->worker = pt_worker_new();
+            snprintf(job->path, sizeof job->path, "%s", a->cfg->user_path);
+            if (!job->worker) {
+                free(job);
+                job = NULL;
+            }
+        }
+        a->saving = job;
+    }
+    if (!a->saving)
+        app_out_z(a, TUI_RED, "not saved: could not allocate the settings worker");
+    return a->saving;
+}
+
 /* Apply now and queue a durable save; report success after it lands.
  * Every setting takes effect in this session at once, even one the
  * environment or the project file set: they win again at the next start. */
@@ -192,22 +230,9 @@ bool app_save_setting(app *a, int k, const char *v)
         return false;
     }
     cli_config_set(a->cfg, k, v, "user");
-    if (!a->saving) {
-        config_job *job = (config_job *)calloc(1, sizeof *job);
-        if (job) {
-            job->worker = pt_worker_new();
-            snprintf(job->path, sizeof job->path, "%s", a->cfg->user_path);
-            if (!job->worker) {
-                free(job);
-                job = NULL;
-            }
-        }
-        a->saving = job;
-    }
-    if (a->saving && (strcmp(src, "env") == 0 || strcmp(src, "project") == 0))
+    if (saver(a) && (strcmp(src, "env") == 0 || strcmp(src, "project") == 0))
         a->saving->wins[k] = src;
     if (!a->saving) {
-        app_out_z(a, TUI_RED, "not saved: could not allocate the settings worker");
         ok = false;
     } else {
         snprintf(a->saving->next[k], sizeof a->saving->next[k], "%s", v);
@@ -721,6 +746,143 @@ static void cmd_mcp(app *a, pt_str arg)
     app_out_z(a, TUI_DIM, msg);
 }
 
+/* ---- tools ---- */
+
+/* "Read a text file, with line numbers: ..." to its first sentence. */
+static pt_str first_sentence(pt_str d)
+{
+    size_t i;
+    for (i = 0; i < d.n && d.p[i] != '\n'; i++)
+        if (d.p[i] == '.' && (i + 1 == d.n || d.p[i + 1] == ' ' || d.p[i + 1] == '\n'))
+            break;
+    return (pt_str){d.p, i};
+}
+
+void app_tools_list(app *a)
+{
+    uint32_t i, n = 0;
+    const pt_tool_def *d = a->open ? pt_rt_tool_all(a->s.rt, &n) : NULL;
+    for (i = 0; i < n && a->menu.n < MAX_ITEMS; i++) {
+        item *it;
+        pt_str desc = first_sentence(d[i].description);
+        if (cli_tool_leader(d[i].name)) /* listed as its leader */
+            continue;
+        it = &a->menu.items[a->menu.n++];
+        it->at = a->menu.buf.n;
+        it->n = d[i].name.n;
+        pt_buf_puts(&a->menu.buf, d[i].name);
+        it->dat = a->menu.buf.n;
+        it->dn = desc.n;
+        pt_buf_puts(&a->menu.buf, desc);
+    }
+    if (a->menu.sel >= a->menu.n)
+        a->menu.sel = a->menu.top = 0;
+}
+
+/* Tools on, of all registered. */
+uint32_t app_tools_on(app *a, uint32_t *all)
+{
+    uint32_t i, n = 0, on = 0;
+    const pt_tool_def *d = a->open ? pt_rt_tool_all(a->s.rt, &n) : NULL;
+    *all = 0;
+    for (i = 0; i < n; i++)
+        if (!cli_tool_leader(d[i].name)) {
+            on += cli_tool_on(a->cfg, d[i].name);
+            (*all)++;
+        }
+    return on;
+}
+
+void app_tools_open(app *a)
+{
+    if (!a->open) { /* its runtime lists the tools: open with it */
+        a->menu.tools_pending = a->sess.opening != NULL;
+        a->menu.kind = MENU_NONE;
+        if (!a->sess.opening)
+            app_out_z(a, TUI_RED, "no session: no tools to list");
+        return;
+    }
+    a->menu.kind = MENU_TOOLS;
+    a->menu.sel = a->menu.top = 0;
+    a->menu.closed = false;
+    app_menu_update(a);
+}
+
+/* Turn a tool on or off: calls are refused (or run) at once, the model's
+ * list changes with the next epoch; saved to the user file. */
+void app_tool_set(app *a, pt_str name, bool on)
+{
+    const cli_tool_cfg *e = cli_tool_entry(a->cfg, name);
+    const char *wins = e && strcmp(e->src, "project") == 0 ? "project" : NULL;
+    config_job *job;
+    uint32_t i;
+    char msg[300];
+    if (!cli_tool_set(a->cfg, name, on, "user")) {
+        snprintf(msg, sizeof msg, "cannot turn %.100s %s: %s", name.p ? name.p : "", on ? "on" : "off",
+                 a->cfg->ntools == CLI_TOOLS_MAX ? "the config names too many tools" : "its name cannot be a config key");
+        app_out_z(a, TUI_RED, msg);
+        return;
+    }
+    cli_tools_off(a->cfg, a->o.tools_off);
+    if (a->open && (!pt_rt_tool_set_off(a->s.rt, name, !on) ||
+                    (cli_tool_follower(name) && !pt_rt_tool_set_off(a->s.rt, pt_strz(cli_tool_follower(name)), !on))))
+        app_out_z(a, TUI_RED, "out of memory turning the tool off: its calls still run");
+    if (!(job = saver(a)))
+        return;
+    for (i = 0; i < job->ntq && !pt_str_eqz(name, job->tq[i].name); i++)
+        ;
+    if (i == job->ntq)
+        job->ntq++; /* room: one per tool, and cli_tool_set took a slot */
+    snprintf(job->tq[i].name, sizeof job->tq[i].name, "%.*s", (int)name.n, name.p);
+    job->tq[i].on = on;
+    job->tq[i].now = a->open && pt_epoch_provisional(a->s.a); /* before the first request */
+    job->tq[i].wins = wins;
+    start_setting(a);
+}
+
+/* "/tools": the menu. "/tools <name>": its state. "/tools <name> on|off". */
+static void cmd_tools(app *a, pt_str arg)
+{
+    pt_str name = arg, v = PT_STR_NULL;
+    long sp = pt_str_find(arg, ' ');
+    const cli_tool_cfg *e;
+    char msg[400];
+    if (!arg.n) {
+        app_tools_open(a);
+        return;
+    }
+    if (sp >= 0) {
+        name.n = (size_t)sp;
+        v = pt_str_trim((pt_str){arg.p + sp + 1, arg.n - (size_t)sp - 1});
+    }
+    if (cli_tool_leader(name)) {
+        snprintf(msg, sizeof msg, "%.*s goes with %s: /tools %s turns both on or off", (int)name.n, name.p,
+                 cli_tool_leader(name), cli_tool_leader(name));
+        app_out_z(a, TUI_RED, msg);
+        return;
+    }
+    if (!a->open || !pt_rt_tool_has(a->s.rt, name)) {
+        snprintf(msg, sizeof msg, "no tool named %.*s; /tools lists them", (int)(name.n > 100 ? 100 : name.n),
+                 name.p);
+        app_out_z(a, TUI_RED, msg);
+        return;
+    }
+    if (v.n && !pt_str_eqz(v, "on") && !pt_str_eqz(v, "off")) {
+        snprintf(msg, sizeof msg, "not a value for %.*s: %.*s (on, off)", (int)name.n, name.p,
+                 (int)(v.n > 100 ? 100 : v.n), v.p);
+        app_out_z(a, TUI_RED, msg);
+        return;
+    }
+    if (v.n) {
+        app_tool_set(a, name, pt_str_eqz(v, "on")); /* it says when it is saved */
+        return;
+    }
+    e = cli_tool_entry(a->cfg, name);
+    snprintf(msg, sizeof msg, "%.*s: %s (%s)", (int)name.n, name.p, cli_tool_on(a->cfg, name) ? "on" : "off",
+             e ? e->src : "default");
+    app_out_z(a, TUI_DIM, msg);
+}
+
 static bool valid_setting(int s, const char *v)
 {
     int i;
@@ -861,6 +1023,10 @@ void app_run_command(app *a, pt_str line)
             app_out_z(a, TUI_RED, msg);
             return;
         }
+        if (app_settings[s].k == SET_TOOLS) { /* "/settings tools [name [on|off]]" is /tools */
+            cmd_tools(a, sp2 >= 0 ? pt_str_trim((pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1}) : PT_S(""));
+            return;
+        }
         if (sp2 >= 0) {
             pt_str val = pt_str_trim((pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1});
             snprintf(v, sizeof v, "%.*s", (int)(val.n < sizeof v ? val.n : sizeof v - 1), val.p);
@@ -876,6 +1042,8 @@ void app_run_command(app *a, pt_str line)
                  a->cfg->val[app_settings[s].k][0] ? a->cfg->val[app_settings[s].k] : "none",
                  a->cfg->src[app_settings[s].k]);
         app_out_z(a, TUI_DIM, msg);
+    } else if (pt_str_eqz(cmd, "tools")) {
+        cmd_tools(a, arg);
     } else if (pt_str_eqz(cmd, "login")) {
         cmd_login(a, arg);
     } else if (pt_str_eqz(cmd, "mcp")) {

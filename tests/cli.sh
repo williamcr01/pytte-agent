@@ -61,6 +61,14 @@ out=$("$pytte" -p -m faux/faux --script tests/faux/hello.json hi 2>/dev/null)
 check "pytte -p prints the answer" [ "$out" = "Hello from the faux provider! Nothing here touched the network." ]
 id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
 check "effort starts at medium" grep -q '"reasoning":"medium"' "$XDG_STATE_HOME/pytte/sessions/$id/log.jsonl"
+check "web_fetch is off by default: the model is not told of it" sh -c '! grep -q "web_fetch" "$1" && grep -q "\"name\":\"bash_poll\"" "$1"' _ "$XDG_STATE_HOME/pytte/sessions/$id/log.jsonl"
+mkdir -p "$XDG_CONFIG_HOME/pytte"
+printf '{"tools": {"web_fetch": true, "bash": false}}\n' >"$XDG_CONFIG_HOME/pytte/config.json"
+"$pytte" -p -m faux/faux --script tests/faux/hello.json hi >/dev/null 2>&1
+id=$(ls "$XDG_STATE_HOME/pytte/sessions" | tail -1)
+check "tools.web_fetch true turns it on" grep -q '"name":"web_fetch"' "$XDG_STATE_HOME/pytte/sessions/$id/log.jsonl"
+check "...tools.bash false turns bash off, and bash_poll with it" sh -c '! grep -q "\"name\":\"bash" "$1"' _ "$XDG_STATE_HOME/pytte/sessions/$id/log.jsonl"
+rm "$XDG_CONFIG_HOME/pytte/config.json"
 "$pytte" -p -m faux/faux --effort default --script tests/faux/hello.json hi >/dev/null 2>&1
 check "default is not an effort choice" [ $? -eq 1 ]
 mkdir -p "$XDG_CONFIG_HOME/pytte"
@@ -95,25 +103,25 @@ if command -v jq >/dev/null; then
     PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/background_print.json go >/dev/null 2>&1
     results=$("$pytte" log --json | jq -c 'select(.kind == "tool_result") | .data')
     bg() { sh -c 'printf "%s" "$1" | jq -se "$2" >/dev/null' _ "$results" "$1"; }
-    check "a command past its yield goes to the background" bg '.[0] | (.content == "first\n\n[still running as session 8; you will be told when it ends]") and .details.session == 8 and (.is_error | not)'
-    check "...a poll returns at once" bg '.[1] | .content == "\n[still running as session 8; you will be told when it ends]" and .details.ms < 1000'
-    check "...its end is told in the next result" bg '.[2] | .content == "(no output)\n[pytte: background session 8 ended with exit code 3: echo first; sleep 2; echo second; exit 3; bash_poll reads its output]"'
+    check "a command past its yield goes to the background" bg '.[0] | (.content == "first\n\n[still running as session 9; you will be told when it ends]") and .details.session == 9 and (.is_error | not)'
+    check "...a poll returns at once" bg '.[1] | .content == "\n[still running as session 9; you will be told when it ends]" and .details.ms < 1000'
+    check "...its end is told in the next result" bg '.[2] | .content == "(no output)\n[pytte: background session 9 ended with exit code 3: echo first; sleep 2; echo second; exit 3; bash_poll reads its output]"'
     check "...a poll reads the rest and its exit code" bg '.[3] | .content == "second\n\n[exit code 3]" and .details.exit == 3 and .is_error'
-    check "...an ended session read once is gone" bg '.[4] | (.content | startswith("No session 8:")) and .is_error'
+    check "...an ended session read once is gone" bg '.[4] | (.content | startswith("No session 9:")) and .is_error'
     check "...a stopped session is no error" bg '.[6] | .content == "\n[stopped]" and (.is_error | not)'
     check "...and nothing outlives pytte" sh -c '! pgrep -f "^sh -c echo up; sleep 100" >/dev/null && ! pgrep -xf "sleep 100" >/dev/null'
     out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/notify_later.json go 2>/dev/null)
     log=$("$pytte" log --json)
-    check "a background command that ends during a turn is told in the next result" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[1].data.content == \"busy\n\n[pytte: background session 8 ended with exit code 0: sleep 1.5; echo late; bash_poll reads its output]\"" >/dev/null' _ "$log"
+    check "a background command that ends during a turn is told in the next result" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[1].data.content == \"busy\n\n[pytte: background session 9 ended with exit code 0: sleep 1.5; echo late; bash_poll reads its output]\"" >/dev/null' _ "$log"
     check "...not again in a note" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | length == 0" >/dev/null' _ "$log"
     check "...and bash_poll reads it" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[-1].data.content == \"late\n\n[ended]\"" >/dev/null' _ "$log"
     out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/notify_idle.json go 2>/dev/null)
     check "-p waits for a background command, which starts a turn when it ends" [ "$(printf '%s\n' "$out" | tail -1)" = "It printed late." ]
     log=$("$pytte" log --json)
-    check "...from a note by pytte, once, with what it printed" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | length == 1 and (.[0].data.content | contains(\"- session 8 ended with exit code 0: sleep 1.5; echo late\n\") and contains(\"Session 8 printed:\n<output>\nlate\n</output>\n\"))" >/dev/null' _ "$log"
+    check "...from a note by pytte, once, with what it printed" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | length == 1 and (.[0].data.content | contains(\"- session 9 ended with exit code 0: sleep 1.5; echo late\n\") and contains(\"Session 9 printed:\n<output>\nlate\n</output>\n\"))" >/dev/null' _ "$log"
     out=$(PYTTE_PERMISSION_MODE=auto "$pytte" -p -m faux/faux --script tests/faux/notify_long.json go 2>/dev/null)
     log=$("$pytte" log --json)
-    check "a note shows the end of a long output, from a whole line" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | .[0].data.content | test(\"Session 8 printed \\\\(its last [0-9]+ bytes; bash_poll reads what came before\\\\):\n<output>\n[0-9]+\n(.|\n)*\n3000\n</output>\")" >/dev/null' _ "$log"
+    check "a note shows the end of a long output, from a whole line" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"user\" and .data.from == \"pytte\")) | .[0].data.content | test(\"Session 9 printed \\\\(its last [0-9]+ bytes; bash_poll reads what came before\\\\):\n<output>\n[0-9]+\n(.|\n)*\n3000\n</output>\")" >/dev/null' _ "$log"
     check "...and the session stays for bash_poll" sh -c 'printf "%s" "$1" | jq -se "map(select(.kind == \"tool_result\")) | .[-1].data.content | startswith(\"1\n2\n3\n\") and endswith(\"3000\n\n[ended]\")" >/dev/null' _ "$log"
     d=$XDG_STATE_HOME/files
     mkdir -p "$d" && seq 1 5000 >"$d/big.txt"
@@ -274,7 +282,7 @@ check "ls shows a killed owner as crashed" [ $? -eq 0 ]
 
 if command -v jq >/dev/null; then
     "$pytte" -p -m faux/faux --script tests/faux/hello.json --output-format stream-json hi >"$XDG_STATE_HOME/out" 2>/dev/null
-    check "stream-json prints commits" sh -c 'jq -se "length == 6 and .[0].seq == 1" "$1" >/dev/null' _ \
+    check "stream-json prints commits" sh -c 'jq -se "length == 7 and .[0].seq == 1" "$1" >/dev/null' _ \
         "$XDG_STATE_HOME/out"
 fi
 
