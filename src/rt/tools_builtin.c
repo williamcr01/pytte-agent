@@ -123,6 +123,9 @@ static void hash_of(const char *p, size_t n, unsigned char out[32])
     pt_sha256_final(&s, out);
 }
 
+/* The directories of path; each one made is synced into its parent (best
+ * effort), so the file renamed into it later is reachable after a power
+ * loss. */
 static bool mkdirs(const char *path)
 {
     char tmp[4096];
@@ -131,7 +134,9 @@ static bool mkdirs(const char *path)
     for (p = tmp + 1; *p; p++)
         if (*p == '/') {
             *p = 0;
-            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+            if (mkdir(tmp, 0777) == 0)
+                (void)pt_sys_sync_parent(tmp, true); /* made either way */
+            else if (errno != EEXIST)
                 return false;
             *p = '/';
         }
@@ -139,8 +144,9 @@ static bool mkdirs(const char *path)
 }
 
 /* Replace path atomically: a unique temporary file next to it, synced,
- * renamed over it. Keeps the old file's mode; new files honor the process
- * umask as for open(..., 0666). */
+ * renamed over it, and the directory synced (best effort), so the result
+ * committed after it does not claim a change a power loss undid. Keeps the old file's
+ * mode; new files honor the process umask as for open(..., 0666). */
 static bool write_atomic(const char *path, const char *p, size_t n, const struct stat *expected)
 {
     char tmp[4200];
@@ -172,7 +178,7 @@ static bool write_atomic(const char *path, const char *p, size_t n, const struct
             goto fail;
         off += (size_t)w;
     }
-    if (fchmod(fd, mode) != 0 || fsync(fd) != 0)
+    if (fchmod(fd, mode) != 0 || pt_sys_sync_fd(fd, false) != 0)
         goto fail;
     if (close(fd) != 0) {
         fd = -1;
@@ -189,8 +195,12 @@ static bool write_atomic(const char *path, const char *p, size_t n, const struct
     }
     /* A change after this check and before rename remains a small unavoidable
      * TOCTOU window without directory-level locking. */
-    if (rename(tmp, path) == 0)
+    if (rename(tmp, path) == 0) {
+        /* The new contents are in place: a failed sync is no failed write,
+         * and the caller stamps them so later edits are not refused. */
+        (void)pt_sys_sync_parent(path, true);
         return true;
+    }
 fail:
     saved = errno;
     if (fd >= 0)

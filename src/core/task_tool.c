@@ -34,6 +34,9 @@ static const char aborted_text[] = "The user aborted this tool call.";
 static const char interrupted_text[] =
     "This tool call was interrupted by a crash. It may or may not have taken effect. Check the "
     "current state before retrying.";
+static const char quit_text[] =
+    "This tool call was cut off when pytte exited. It may or may not have taken effect. Check the "
+    "current state before retrying.";
 
 void pt_tool_free_live(pt_agent *a, task *t)
 {
@@ -185,17 +188,19 @@ static bool finish_text(pt_agent *a, task *t, const pt_block *call, const char *
     return ok;
 }
 
-/* Aborted, or interrupted by a crash: the text and the output so far. */
+/* Aborted, or cut off by a crash or an exit: the text and the output so far. */
 static bool finish_cut(pt_agent *a, task *t, const pt_block *call, bool aborted, const input *consumed)
 {
     ending e;
     pt_buf b;
     pt_str tail = tail_of(a, t);
-    bool ok;
+    bool quit = t->quit, ok;
     pt_buf_init(&b, a->al);
-    pt_buf_putz(&b, aborted ? aborted_text : interrupted_text);
+    pt_buf_putz(&b, aborted ? aborted_text : quit ? quit_text : interrupted_text);
     if (tail.n) {
-        pt_buf_putz(&b, aborted ? "\n\nOutput before the abort:\n" : "\n\nThe last output before the crash:\n");
+        pt_buf_putz(&b, aborted ? "\n\nOutput before the abort:\n"
+                        : quit  ? "\n\nThe last output before pytte exited:\n"
+                                : "\n\nThe last output before the crash:\n");
         pt_buf_puts(&b, tail);
     }
     memset(&e, 0, sizeof e);
