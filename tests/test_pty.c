@@ -1079,10 +1079,10 @@ static void test_commands(void)
     CHECK(wait_for(&p, "faux · medium", 1000));
     keys(&p, "/");
     CHECK(wait_for(&p, "  › /model     switch the model", 1000)); /* descriptions in a column */
-    CHECK(wait_for(&p, "enter run · esc close · 1/19", 1000)); /* the keys, and where you are */
+    CHECK(wait_for(&p, "enter run · esc close · 1/20", 1000)); /* the keys, and where you are */
     keys(&p, "\x1b[A"); /* up from the top wraps to the end, the window follows */
     CHECK(wait_for(&p, "  › /quit", 1000));
-    CHECK(wait_for(&p, "19/19", 1000));
+    CHECK(wait_for(&p, "20/20", 1000));
     keys(&p, "\x1b[B");
     CHECK(wait_for(&p, "  › /model", 1000));
     keys(&p, "th\t");

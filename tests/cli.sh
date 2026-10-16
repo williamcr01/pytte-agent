@@ -313,6 +313,26 @@ if command -v jq >/dev/null; then
 fi
 (cd "$XDG_STATE_HOME" && "$pytte" -p -c </dev/null >/dev/null 2>&1)
 check "-c only continues sessions of this directory" [ $? -eq 1 ]
+# ---- rewind ----
+mkdir "$XDG_STATE_HOME/rw" && cd "$XDG_STATE_HOME/rw" || exit 1
+export PYTTE_PERMISSION_MODE=auto
+rw=../work/tests/faux/rewind.json
+"$pytte" -p -m faux/faux --script $rw "make files" >/dev/null 2>&1
+rid=$(ls -t "$XDG_STATE_HOME/pytte/sessions" | head -1)
+"$pytte" -p -r "$rid" -m faux/faux --script $rw "change them" >/dev/null 2>&1
+check "two turns of edits landed" [ "$(cat a.txt)" = "three" ] && [ -f c.txt ]
+printf 'outside\n' >b.txt
+"$pytte" rewind "$rid" >/dev/null 2>&1
+check "a file changed outside pytte needs --yes" [ "$(cat b.txt)" = "outside" ] && [ "$(cat a.txt)" = "three" ]
+printf 'bee\n' >b.txt
+new=$("$pytte" rewind "$rid" 2>/dev/null)
+check "rewind puts the tree back byte for byte" [ "$(cat a.txt)" = "one" ] && [ "$(cat b.txt)" = "bee" ] && [ ! -e c.txt ]
+check "...and forks before the message" [ -n "$new" ] && [ "$("$pytte" log "$new" | grep -c '^> ')" -eq 1 ]
+check "...with the message in the draft" [ "$(cat "$XDG_STATE_HOME/pytte/sessions/$new/draft")" = "change them" ]
+"$pytte" rewind "$rid" --files >/dev/null 2>&1
+check "a second rewind has nothing to do" [ "$(cat a.txt)" = "one" ]
+unset PYTTE_PERMISSION_MODE
+cd "$XDG_STATE_HOME/work" || exit 1
 
 # ---- what a crash leaves ----
 # A bash call killed with pytte (kill -9): its processes are stopped when

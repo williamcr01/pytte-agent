@@ -629,6 +629,12 @@ static void handle(pt_rt *rt, const pt_fx *fx)
     case PT_FX_TOOL:
         pt_rt_run_tool(rt, fx);
         break;
+    case PT_FX_SNAPSHOT:
+        pt_rt_snapshot(rt, fx);
+        break;
+    case PT_FX_RESTORE:
+        pt_rt_restore(rt, fx);
+        break;
     case PT_FX_CANCEL:
         pt_rt_cancel_tool(rt, fx->cancel);
         for (i = 0; i < rt->nreqs; i++)

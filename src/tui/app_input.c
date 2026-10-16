@@ -785,7 +785,8 @@ static void enter(app *a)
         pt_str label = app_item_label(a, a->menu.sel);
         bool sub = (pt_str_starts(d, PT_S("/mcp ")) && (pt_str_eqz(label, "login") || pt_str_eqz(label, "logout") ||
                                                        pt_str_eqz(label, "restart"))) ||
-                   (pt_str_starts(d, PT_S("/login ")) && pt_str_find((pt_str){d.p + 7, d.n - 7}, ' ') < 0);
+                   (pt_str_starts(d, PT_S("/login ")) && pt_str_find((pt_str){d.p + 7, d.n - 7}, ' ') < 0) ||
+                   (a->menu.of_rewind && pt_str_starts(d, PT_S("/rewind ")));
         app_complete(a);
         if (skill || sub)
             return; /* a $skill or @mention picked: the message goes on; /mcp login, /login api: then the name */
@@ -969,6 +970,15 @@ void app_on_key(app *a, const tui_ev *ev)
                 interrupt(a);
             else
                 a->pace.esc_at = now;
+        } else if (a->open && !a->in.text.n) { /* idle with nothing typed: esc esc rewinds */
+            if (now - a->pace.esc_at < DOUBLE_MS) {
+                a->pace.esc_at = 0;
+                tui_input_set(&a->in, PT_S("/rewind "));
+                a->menu.closed = false;
+                app_menu_update(a);
+            } else {
+                a->pace.esc_at = now;
+            }
         }
         return;
     }

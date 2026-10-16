@@ -38,8 +38,11 @@ typedef enum {
     PT_FX_ASK,        /* ask the user about a tool call; answered by pt_approve, no completion */
     PT_FX_TOOL,       /* run a tool: pt_fx_data for its output as it comes, then pt_fx_tool */
     PT_FX_BLOB,       /* store bytes as a blob (section 6.5); complete with pt_fx_blob */
-    PT_FX_EPOCH_MATERIALS /* an epoch's system prompt and tools (a new one, or a provisional one
-                             being settled); complete with pt_fx_materials */
+    PT_FX_EPOCH_MATERIALS, /* an epoch's system prompt and tools (a new one, or a provisional one
+                              being settled); complete with pt_fx_materials */
+    PT_FX_SNAPSHOT,        /* save the file a tool call is about to change (section 8.6);
+                              complete with pt_fx_snapshot */
+    PT_FX_RESTORE          /* put a file back as it was; complete with pt_fx_done */
 } pt_fx_kind;
 
 /* What running a tool again after an unknown partial run does (section 13.4). */
@@ -66,6 +69,10 @@ typedef struct pt_fx {
     uint32_t attempt;         /* TOOL: 2 and up when run again after a crash */
     pt_replay replay;         /* GATE, TOOL */
     uint32_t epoch;           /* EPOCH_MATERIALS: the new epoch's number */
+    /* RESTORE: the file, and the blob ("sha256:<hex>") holding its bytes;
+     * empty blob: it did not exist, so remove it. Valid until completed.
+     * (SNAPSHOT uses name and args, as GATE does.) */
+    pt_str path, blob;
 } pt_fx;
 
 /* ---- events (display only; no reply) ----------------------------------------- */
@@ -80,7 +87,8 @@ typedef enum {
     PT_E_TOOL_START,  /* name, args, call_id: a tool starts running */
     PT_E_TOOL_OUTPUT, /* data: output of a running tool */
     PT_E_ASK,         /* name, args, prompt: a tool call waits for pt_approve */
-    PT_E_COMPACT      /* outcome: "started", "completed", "failed" (error): compaction */
+    PT_E_COMPACT,     /* outcome: "started", "completed", "failed" (error): compaction */
+    PT_E_REWIND       /* outcome: "completed", "failed" (error): a rewind restored its files */
 } pt_event_kind;
 
 typedef struct pt_event {
@@ -155,6 +163,7 @@ typedef struct pt_tool_def {
     pt_replay replay;
     bool parallel;   /* may run at the same time as other parallel tools */
     bool read_only;  /* changes nothing: never asked about; its "path" is a file read */
+    bool snapshot;   /* changes the file its "path" names: that file is saved first (PT_FX_SNAPSHOT) */
     pt_str source;   /* who runs it: "builtin", ... */
 } pt_tool_def;
 
@@ -288,6 +297,28 @@ typedef struct pt_materials {
 
 /* The answer to EPOCH_MATERIALS; NULL keeps the current epoch's. */
 void pt_fx_materials(pt_agent *a, uint32_t fx, const pt_materials *m);
+
+/* The answer to a SNAPSHOT: the file the call changes (path, absolute) and
+ * a stored blob of its bytes (ref "sha256:<hex>", durable now), or an empty
+ * blob when it did not exist. An empty path: the call changes no file.
+ * error (not NULL): the file could not be saved, and the call does not run
+ * (the model is told). Copied. */
+typedef struct pt_snapshot {
+    pt_str path, blob;
+} pt_snapshot;
+void pt_fx_snapshot(pt_agent *a, uint32_t fx, const pt_snapshot *s, const char *error);
+
+/* Rewind (section 8.6): put files back as they were. Each is restored
+ * whole, in order, by a RESTORE effect; the task is committed first and
+ * resumes after a crash, so restoring must be repeatable. Its end clears the
+ * read stamps of the files (the model has not seen them since), and
+ * PT_E_REWIND tells the frontend. user_entry is the user message the
+ * rewind goes back to, for the record. False when a run is active, a rewind is
+ * already requested, or out of memory. Copied. */
+typedef struct pt_restore {
+    pt_str path, blob; /* blob empty: the file did not exist */
+} pt_restore;
+bool pt_rewind(pt_agent *a, uint32_t user_entry, const pt_restore *files, uint32_t n);
 
 /* A BLOB is durable: ref is "sha256:<hex>" (copied), or empty when it
  * could not be stored (the bytes then stay inline in the log). */

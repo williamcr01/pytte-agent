@@ -14,6 +14,7 @@ are where the details live.
 | [tools.md](tools.md) | `/tools`: turning the model's tools on and off, `tools.<name>`, web_fetch off by default |
 | [web.md](web.md) | `web_fetch` and `web_search`: what they send, the search backends (Exa, Parallel), `search.backend` |
 | [mcp.md](mcp.md) | MCP servers: config keys, trust, OAuth, prompts and resources, filled-in tool arguments |
+| [rewind.md](rewind.md) | `/rewind`, `pytte rewind`: file snapshots, restoring files, forking before a message |
 | [mentions.md](mentions.md) | `@path` file mentions and image attachments in the TUI: the menu, what is sent, limits, `Ctrl-V` |
 
 ## Writing a page

@@ -410,6 +410,45 @@ pt_str pt_rt_gist(pt_str args, pt_arena *a);
  * allow rules name hosts: "allow web_fetch docs.python.org". */
 pt_str pt_rt_url_host(pt_str url);
 
+/* ---- rewind (section 8.6) ----
+ * write and edit save the file they are about to change (a blob of the
+ * session, named by the tool task's intent). Rewinding goes back to before
+ * a user message: the host reads the log (scan), plans which files to put
+ * back, and hands the plan to the core (pt_rewind), whose task restores
+ * them. Then a fork of the session that ends just before the message
+ * (cli_session_fork) continues the conversation. */
+typedef struct pt_rt_rewind pt_rt_rewind;
+
+typedef struct pt_rt_point {
+    uint32_t entry; /* the user message's entry */
+    uint64_t keep;  /* bytes of the log before the commit that placed it */
+    pt_str text;    /* the message; valid until the scan is freed */
+    /* It was submitted while a run went on and placed later: the log
+     * cannot end just before it without cutting that run. Not rewindable. */
+    bool queued;
+} pt_rt_point;
+
+/* Read the session's log for its user messages and the files its calls
+ * saved. The session should be idle. NULL with err on failure. */
+pt_rt_rewind *pt_rt_rewind_scan(pt_rt *rt, char *err, size_t cap);
+void pt_rt_rewind_free(pt_rt_rewind *r);
+/* The messages, oldest first. */
+const pt_rt_point *pt_rt_rewind_points(const pt_rt_rewind *r, uint32_t *n);
+
+typedef struct pt_rt_plan {
+    pt_restore *files; /* what to put back; the files that already are as they were are left out */
+    bool *changed;     /* per file: it was changed outside pytte since its last write */
+    uint32_t n, nchanged;
+    uint32_t risky;    /* calls since the message that rewind cannot undo (bash, MCP tools) */
+    pt_arena ar;       /* owns the above */
+} pt_rt_plan;
+
+/* The files to put back to go before the user message `entry`: the state
+ * of each at its first change after the message. False when there is no
+ * such message. Free with pt_rt_plan_free. */
+bool pt_rt_rewind_plan(pt_rt *rt, const pt_rt_rewind *r, uint32_t entry, pt_rt_plan *out);
+void pt_rt_plan_free(pt_rt_plan *p);
+
 typedef enum {
     PT_RT_IDLE,    /* nothing left to do */
     PT_RT_STOPPED, /* cfg.stop said so */

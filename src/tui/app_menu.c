@@ -18,10 +18,16 @@ bool app_menu_takes_arg(pt_str cmd)
 {
     return pt_str_eqz(cmd, "model") || pt_str_eqz(cmd, "effort") || pt_str_eqz(cmd, "thinking") ||
            pt_str_eqz(cmd, "resume") || pt_str_eqz(cmd, "settings") || pt_str_eqz(cmd, "login") ||
-           pt_str_eqz(cmd, "tools");
+           pt_str_eqz(cmd, "rewind") || pt_str_eqz(cmd, "tools");
 }
 
 static void add_item(app *a, const char *label, size_t ln, const char *desc)
+{
+    app_menu_add(a, label, ln, desc ? pt_strz(desc) : PT_STR_NULL, desc ? strlen(desc) : 0);
+}
+
+/* An item whose description is the first dn bytes of desc (not NUL-ended). */
+void app_menu_add(app *a, const char *label, size_t ln, pt_str desc, size_t dn)
 {
     item *it;
     if (a->menu.n >= MAX_ITEMS)
@@ -31,9 +37,9 @@ static void add_item(app *a, const char *label, size_t ln, const char *desc)
     it->n = ln;
     pt_buf_put(&a->menu.buf, label, ln);
     it->dat = a->menu.buf.n;
-    it->dn = desc ? strlen(desc) : 0;
-    if (desc)
-        pt_buf_putz(&a->menu.buf, desc);
+    it->dn = dn;
+    if (dn)
+        pt_buf_put(&a->menu.buf, desc.p, dn);
 }
 
 pt_str app_item_label(const app *a, int i)
@@ -275,13 +281,13 @@ static session_list *get_sessions(app *a, bool refresh)
 
 void app_menu_update(app *a)
 {
-    bool was_sessions = a->menu.of_sessions, was_skills = a->menu.of_skills;
+    bool was_sessions = a->menu.of_sessions, was_skills = a->menu.of_skills, was_rewind = a->menu.of_rewind;
     pt_str d = pt_buf_str(&a->in.text), cmd, arg, word = last_word(d);
     long sp;
     int old = a->menu.n;
     a->menu.n = 0;
     pt_buf_reset(&a->menu.buf);
-    a->menu.of_sessions = a->menu.of_skills = a->menu.of_mentions = false;
+    a->menu.of_sessions = a->menu.of_skills = a->menu.of_mentions = a->menu.of_rewind = false;
     if (a->menu.kind == MENU_SETTINGS)
         return;
     if (a->menu.kind == MENU_TOOLS) {
@@ -406,6 +412,21 @@ void app_menu_update(app *a)
                     if (pt_str_starts(pt_strz(in[i].name), name))
                         add_item(a, in[i].name, strlen(in[i].name), in[i].target);
             }
+        } else if (pt_str_eqz(cmd, "rewind")) {
+            long sp2 = pt_str_find(arg, ' ');
+            if (sp2 < 0) {
+                app_rewind_messages(a, arg, !was_rewind);
+            } else if (pt_str_find((pt_str){arg.p + sp2 + 1, arg.n - (size_t)sp2 - 1}, ' ') < 0) {
+                static const char *const modes[] = {"both", "files", "conversation"};
+                static const char *const descs[] = {"files and conversation: continue in a fork before it",
+                                                    "only the files; this session goes on",
+                                                    "only the conversation, in a fork; the files stay"};
+                pt_str w = last_word(arg);
+                size_t i;
+                for (i = 0; i < 3; i++)
+                    if (pt_str_starts(pt_strz(modes[i]), w))
+                        add_item(a, modes[i], strlen(modes[i]), descs[i]);
+            }
         } else if (pt_str_eqz(cmd, "permissions")) {
             if (pt_str_find(arg, ' ') < 0)
                 add_list(a, perm_subs, sizeof perm_subs / sizeof perm_subs[0], arg);
@@ -450,6 +471,10 @@ bool app_complete(app *a)
     } else if (a->menu.of_sessions) { /* the whole argument: names have spaces */
         pt_buf_puts(&nd, PT_S("/resume "));
         pt_buf_puts(&nd, label);
+    } else if (a->menu.of_rewind) { /* the message, then how */
+        pt_buf_puts(&nd, PT_S("/rewind "));
+        pt_buf_puts(&nd, label);
+        pt_buf_putc(&nd, ' ');
     } else { /* replace the last word */
         pt_buf_put(&nd, d.p, (size_t)(last_word(d).p - d.p));
         pt_buf_puts(&nd, label);

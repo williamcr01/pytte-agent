@@ -79,7 +79,7 @@ Ctrl-C clears the draft, else interrupts the run (twice with nothing to
 clear or interrupt quits), Ctrl-D quits, Ctrl-T toggles thinking (hidden or full),
 Ctrl-O opens the full transcript in a pager, Ctrl-V attaches a clipboard image, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
-`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/tools`, `/settings`, `/login`, `/mcp`, `/permissions`, `/help`, `/quit`. A change in
+`/status`, `/thinking`, `/compact`, `/rewind` ([docs](docs/rewind.md)), `/ps`, `/stop`, `/usage`, `/tools`, `/settings`, `/login`, `/mcp`, `/permissions`, `/help`, `/quit`. A change in
 `/settings` applies to the session at once and is saved to
 `~/.config/pytte/config.json`; `/model` and `/effort` switch without saving.
 See [docs/settings.md](docs/settings.md).

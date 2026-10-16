@@ -1105,6 +1105,11 @@ void app_on_event(void *ud, const pt_event *ev)
             app_out_note(a, &a->lines, TUI_RED, ev->error);
         }
         break;
+    case PT_E_REWIND:
+        a->rw.ended = true;
+        a->rw.failed = pt_str_eqz(ev->outcome, "failed");
+        snprintf(a->rw.err, sizeof a->rw.err, "%.*s", (int)ev->error.n, ev->error.p);
+        break;
     case PT_E_TOOL_START:
         a->run.phase = PH_TOOL;
         if (a->run.ncalls < RUN_MAX) {

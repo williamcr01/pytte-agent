@@ -128,7 +128,7 @@ static void hash_of(const char *p, size_t n, unsigned char out[32])
 /* The directories of path; each one made is synced into its parent (best
  * effort), so the file renamed into it later is reachable after a power
  * loss. */
-static bool mkdirs(const char *path)
+bool pt_rt_mkdirs(const char *path)
 {
     char tmp[4096];
     char *p;
@@ -149,7 +149,7 @@ static bool mkdirs(const char *path)
  * renamed over it, and the directory synced (best effort), so the result
  * committed after it does not claim a change a power loss undid. Keeps the old file's
  * mode; new files honor the process umask as for open(..., 0666). */
-static bool write_atomic(const char *path, const char *p, size_t n, const struct stat *expected)
+bool pt_rt_write_atomic(const char *path, const char *p, size_t n, const struct stat *expected)
 {
     char tmp[4200];
     struct stat st;
@@ -652,11 +652,11 @@ static void t_write(void *ud, pt_rt *rt, const pt_fx *fx)
     text = pt_json_str(content, &b->k.ar);
     path = resolve(b, rel);
     existed = stat(path, &st) == 0;
-    if (!mkdirs(path)) {
+    if (!pt_rt_mkdirs(path)) {
         fail(rt, fx->id, "cannot create the directories of", path);
         return;
     }
-    if (!write_atomic(path, text.p, text.n, NULL)) {
+    if (!pt_rt_write_atomic(path, text.p, text.n, NULL)) {
         fail(rt, fx->id, "cannot write", path);
         return;
     }
@@ -898,7 +898,7 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
         pt_rt_kit_done(rt, fx->id, PT_S("The file was modified while editing. Read it again, then edit it."), true);
         return;
     }
-    if (!write_atomic(path, b->k.out.p, b->k.out.n, &st) || stat(path, &st) != 0) {
+    if (!pt_rt_write_atomic(path, b->k.out.p, b->k.out.n, &st) || stat(path, &st) != 0) {
         fail(rt, fx->id, "cannot write", path);
         return;
     }
@@ -1041,6 +1041,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[2].def.description = PT_S("Write a whole file, creating it and its directories if needed.");
     t[2].def.schema = PT_S(write_schema);
     t[2].def.replay = PT_REPLAY_SAFE;
+    t[2].def.snapshot = true;
     t[2].run = t_write;
     t[3].def.name = PT_S("edit");
     t[3].def.description = PT_S(
@@ -1049,6 +1050,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
         "not overlap: make all changes to one file in one call. The file must have been read since it "
         "last changed.");
     t[3].def.schema = PT_S(edit_schema);
+    t[3].def.snapshot = true;
     t[3].run = t_edit;
     pt_rt_bash_tools(b->bash, bt);
     t[0] = bt[0];

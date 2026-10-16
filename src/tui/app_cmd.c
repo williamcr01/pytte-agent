@@ -14,6 +14,7 @@ const app_cmd_def app_cmds[] = {
     {"new", "", "start a new session"},
     {"resume", " [id]", "open another session from this directory"},
     {"fork", "", "continue in a copy of this session"},
+    {"rewind", " [message] [both|files|conversation]", "put files and conversation back to before a message"},
     {"worktree", " [name]", "a new session in a git worktree (also /wt)"},
     {"status", "", "session, model, context and terminal"},
     {"compact", "", "summarize the conversation to free the context"},
@@ -1073,6 +1074,7 @@ static bool valid_setting(int s, const char *v)
     return !app_settings[s].vals;
 }
 
+static void cmd_rewind(app *a, pt_str arg);
 /* "not a value for effort: x (off, minimal, ...)" */
 static void bad_value(app *a, const char *what, const char *const *vals, int nv, const char *v)
 {
@@ -1154,6 +1156,8 @@ void app_run_command(app *a, pt_str line)
             a->o.fork = false;
             a->sess.created = false; /* a copy: never discarded as empty */
         }
+    } else if (pt_str_eqz(cmd, "rewind")) {
+        cmd_rewind(a, arg);
     } else if (pt_str_eqz(cmd, "worktree") || pt_str_eqz(cmd, "wt")) {
         if (arg.n && !cli_worktree_name_ok(v)) {
             snprintf(msg, sizeof msg, "not a worktree name: %.100s (letters, digits, - _ .)", v);
@@ -1240,6 +1244,195 @@ void app_run_command(app *a, pt_str line)
         snprintf(msg, sizeof msg, "unknown command /%.*s; /help lists them", (int)(cmd.n > 100 ? 100 : cmd.n), cmd.p);
         app_out_z(a, TUI_RED, msg);
     }
+}
+
+/* ---- /rewind (section 8.6) ---- */
+
+/* The first line of text, cut to max bytes on a character. */
+static size_t line_of(pt_str text, size_t max)
+{
+    size_t n = 0;
+    while (n < text.n && text.p[n] != '\n')
+        n++;
+    if (n > max) {
+        n = max;
+        while (n && ((unsigned char)text.p[n] & 0xC0) == 0x80)
+            n--;
+    }
+    return n;
+}
+
+void app_rewind_drop(app *a)
+{
+    pt_rt_rewind_free(a->rw.scan);
+    a->rw.scan = NULL;
+}
+
+/* The menu's messages, newest first: the entry's ID, and the message. */
+void app_rewind_messages(app *a, pt_str q, bool refresh)
+{
+    const pt_rt_point *p;
+    uint32_t n = 0, i;
+    char err[200], id[16];
+    if (refresh || !a->rw.scan) {
+        app_rewind_drop(a);
+        a->rw.scan = a->open ? pt_rt_rewind_scan(a->s.rt, err, sizeof err) : NULL;
+    }
+    a->menu.of_rewind = true;
+    p = a->rw.scan ? pt_rt_rewind_points(a->rw.scan, &n) : NULL;
+    for (i = n; i-- > 0;) {
+        int ln = snprintf(id, sizeof id, "%u", p[i].entry);
+        if (p[i].queued || ln <= 0 || (size_t)ln >= sizeof id ||
+            !(pt_str_starts(pt_strz(id), q) || pt_str_icontains(p[i].text, q)))
+            continue;
+        app_menu_add(a, id, (size_t)ln, p[i].text, line_of(p[i].text, 200));
+    }
+}
+
+/* The message goes back in the input box of a fork of the session that
+ * ends just before it. */
+static void rewind_fork(app *a)
+{
+    a->o.fork = true;
+    a->o.fork_keep = a->rw.keep;
+    app_switch_session(a, NULL);
+    if (!a->sess.opening) /* it did not start: nothing will take the message */
+        pt_buf_reset(&a->rw.text);
+    a->o.fork = false;
+    a->o.fork_keep = 0;
+    a->sess.created = false; /* a copy: never discarded as empty */
+    a->rw.fork = false;
+}
+
+/* The core's rewind task ended (the event only set the flags). */
+void app_rewind_poll(app *a)
+{
+    char msg[700];
+    if (!a->rw.ended)
+        return;
+    a->rw.ended = a->rw.active = false;
+    if (a->rw.failed) {
+        snprintf(msg, sizeof msg, "not every file was restored: %s", a->rw.err);
+        app_out_z(a, TUI_RED, msg);
+        a->rw.fork = false;
+        pt_buf_reset(&a->rw.text);
+        return;
+    }
+    snprintf(msg, sizeof msg, "restored %u file%s", a->rw.nfiles, a->rw.nfiles == 1 ? "" : "s");
+    app_out_z(a, TUI_DIM, msg);
+    if (a->rw.fork)
+        rewind_fork(a);
+}
+
+/* /rewind ENTRY [both|files|conversation] [overwrite] */
+static void cmd_rewind(app *a, pt_str arg)
+{
+    pt_str entry = arg, mode = PT_STR_NULL, force = PT_STR_NULL;
+    pt_rt_rewind *scan;
+    const pt_rt_point *pts, *p = NULL;
+    pt_rt_plan plan;
+    uint64_t id = 0;
+    uint32_t n, i;
+    bool files, conversation;
+    char msg[800], err[300];
+    long sp;
+    if (!a->open) {
+        app_out_z(a, TUI_RED, "no session to rewind");
+        return;
+    }
+    if (a->run.active) {
+        app_out_z(a, TUI_RED, "/rewind waits for the run to end (esc esc stops it)");
+        return;
+    }
+    if (!arg.n) { /* pick the message from the menu */
+        tui_input_set(&a->in, PT_S("/rewind "));
+        a->menu.closed = false;
+        app_menu_update(a);
+        return;
+    }
+    if ((sp = pt_str_find(entry, ' ')) >= 0) {
+        mode = pt_str_trim((pt_str){entry.p + sp + 1, entry.n - (size_t)sp - 1});
+        entry.n = (size_t)sp;
+        if ((sp = pt_str_find(mode, ' ')) >= 0) {
+            force = pt_str_trim((pt_str){mode.p + sp + 1, mode.n - (size_t)sp - 1});
+            mode.n = (size_t)sp;
+        }
+    }
+    files = !pt_str_eqz(mode, "conversation");
+    conversation = !pt_str_eqz(mode, "files");
+    if ((mode.n && !pt_str_eqz(mode, "both") && !pt_str_eqz(mode, "files") && !pt_str_eqz(mode, "conversation")) ||
+        (force.n && !pt_str_eqz(force, "overwrite")) || !pt_str_to_u64(entry, &id) || id > UINT32_MAX) {
+        app_out_z(a, TUI_RED, "/rewind [message] [both|files|conversation] [overwrite]: /rewind lists the messages");
+        return;
+    }
+    if (!(scan = pt_rt_rewind_scan(a->s.rt, err, sizeof err))) {
+        app_out_z(a, TUI_RED, err);
+        return;
+    }
+    pts = pt_rt_rewind_points(scan, &n);
+    for (i = 0; i < n; i++)
+        if (pts[i].entry == id)
+            p = &pts[i];
+    if (!p || p->queued) {
+        app_out_z(a, TUI_RED,
+                  p ? "that message was queued behind a run: the log cannot end just before it"
+                    : "no such message: /rewind lists them");
+        pt_rt_rewind_free(scan);
+        return;
+    }
+    if (!pt_rt_rewind_plan(a->s.rt, scan, p->entry, &plan)) {
+        app_out_z(a, TUI_RED, "cannot plan the rewind");
+        pt_rt_rewind_free(scan);
+        return;
+    }
+    snprintf(msg, sizeof msg, "back to before: %.*s", (int)line_of(p->text, 100), p->text.p);
+    app_out_z(a, TUI_DIM, msg);
+    if (files) {
+        for (i = 0; i < plan.n && i < 8; i++) {
+            snprintf(msg, sizeof msg, "  %s %.*s%s", plan.files[i].blob.n ? "restore" : "remove ",
+                     (int)(plan.files[i].path.n < 400 ? plan.files[i].path.n : 400), plan.files[i].path.p,
+                     plan.changed[i] ? "  (changed outside pytte)" : "");
+            app_out_z(a, plan.changed[i] ? TUI_RED : TUI_DIM, msg);
+        }
+        if (plan.n > 8) {
+            snprintf(msg, sizeof msg, "  ... and %u more", plan.n - 8);
+            app_out_z(a, TUI_DIM, msg);
+        }
+        if (!plan.n)
+            app_out_z(a, TUI_DIM, "  no file differs from before it");
+        if (plan.risky) {
+            snprintf(msg, sizeof msg,
+                     "%u call%s of bash or MCP tools since then cannot be undone: check what they changed",
+                     plan.risky, plan.risky == 1 ? "" : "s");
+            app_out_z(a, TUI_RED, msg);
+        }
+        if (plan.nchanged && !force.n) {
+            snprintf(msg, sizeof msg, "%u file%s changed outside pytte since its last write: to overwrite %s, "
+                     "/rewind %u %s overwrite", plan.nchanged, plan.nchanged == 1 ? "" : "s",
+                     plan.nchanged == 1 ? "it" : "them", p->entry, conversation ? "both" : "files");
+            app_out_z(a, TUI_RED, msg);
+            pt_rt_plan_free(&plan);
+            pt_rt_rewind_free(scan);
+            return;
+        }
+    }
+    a->rw.keep = p->keep;
+    a->rw.fork = conversation;
+    pt_buf_reset(&a->rw.text);
+    pt_buf_puts(&a->rw.text, p->text);
+    if (files && plan.n) {
+        if (pt_rewind(a->s.a, p->entry, plan.files, plan.n)) {
+            a->rw.active = true;
+            a->rw.nfiles = plan.n;
+        } else {
+            app_out_z(a, TUI_RED, pt_error(a->s.a));
+            a->rw.fork = false;
+        }
+    } else if (conversation) {
+        rewind_fork(a);
+    }
+    pt_rt_plan_free(&plan);
+    pt_rt_rewind_free(scan);
 }
 
 /* The configured server of that name: running, or waiting for trust. */

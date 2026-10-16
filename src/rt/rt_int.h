@@ -204,6 +204,16 @@ typedef struct web web;
 web *pt_rt_web_new(pt_rt *rt);
 void pt_rt_web_free(web *w);
 void pt_rt_web_tool(web *w, pt_rt_tool *t);
+/* tools_builtin.c: make the directories above path; replace path atomically
+ * (a temporary file next to it, synced, renamed over it), keeping its mode.
+ * expected (if not NULL): fail with ESTALE when path no longer has its size
+ * and mtime. rewind.c restores files with them too. */
+struct stat;
+bool pt_rt_mkdirs(const char *path);
+bool pt_rt_write_atomic(const char *path, const char *p, size_t n, const struct stat *expected);
+/* rewind.c: the SNAPSHOT and RESTORE effects (section 8.6) */
+void pt_rt_snapshot(pt_rt *rt, const pt_fx *fx);
+void pt_rt_restore(pt_rt *rt, const pt_fx *fx);
 /* tools_websearch.c: web_search, with its state */
 typedef struct wsearch wsearch;
 /* The variables that hold search keys, NULL-ended: never passed to tools,
