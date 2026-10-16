@@ -513,6 +513,8 @@ int cli_session_open(cli_session *s, const cli_opts *o, const char *id, pt_event
                 return fail(s, 1, err, cap, "out of memory");
     }
     pt_rt_set_perm(s->rt, o->perm);
+    if (!cli_perms_apply(s->rt, getcwd(cwd, sizeof cwd) ? cwd : ".")) /* rules of the config files (15.5) */
+        return fail(s, 1, err, cap, "out of memory");
     if (o->nmcp && !pt_rt_mcp_setup(s->rt, &o->mcp_host, o->mcp, o->nmcp))
         return fail(s, 1, err, cap, "out of memory");
     {

@@ -283,8 +283,8 @@ static bool call_phase(pt_agent *a, task *t, const pt_block *call)
     return pt_core_queue(a, &fx, PT_STR_NULL);
 }
 
-static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_str prompt, uint32_t attempt,
-                         const input *consumed)
+static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_str prompt, pt_str rule,
+                         uint32_t attempt, const input *consumed)
 {
     task nt = *t;
     int k;
@@ -298,6 +298,7 @@ static bool commit_phase(pt_agent *a, task *t, task_phase ph, pt_str args, pt_st
     nt.status = ph == PH_APPROVE ? ST_WAITING : ST_RUNNING;
     nt.args = args;
     nt.prompt = prompt;
+    nt.rule = rule;
     nt.attempt = attempt;
     if (ph == PH_EXECUTE && attempt == 1) { /* the policy at the time of the intent */
         const pt_block *call = find_call(a, t);
@@ -317,15 +318,15 @@ static bool gated(pt_agent *a, task *t, const pt_block *call)
     case PT_GATE_DENY:
         return finish_text(a, t, call, text.n ? "Permission denied: " : "Permission denied.", text);
     case PT_GATE_ASK:
-        return commit_phase(a, t, PH_APPROVE, t->args, text, 0, NULL);
+        return commit_phase(a, t, PH_APPROVE, t->args, text, PT_STR_NULL, 0, NULL);
     case PT_GATE_REWRITE:
         if (k < 0 || !check_args(a, t, call, k, text))
             return !a->fatal;
-        return commit_phase(a, t, PH_EXECUTE, text, PT_STR_NULL, 1, NULL);
+        return commit_phase(a, t, PH_EXECUTE, text, PT_STR_NULL, PT_STR_NULL, 1, NULL);
     case PT_GATE_ALLOW:
         break;
     }
-    return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, 1, NULL);
+    return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, text, 1, NULL); /* text: the rule, if any */
 }
 
 void pt_fx_gate(pt_agent *a, uint32_t fx, const pt_gate *g)
@@ -369,7 +370,7 @@ static bool approve_phase(pt_agent *a, task *t, const pt_block *call)
     pt_event ev;
     if (in) {
         if (in->yes)
-            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, 1, in);
+            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, PT_STR_NULL, 1, in);
         {
             ending e;
             pt_buf b;
@@ -661,7 +662,7 @@ static bool execute_phase(pt_agent *a, task *t, const pt_block *call, bool abort
          * stored and the current policy say that is harmless. */
         k = pt_core_find_tool(a, call->name);
         if (t->replay == PT_REPLAY_SAFE && k >= 0 && a->tool_meta[k].replay == PT_REPLAY_SAFE)
-            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, t->attempt + 1, NULL);
+            return commit_phase(a, t, PH_EXECUTE, t->args, PT_STR_NULL, t->rule, t->attempt + 1, NULL);
         return finish_cut(a, t, call, false, NULL);
     }
     return start(a, t, call);

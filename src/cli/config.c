@@ -95,6 +95,8 @@ static bool load_file(cli_config *c, const char *path, const char *src, char *wa
                 }
             }
         }
+        if (!warn[0])
+            cli_perms_check(j, path, warn, cap);
         {
             const pt_json *tools = pt_json_get(j, "tools"), *m;
             for (m = pt_json_is(tools, PT_J_OBJ) ? tools->child : NULL; m; m = m->next)

@@ -79,7 +79,7 @@ Ctrl-C clears the draft, else interrupts the run (twice with nothing to
 clear or interrupt quits), Ctrl-D quits, Ctrl-T toggles thinking (hidden or full),
 Ctrl-O opens the full transcript in a pager, Ctrl-Z suspends. `/` opens the
 command menu: `/model`, `/effort`, `/new`, `/resume`, `/fork`, `/worktree`,
-`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/tools`, `/settings`, `/login`, `/mcp`, `/help`, `/quit`. A change in
+`/status`, `/thinking`, `/compact`, `/ps`, `/stop`, `/usage`, `/tools`, `/settings`, `/login`, `/mcp`, `/permissions`, `/help`, `/quit`. A change in
 `/settings` applies to the session at once and is saved to
 `~/.config/pytte/config.json`; `/model` and `/effort` switch without saving.
 See [docs/settings.md](docs/settings.md).
@@ -244,12 +244,21 @@ Permissions (`--permission-mode`, `$PYTTE_PERMISSION_MODE` or
 `edit`, `web_fetch` and `web_search` (a page can carry what it is sent off the machine) and
 MCP tools. The TUI asks inline: 1 yes,
 2 yes and allow the same command word, host (for `web_fetch`) or tool for
-this session, 3 or Esc no. Allowing `git` never allows `git status; rm -rf x`. `auto` runs
+this session, 3 or Esc no, 4 yes and always allow (saved to the config).
+Allowing `git` never allows `git status; rm -rf x`. `auto` runs
 everything. `read-only` runs only the tools that change nothing (`read`,
 `grep`, `find` and `ls`) and refuses the rest, `bash_poll` (which can
 stop a command) and allowed tools included. In print mode
 a question ends the process with exit code 3 and prints the
 `pytte approve` command that answers it.
+
+Rules in the config keep what you decide: `permissions.allow` and
+`permissions.deny` are lists of `tool(pattern)`, such as `bash(git diff:*)`,
+`web_fetch(docs.python.org)` and `mcp__github__*`. Deny beats allow and
+both beat the mode (`read-only` stays read-only). A project's `deny` rules
+apply at once; its `allow` rules only after `/permissions trust`, and
+`/permissions` lists the rules in force. Every key is in
+[docs/permissions.md](docs/permissions.md).
 
 MCP servers (the Model Context Protocol) add tools, prompts and
 resources. They go in `mcpServers` of `~/.config/pytte/config.json`:

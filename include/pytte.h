@@ -244,7 +244,7 @@ typedef enum { PT_GATE_ALLOW, PT_GATE_DENY, PT_GATE_ASK, PT_GATE_REWRITE } pt_ga
 
 typedef struct pt_gate {
     pt_gate_kind kind;
-    pt_str text; /* DENY: why; ASK: the question */
+    pt_str text; /* DENY: why; ASK: the question; ALLOW: the rule that allowed it, if one did */
     pt_str args; /* REWRITE: the arguments to run with instead (a JSON object) */
 } pt_gate;
 

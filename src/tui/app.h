@@ -363,6 +363,12 @@ void app_out_tail(app *a);
 /* app_band.c: the band: the frame under the scrollback, and painting it */
 void app_tokens_short(char *out, size_t cap, uint64_t n);
 bool app_asking(app *a);
+/* Say when the project's allow rules wait for trust. */
+void app_perms_note(app *a);
+/* The rule "always allow" saves for the question, as in the config file
+ * ("bash(git:*)", "web_fetch(docs.python.org)", "mcp__a__b"); false when
+ * no rule fits it (a bash command with no first word). */
+bool app_ask_rule(const app *a, char *out, size_t cap);
 void app_flush_out(app *a);
 void app_paint(app *a);
 

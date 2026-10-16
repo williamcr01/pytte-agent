@@ -76,6 +76,7 @@ typedef struct task {
     pt_str call_id;     /* tool */
     pt_str args;        /* tool: arguments a gate rewrote; empty: as called */
     pt_str prompt;      /* tool approve */
+    pt_str rule;        /* tool execute: the permission rule that allowed it, or empty */
     pt_replay replay;   /* tool execute */
     uint32_t compact;   /* run compact_wait: the compact task */
     bool abort;         /* an abort was requested (section 8.4) */

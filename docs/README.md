@@ -8,6 +8,7 @@ are where the details live.
 |---|---|
 | [login.md](login.md) | `/login`: API keys, search API keys, Sign in with ChatGPT (`openai-codex`), auth.json, token refresh |
 | [bash.md](bash.md) | Shell commands: background sessions, how the model is told they ended, `-p` waiting for them |
+| [permissions.md](permissions.md) | Which tool calls ask, run or are refused: modes, `permissions.allow` and `permissions.deny` rules, trusting a project's rules, `/permissions` |
 | [sessions.md](sessions.md) | Sessions on disk, what survives a crash, recovery, exits, `--no-sync` |
 | [settings.md](settings.md) | `/settings`, `/model`, `/effort`, `/thinking`: every setting, where it is read from, what applies when |
 | [tools.md](tools.md) | `/tools`: turning the model's tools on and off, `tools.<name>`, web_fetch off by default |
