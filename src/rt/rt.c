@@ -205,6 +205,36 @@ static void on_live(void *ud, uint32_t task, pt_str bytes)
     pt_load_live((pt_agent *)ud, task, bytes);
 }
 
+/* A dead owner's process group: stopped if it is still the same group,
+ * forgotten unless it ran on another host. */
+static void on_proc(void *ud, int64_t id, pt_str mark)
+{
+    pt_store *st = (pt_store *)ud;
+    if (pt_proc_stop_marked(mark) >= 0)
+        st->proc_del(st, id);
+}
+
+void pt_rt_stop_orphans(pt_rt *rt)
+{
+    pt_store *st = rt->c.store;
+    if (st && st->proc_list)
+        st->proc_list(st, on_proc, st);
+}
+
+void pt_rt_proc_started(pt_rt *rt, int64_t group, pt_str mark)
+{
+    pt_store *st = rt->c.store;
+    if (st && st->proc_put && mark.n)
+        st->proc_put(st, group, mark.p, mark.n); /* best effort */
+}
+
+void pt_rt_proc_ended(pt_rt *rt, int64_t group)
+{
+    pt_store *st = rt->c.store;
+    if (st && st->proc_del)
+        st->proc_del(st, group);
+}
+
 /* The log is read in chunks: memory for one chunk and the longest line,
  * however long the session has grown (open question 7). */
 #define READ_CHUNK 65536
@@ -598,6 +628,12 @@ static void handle(pt_rt *rt, const pt_fx *fx)
         break;
     case PT_FX_TOOL:
         pt_rt_run_tool(rt, fx);
+        break;
+    case PT_FX_SNAPSHOT:
+        pt_rt_snapshot(rt, fx);
+        break;
+    case PT_FX_RESTORE:
+        pt_rt_restore(rt, fx);
         break;
     case PT_FX_CANCEL:
         pt_rt_cancel_tool(rt, fx->cancel);

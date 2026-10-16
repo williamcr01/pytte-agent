@@ -1,6 +1,7 @@
 /* The built-in tools (section 13.3): read, write and edit, and the table
  * of them all. bash and bash_poll are in tools_bash.c, grep, find and ls
- * in tools_search.c, web_fetch in tools_web.c.
+ * in tools_search.c, web_fetch in tools_web.c, web_search in
+ * tools_websearch.c.
  *
  * read records a stamp (size, mtime, SHA-256) in the doc "reads:<path>";
  * edit refuses a file that changed since, so the model never edits text
@@ -19,8 +20,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define READ_BYTES (50u * 1024u) /* text a read shows at most */
-#define READ_LIMIT 2000 /* lines a read shows unless it asks for more */
+#define READ_BYTES PT_RT_READ_BYTES /* text a read shows at most */
+#define READ_LIMIT PT_RT_READ_LINES /* lines a read shows unless it asks for more */
 #define IMAGE_MAX 3932160u /* bytes: 5 MB in base64, Anthropic's limit */
 #define IMAGE_SIDE_MAX 8000u /* pixels */
 
@@ -31,6 +32,7 @@ typedef struct builtins {
     pt_buf spans; /* an edit's spans, reused */
     search *search; /* grep, find and ls */
     web *web;       /* web_fetch */
+    wsearch *wsearch; /* web_search */
 } builtins;
 
 /* ---- shared ---- */
@@ -123,7 +125,10 @@ static void hash_of(const char *p, size_t n, unsigned char out[32])
     pt_sha256_final(&s, out);
 }
 
-static bool mkdirs(const char *path)
+/* The directories of path; each one made is synced into its parent (best
+ * effort), so the file renamed into it later is reachable after a power
+ * loss. */
+bool pt_rt_mkdirs(const char *path)
 {
     char tmp[4096];
     char *p;
@@ -131,7 +136,9 @@ static bool mkdirs(const char *path)
     for (p = tmp + 1; *p; p++)
         if (*p == '/') {
             *p = 0;
-            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+            if (mkdir(tmp, 0777) == 0)
+                (void)pt_sys_sync_parent(tmp, true); /* made either way */
+            else if (errno != EEXIST)
                 return false;
             *p = '/';
         }
@@ -139,9 +146,10 @@ static bool mkdirs(const char *path)
 }
 
 /* Replace path atomically: a unique temporary file next to it, synced,
- * renamed over it. Keeps the old file's mode; new files honor the process
- * umask as for open(..., 0666). */
-static bool write_atomic(const char *path, const char *p, size_t n, const struct stat *expected)
+ * renamed over it, and the directory synced (best effort), so the result
+ * committed after it does not claim a change a power loss undid. Keeps the old file's
+ * mode; new files honor the process umask as for open(..., 0666). */
+bool pt_rt_write_atomic(const char *path, const char *p, size_t n, const struct stat *expected)
 {
     char tmp[4200];
     struct stat st;
@@ -172,7 +180,7 @@ static bool write_atomic(const char *path, const char *p, size_t n, const struct
             goto fail;
         off += (size_t)w;
     }
-    if (fchmod(fd, mode) != 0 || fsync(fd) != 0)
+    if (fchmod(fd, mode) != 0 || pt_sys_sync_fd(fd, false) != 0)
         goto fail;
     if (close(fd) != 0) {
         fd = -1;
@@ -189,8 +197,12 @@ static bool write_atomic(const char *path, const char *p, size_t n, const struct
     }
     /* A change after this check and before rename remains a small unavoidable
      * TOCTOU window without directory-level locking. */
-    if (rename(tmp, path) == 0)
+    if (rename(tmp, path) == 0) {
+        /* The new contents are in place: a failed sync is no failed write,
+         * and the caller stamps them so later edits are not refused. */
+        (void)pt_sys_sync_parent(path, true);
         return true;
+    }
 fail:
     saved = errno;
     if (fd >= 0)
@@ -369,6 +381,84 @@ static void read_image(builtins *b, pt_rt *rt, const pt_fx *fx, int fd, const st
     r.image = pt_strz(ref);
     r.image_mime = pt_strz(mime);
     pt_rt_tool_done(rt, fx->id, &r);
+}
+
+/* ---- images for a message ---- */
+
+/* The image in p: its type, or false with err saying why it cannot go. */
+static bool image_ok(const unsigned char *p, size_t n, const char **mime, char *err, size_t cap)
+{
+    uint32_t w = 0, h = 0;
+    if (!(*mime = pt_rt_image_type(p, n))) {
+        snprintf(err, cap, "not a PNG, JPEG, GIF or WebP image");
+        return false;
+    }
+    if (n > IMAGE_MAX) {
+        snprintf(err, cap, "this image is %llu bytes; at most %u go to the model", (unsigned long long)n, IMAGE_MAX);
+        return false;
+    }
+    if (pt_rt_image_size(p, n, *mime, &w, &h) && (w > IMAGE_SIDE_MAX || h > IMAGE_SIDE_MAX)) {
+        snprintf(err, cap, "this image is %ux%u pixels; providers take at most %u on a side", w, h, IMAGE_SIDE_MAX);
+        return false;
+    }
+    return true;
+}
+
+bool pt_rt_attach_bytes(pt_rt *rt, const void *p, size_t n, char ref[72], const char **mime, char *err, size_t cap)
+{
+    if (!image_ok((const unsigned char *)p, n, mime, err, cap))
+        return false;
+    if (!pt_rt_put_blob(rt, p, n, ref)) {
+        snprintf(err, cap, "cannot keep the image: the session's store holds no blobs, or writing failed");
+        return false;
+    }
+    return true;
+}
+
+int pt_rt_attach_file(pt_rt *rt, const char *path, char ref[72], const char **mime, char *err, size_t cap)
+{
+    unsigned char head[16];
+    struct stat st;
+    pt_buf img;
+    ssize_t got;
+    int fd, ret = -1;
+    if ((fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)) < 0)
+        return 0;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || (got = read(fd, head, sizeof head)) < 0 ||
+        !pt_rt_image_type(head, (size_t)got)) {
+        close(fd);
+        return 0;
+    }
+    if ((uint64_t)st.st_size > IMAGE_MAX) {
+        close(fd);
+        snprintf(err, cap, "this image is %llu bytes; at most %u go to the model", (unsigned long long)st.st_size,
+                 IMAGE_MAX);
+        return -1;
+    }
+    pt_buf_init(&img, pt_sys_allocator());
+    /* Its size, once; one byte more shows that it grew while being read. */
+    if (!pt_buf_reserve(&img, (size_t)st.st_size + 1) || lseek(fd, 0, SEEK_SET) != 0) {
+        snprintf(err, cap, "cannot read the image");
+        goto out;
+    }
+    for (;;) {
+        got = read(fd, img.p + img.n, (size_t)st.st_size + 1 - img.n);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        img.n += (size_t)got;
+        if (img.n > (size_t)st.st_size)
+            break;
+    }
+    if (got < 0 || img.n != (size_t)st.st_size)
+        snprintf(err, cap, "cannot read the image");
+    else
+        ret = pt_rt_attach_bytes(rt, img.p, img.n, ref, mime, err, cap) ? 1 : -1;
+out:
+    close(fd);
+    pt_buf_free(&img);
+    return ret;
 }
 
 /* Text: the lines from offset, at most limit of them and READ_BYTES of
@@ -562,11 +652,11 @@ static void t_write(void *ud, pt_rt *rt, const pt_fx *fx)
     text = pt_json_str(content, &b->k.ar);
     path = resolve(b, rel);
     existed = stat(path, &st) == 0;
-    if (!mkdirs(path)) {
+    if (!pt_rt_mkdirs(path)) {
         fail(rt, fx->id, "cannot create the directories of", path);
         return;
     }
-    if (!write_atomic(path, text.p, text.n, NULL)) {
+    if (!pt_rt_write_atomic(path, text.p, text.n, NULL)) {
         fail(rt, fx->id, "cannot write", path);
         return;
     }
@@ -808,7 +898,7 @@ static void t_edit(void *ud, pt_rt *rt, const pt_fx *fx)
         pt_rt_kit_done(rt, fx->id, PT_S("The file was modified while editing. Read it again, then edit it."), true);
         return;
     }
-    if (!write_atomic(path, b->k.out.p, b->k.out.n, &st) || stat(path, &st) != 0) {
+    if (!pt_rt_write_atomic(path, b->k.out.p, b->k.out.n, &st) || stat(path, &st) != 0) {
         fail(rt, fx->id, "cannot write", path);
         return;
     }
@@ -892,6 +982,7 @@ static void builtins_free(void *ud)
     pt_arena_free(&b->k.ar);
     pt_rt_search_free(b->search);
     pt_rt_web_free(b->web);
+    pt_rt_wsearch_free(b->wsearch);
     free(b);
 }
 
@@ -899,17 +990,19 @@ bool pt_rt_add_builtins(pt_rt *rt)
 {
     builtins *b = (builtins *)calloc(1, sizeof *b);
     const pt_ai_catalog *cat = rt->c.catalog ? rt->c.catalog : pt_ai_builtin_catalog();
-    pt_rt_tool t[9], bt[2];
+    pt_rt_tool t[10], bt[2];
     uint32_t i, k, n = 0;
     if (!b || !(b->k.io = (char *)malloc(RT_TOOL_IO)) ||
-        !(b->k.unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *b->k.unset)) ||
+        !(b->k.unset = (const char **)calloc((size_t)cat->nproviders * 4 + 3, sizeof *b->k.unset)) ||
         !(b->search = pt_rt_search_new(rt)) || !(b->web = pt_rt_web_new(rt)) ||
+        !(b->wsearch = pt_rt_wsearch_new(rt)) ||
         !(b->bash = pt_rt_bash_new(&b->k))) {
         if (b) {
             free(b->k.io);
             free(b->k.unset);
             pt_rt_search_free(b->search);
             pt_rt_web_free(b->web);
+            pt_rt_wsearch_free(b->wsearch);
         }
         free(b);
         return false;
@@ -922,6 +1015,8 @@ bool pt_rt_add_builtins(pt_rt *rt)
     for (i = 0; i < cat->nproviders; i++)
         for (k = 0; k < 4 && cat->providers[i].key_env[k]; k++)
             b->k.unset[n++] = cat->providers[i].key_env[k];
+    for (k = 0; pt_rt_search_env[k]; k++)
+        b->k.unset[n++] = pt_rt_search_env[k];
     rt->builtin.ud = b;
     rt->builtin.free = builtins_free;
     rt->builtin.idle = builtins_idle;
@@ -946,6 +1041,7 @@ bool pt_rt_add_builtins(pt_rt *rt)
     t[2].def.description = PT_S("Write a whole file, creating it and its directories if needed.");
     t[2].def.schema = PT_S(write_schema);
     t[2].def.replay = PT_REPLAY_SAFE;
+    t[2].def.snapshot = true;
     t[2].run = t_write;
     t[3].def.name = PT_S("edit");
     t[3].def.description = PT_S(
@@ -954,13 +1050,15 @@ bool pt_rt_add_builtins(pt_rt *rt)
         "not overlap: make all changes to one file in one call. The file must have been read since it "
         "last changed.");
     t[3].def.schema = PT_S(edit_schema);
+    t[3].def.snapshot = true;
     t[3].run = t_edit;
     pt_rt_bash_tools(b->bash, bt);
     t[0] = bt[0];
     t[4] = bt[1];
     pt_rt_search_tools(b->search, t + 5);
     pt_rt_web_tool(b->web, t + 8);
-    for (i = 0; i < 9; i++)
+    pt_rt_wsearch_tool(b->wsearch, t + 9);
+    for (i = 0; i < 10; i++)
         if (!pt_rt_tool_add(rt, &t[i]))
             return false;
     return true;

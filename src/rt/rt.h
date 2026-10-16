@@ -25,6 +25,13 @@ typedef struct pt_rt_cfg {
     const pt_ai_catalog *catalog;
     /* The session's ID, for {session} in MCP arguments (copied); NULL: none. */
     const char *session;
+    /* web_search: the API key for a backend ("exa", "parallel") into out;
+     * false when there is none. Called for each search. NULL: no keys. */
+    bool (*search_key)(void *ud, const char *backend, char *out, size_t cap);
+    void *search_ud;
+    /* The backend to use ("exa", "parallel"); NULL or empty: the first with
+     * a key, in that order. Must outlive the runtime. */
+    const char *search_backend;
 } pt_rt_cfg;
 
 pt_rt *pt_rt_new(const pt_rt_cfg *c, pt_agent *a);
@@ -42,6 +49,10 @@ void pt_rt_use_worker(pt_rt *rt, pt_worker *worker);
 /* Recovery (section 6.4): read the log into the agent, cut a torn tail,
  * hand over live files. False with err when the log is corrupt. */
 bool pt_rt_recover(pt_rt *rt, char *err, size_t cap);
+/* Once the session is ours (pt_open), before any tool runs: stop the
+ * process groups a dead owner left running, and forget them. A group
+ * another host started is left to it. */
+void pt_rt_stop_orphans(pt_rt *rt);
 
 /* ---- tools (section 13) ----
  * The runtime keeps a registry of tools and answers the core's GATE and
@@ -76,7 +87,8 @@ void pt_rt_tool_remove(pt_rt *rt, pt_str name);
 /* Whether a tool of that name is registered. */
 bool pt_rt_tool_has(pt_rt *rt, pt_str name);
 /* read, write, edit (tools_builtin.c); bash, bash_poll (tools_bash.c);
- * grep, find, ls (tools_search.c); web_fetch (tools_web.c). */
+ * grep, find, ls (tools_search.c); web_fetch (tools_web.c); web_search
+ * (tools_websearch.c). */
 bool pt_rt_add_builtins(pt_rt *rt);
 
 /* A bash command that went to the background. command lives until the
@@ -96,8 +108,17 @@ uint32_t pt_rt_backgrounds(pt_rt *rt, pt_rt_background *out, uint32_t max);
  * two seconds later); a later bash_poll reads what they printed.
  * Returns how many. */
 uint32_t pt_rt_backgrounds_stop(pt_rt *rt);
-/* The registered tools, for a new session's epoch. */
+/* The registered tools that are on, for a new epoch: what the model sees.
+ * Valid until the next call that adds, removes or turns off a tool. */
 const pt_tool_def *pt_rt_tool_defs(pt_rt *rt, uint32_t *n);
+/* Every registered tool, on or off, in the same order and validity. */
+const pt_tool_def *pt_rt_tool_all(pt_rt *rt, uint32_t *n);
+/* Turn a tool off, or back on, by name: registered or not yet (an MCP
+ * tool may come later). An off tool is left out of the tools the next
+ * epoch freezes, and calls of it are denied from now on. False when out
+ * of memory (nothing changed). */
+bool pt_rt_tool_set_off(pt_rt *rt, pt_str name, bool off);
+bool pt_rt_tool_off(const pt_rt *rt, pt_str name);
 
 /* Output as it comes: shown live, kept for the result. */
 void pt_rt_tool_output(pt_rt *rt, uint32_t fx, const void *p, size_t n);
@@ -121,6 +142,34 @@ void pt_rt_tool_done(pt_rt *rt, uint32_t fx, const pt_rt_out *r);
 /* Store n bytes as a blob: true with ref set ("sha256:<hex>", NUL
  * terminated). False when the store keeps no blobs or writing failed. */
 bool pt_rt_put_blob(pt_rt *rt, const void *p, size_t n, char ref[72]);
+/* An image to attach to a user input, stored as a blob with read's limits
+ * (bytes, pixels). pt_rt_attach_file: 1 attached (ref and mime set; mime is
+ * static); 0 the file is not an image providers take; -1 it is one that
+ * cannot be attached (err says why). pt_rt_attach_bytes is the same for
+ * bytes already in memory (the clipboard): true, or false with err. */
+int pt_rt_attach_file(pt_rt *rt, const char *path, char ref[72], const char **mime, char *err, size_t cap);
+bool pt_rt_attach_bytes(pt_rt *rt, const void *p, size_t n, char ref[72], const char **mime, char *err, size_t cap);
+
+/* The paths under the session's directory that find would list (it skips
+ * .git and what .gitignore ignores), at most max, appended to out one per
+ * line, relative, directories ending in "/". Returns how many; *cut says the
+ * walk stopped early (max, or its own limit). */
+uint32_t pt_rt_walk_paths(pt_rt *rt, uint32_t max, pt_buf *out, bool *cut);
+
+/* What "@path" adds to a message, appended to out: a text file's contents
+ * (at most what read shows, with a note when cut) or a directory's listing,
+ * in a <file> or <directory> block. path is relative to the session's
+ * directory, or absolute; "~/" is the home directory. 1 added; 0 there is no
+ * such file (the @ was plain text); -1 it exists but cannot be added (err
+ * says why). */
+int pt_rt_mention_path(pt_rt *rt, pt_str path, pt_buf *out, char *err, size_t cap);
+
+/* A process group a tool started (its pt_proc_mark), which must not
+ * outlive this process: noted in the store while it may run, so that if
+ * this process dies first the next owner stops it (pt_rt_stop_orphans).
+ * Ended: once nothing of it runs. */
+void pt_rt_proc_started(pt_rt *rt, int64_t group, pt_str mark);
+void pt_rt_proc_ended(pt_rt *rt, int64_t group);
 /* The agent the runtime drives (for a tool's lookups: pt_doc, the cwd). */
 pt_agent *pt_rt_agent(pt_rt *rt);
 /* pt_opts.blob for a store (blob_ud: the pt_store). */
@@ -325,12 +374,80 @@ void pt_rt_set_perm(pt_rt *rt, pt_perm_mode mode);
  * string argument) starts with prefix as a word, or every call when prefix
  * is empty. */
 bool pt_rt_allow(pt_rt *rt, pt_str tool, pt_str prefix);
+
+/* Rules from config (section 15.5): "tool" or "tool(pattern)", with * in
+ * the tool name and in patterns matching any text:
+ *   bash(git diff:*)   every command of the line starts with the words "git diff"
+ *   bash(git status)   every command of the line is exactly that
+ *   web_fetch(*.test)  the URL's host; other tools: the first string argument
+ *   mcp__github__*     every call of the tools matching the name
+ * A deny rule matches a call when any command of a bash line matches it; it
+ * beats allow rules and the mode, except that read-only stays read-only.
+ * A project's allow rules apply only once pt_rt_rules_trust says so. */
+typedef enum { PT_RULE_SESSION, PT_RULE_USER, PT_RULE_PROJECT } pt_rule_src;
+/* Whether spec is a rule; why says what is wrong when not (static text). */
+bool pt_rule_check(pt_str spec, const char **why);
+/* Add a rule (copied). False when spec is not a rule, or out of memory. */
+bool pt_rt_rule_add(pt_rt *rt, bool deny, pt_str spec, pt_rule_src src);
+/* Drop the rules from config (user and project), keeping the session's. */
+void pt_rt_rules_drop_config(pt_rt *rt);
+/* Whether the project's allow rules apply (deny rules always do). */
+void pt_rt_rules_trust(pt_rt *rt, bool trusted);
+
+typedef struct pt_rt_rule_info {
+    pt_str spec;
+    bool deny;
+    pt_rule_src src;
+    bool active; /* false: a project's allow rule that is not trusted */
+} pt_rt_rule_info;
+/* The rules in the order they were added; returns how many there are (up
+ * to max are written). The specs live until a rule is added. */
+uint32_t pt_rt_rules(pt_rt *rt, pt_rt_rule_info *out, uint32_t max);
 /* The first string argument of a call ("ls -la", "src/a.c"), or empty;
  * allocated in a. */
 pt_str pt_rt_gist(pt_str args, pt_arena *a);
 /* The host of a URL ("docs.python.org", "[::1]"), or empty. web_fetch's
  * allow rules name hosts: "allow web_fetch docs.python.org". */
 pt_str pt_rt_url_host(pt_str url);
+
+/* ---- rewind (section 8.6) ----
+ * write and edit save the file they are about to change (a blob of the
+ * session, named by the tool task's intent). Rewinding goes back to before
+ * a user message: the host reads the log (scan), plans which files to put
+ * back, and hands the plan to the core (pt_rewind), whose task restores
+ * them. Then a fork of the session that ends just before the message
+ * (cli_session_fork) continues the conversation. */
+typedef struct pt_rt_rewind pt_rt_rewind;
+
+typedef struct pt_rt_point {
+    uint32_t entry; /* the user message's entry */
+    uint64_t keep;  /* bytes of the log before the commit that placed it */
+    pt_str text;    /* the message; valid until the scan is freed */
+    /* It was submitted while a run went on and placed later: the log
+     * cannot end just before it without cutting that run. Not rewindable. */
+    bool queued;
+} pt_rt_point;
+
+/* Read the session's log for its user messages and the files its calls
+ * saved. The session should be idle. NULL with err on failure. */
+pt_rt_rewind *pt_rt_rewind_scan(pt_rt *rt, char *err, size_t cap);
+void pt_rt_rewind_free(pt_rt_rewind *r);
+/* The messages, oldest first. */
+const pt_rt_point *pt_rt_rewind_points(const pt_rt_rewind *r, uint32_t *n);
+
+typedef struct pt_rt_plan {
+    pt_restore *files; /* what to put back; the files that already are as they were are left out */
+    bool *changed;     /* per file: it was changed outside pytte since its last write */
+    uint32_t n, nchanged;
+    uint32_t risky;    /* calls since the message that rewind cannot undo (bash, MCP tools) */
+    pt_arena ar;       /* owns the above */
+} pt_rt_plan;
+
+/* The files to put back to go before the user message `entry`: the state
+ * of each at its first change after the message. False when there is no
+ * such message. Free with pt_rt_plan_free. */
+bool pt_rt_rewind_plan(pt_rt *rt, const pt_rt_rewind *r, uint32_t entry, pt_rt_plan *out);
+void pt_rt_plan_free(pt_rt_plan *p);
 
 typedef enum {
     PT_RT_IDLE,    /* nothing left to do */

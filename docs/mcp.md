@@ -103,7 +103,8 @@ the server marks it read-only), runs in `auto`, and is refused in
   in order, the last taking the rest, or `name=value`), and send the
   prompt's text as the message.
 - **Resources**: `@<server>:<uri>` anywhere in a message adds that
-  resource's contents; typing `@` lists them.
+  resource's contents; typing `@` lists them, with the files under the
+  directory ([mentions.md](mentions.md)).
 - **OAuth**: remote servers that ask for a login get one (discovery,
   dynamic client registration or the configured client, PKCE, and a
   browser that answers to 127.0.0.1): `/mcp login <name>` or

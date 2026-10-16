@@ -1161,6 +1161,206 @@ static void t_ls(void *ud, pt_rt *rt, const pt_fx *fx)
     finish(s, rt, fx->id);
 }
 
+/* ---- mentions: the paths of a menu, and what a path adds ---- */
+
+typedef struct paths_state {
+    pt_buf *out;
+    uint32_t n, max;
+    bool full;
+} paths_state;
+
+static bool paths_visit(void *ud, walk *w, const char *abs, size_t len, bool is_dir)
+{
+    paths_state *p = (paths_state *)ud;
+    (void)len;
+    if (abs[w->root] == 0) /* the root itself is not a result */
+        return true;
+    if (p->n == p->max) {
+        p->full = true;
+        return false;
+    }
+    put_shown(p->out, w, abs);
+    if (is_dir)
+        pt_buf_putc(p->out, '/');
+    pt_buf_putc(p->out, '\n');
+    p->n++;
+    return true;
+}
+
+uint32_t pt_rt_walk_paths(pt_rt *rt, uint32_t max, pt_buf *out, bool *cut)
+{
+    pt_str cwd = pt_session_cwd(pt_rt_agent(rt));
+    char abs[PATH_MAX], dir[PATH_MAX];
+    paths_state p;
+    search *s;
+    walk w;
+    *cut = false;
+    snprintf(dir, sizeof dir, "%.*s", (int)cwd.n, cwd.p);
+    if (!realpath(cwd.n ? dir : ".", abs) || !(s = pt_rt_search_new(rt)))
+        return 0;
+    memset(&w, 0, sizeof w);
+    w.s = s;
+    w.root = strlen(abs);
+    pt_buf_putz(&s->path, abs);
+    pt_buf_putc(&s->path, 0);
+    p.out = out;
+    p.n = 0;
+    p.max = max;
+    p.full = false;
+    if (!s->path.oom)
+        walk_tree(&w, paths_visit, &p);
+    *cut = p.full || w.capped;
+    pt_rt_search_free(s);
+    return p.n;
+}
+
+/* A text file's start, cut at a whole line to what read shows, with a
+ * note when cut. Read straight into out, whose capacity is reserved once. */
+static int mention_file(const char *path, const struct stat *st, pt_buf *out, char *err, size_t cap)
+{
+    size_t start = out->n, n = 0, keep, lines = 0, i;
+    bool more;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0) {
+        snprintf(err, cap, "cannot open %s: %s", path, strerror(errno));
+        return -1;
+    }
+    if (!pt_buf_reserve(out, PT_RT_READ_BYTES + 1)) {
+        close(fd);
+        snprintf(err, cap, "out of memory");
+        return -1;
+    }
+    while (n < PT_RT_READ_BYTES + 1) {
+        ssize_t got = read(fd, out->p + start + n, PT_RT_READ_BYTES + 1 - n);
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got <= 0)
+            break;
+        n += (size_t)got;
+    }
+    close(fd);
+    if (pt_rt_image_type((const unsigned char *)out->p + start, n)) {
+        out->n = start;
+        pt_buf_putz(out, "[an image: paste its path to attach it]\n");
+        return 1;
+    }
+    if (memchr(out->p + start, 0, n < BINARY_PROBE ? n : BINARY_PROBE)) {
+        out->n = start;
+        pt_buf_putz(out, "[a binary file, ");
+        pt_buf_u64(out, (uint64_t)st->st_size);
+        pt_buf_putz(out, " bytes: not included]\n");
+        return 1;
+    }
+    more = n > PT_RT_READ_BYTES;
+    if (more)
+        n = PT_RT_READ_BYTES;
+    keep = n;
+    for (i = 0; i < n; i++) { /* the line limit */
+        if (out->p[start + i] != '\n' || ++lines < PT_RT_READ_LINES)
+            continue;
+        if (i + 1 < n || more)
+            more = true;
+        keep = i + 1;
+        break;
+    }
+    if (more && keep == n) { /* the byte limit: whole lines, or a long line's start */
+        while (keep && out->p[start + keep - 1] != '\n')
+            keep--;
+        if (!keep) {
+            keep = n;
+            while (keep && ((unsigned char)out->p[start + keep] & 0xC0) == 0x80)
+                keep--;
+        }
+    }
+    out->n = start + keep;
+    if (!keep)
+        pt_buf_putz(out, "(the file is empty)\n");
+    else if (out->p[out->n - 1] != '\n')
+        pt_buf_putc(out, '\n');
+    if (more)
+        pt_buf_putz(out, "[cut: the file goes on; a mention adds at most 2000 lines or 50 KiB. Read it for the rest]\n");
+    return 1;
+}
+
+/* A directory's entries, one per line, directories ending in "/". */
+static int mention_dir(pt_rt *rt, const char *abs, pt_str path, pt_buf *out, char *err, size_t cap)
+{
+    search *s = pt_rt_search_new(rt);
+    struct stat st;
+    long n, i;
+    if (!s)
+        return -1;
+    pt_buf_putz(&s->path, abs);
+    pt_buf_putc(&s->path, 0);
+    if (s->path.oom || (n = list_dir(s)) < 0) {
+        snprintf(err, cap, "cannot list %.*s: %s", (int)path.n, path.p, strerror(errno));
+        pt_rt_search_free(s);
+        return -1;
+    }
+    for (i = 0; i < n && i < LS_LIMIT; i++) {
+        size_t at = s->path.n - 1;
+        const char *name = nth(s, (size_t)i);
+        s->path.n = at;
+        pt_buf_putc(&s->path, '/');
+        pt_buf_putz(&s->path, name);
+        pt_buf_putc(&s->path, 0);
+        pt_buf_putz(out, name);
+        if (stat(s->path.p, &st) == 0 && S_ISDIR(st.st_mode))
+            pt_buf_putc(out, '/');
+        pt_buf_putc(out, '\n');
+        s->path.n = at + 1;
+        s->path.p[at] = 0;
+    }
+    if (!n) {
+        pt_buf_putz(out, "(empty directory)\n");
+    } else if (i < n) {
+        pt_buf_putc(out, '[');
+        pt_buf_u64(out, (uint64_t)(n - i));
+        pt_buf_putz(out, " more entries not listed]\n");
+    }
+    pt_rt_search_free(s);
+    return 1;
+}
+
+int pt_rt_mention_path(pt_rt *rt, pt_str path, pt_buf *out, char *err, size_t cap)
+{
+    pt_str cwd = pt_session_cwd(pt_rt_agent(rt));
+    char joined[PATH_MAX + 2], abs[PATH_MAX];
+    const char *home = getenv("HOME");
+    size_t mark = out->n;
+    struct stat st;
+    bool isdir;
+    int ret;
+    if (!path.n || path.n >= PATH_MAX)
+        return 0;
+    if (path.n >= 2 && path.p[0] == '~' && path.p[1] == '/' && home)
+        snprintf(joined, sizeof joined, "%s/%.*s", home, (int)path.n - 2, path.p + 2);
+    else if (path.p[0] != '/' && cwd.n)
+        snprintf(joined, sizeof joined, "%.*s/%.*s", (int)cwd.n, cwd.p, (int)path.n, path.p);
+    else
+        snprintf(joined, sizeof joined, "%.*s", (int)path.n, path.p);
+    if (!realpath(joined, abs) || stat(abs, &st) != 0)
+        return 0;
+    isdir = S_ISDIR(st.st_mode);
+    if (!isdir && !S_ISREG(st.st_mode)) {
+        snprintf(err, cap, "%.*s is not a regular file or a directory", (int)path.n, path.p);
+        return -1;
+    }
+    pt_buf_putz(out, isdir ? "<directory path=\"" : "<file path=\"");
+    pt_buf_puts(out, path);
+    pt_buf_putz(out, "\">\n");
+    ret = isdir ? mention_dir(rt, abs, path, out, err, cap) : mention_file(abs, &st, out, err, cap);
+    if (ret > 0)
+        pt_buf_putz(out, isdir ? "</directory>" : "</file>");
+    else
+        out->n = mark;
+    if (out->oom && ret > 0) {
+        snprintf(err, cap, "out of memory");
+        return -1;
+    }
+    return ret;
+}
+
 /* ---- the table ---- */
 
 static const char grep_schema[] =

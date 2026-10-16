@@ -1,0 +1,9 @@
+{
+  "chunk": 8,
+  "delay_ms": 8,
+  "turns": [
+    {"content": [{"type": "text", "text": "Hello from the faux provider! Nothing here touched the network."}]},
+    {"content": [{"type": "text", "text": "Second answer from faux."}]},
+    {"content": [{"type": "text", "text": "Third answer from faux."}]}
+  ]
+}

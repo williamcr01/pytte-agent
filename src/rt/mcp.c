@@ -1124,7 +1124,7 @@ bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_serv
         m->host = *host;
     pt_arena_init(&m->ar, pt_sys_allocator(), 4096);
     m->io = (char *)malloc(MCP_IO_CHUNK);
-    m->unset = (const char **)calloc((size_t)cat->nproviders * 4 + 1, sizeof *m->unset);
+    m->unset = (const char **)calloc((size_t)cat->nproviders * 4 + 3, sizeof *m->unset);
     if (!m->io || !m->unset) {
         mcp_free(m);
         return false;
@@ -1132,6 +1132,8 @@ bool pt_rt_mcp_setup(pt_rt *rt, const pt_rt_mcp_host *host, const pt_rt_mcp_serv
     for (i = 0; i < cat->nproviders; i++)
         for (k = 0; k < 4 && cat->providers[i].key_env[k]; k++)
             m->unset[nu++] = cat->providers[i].key_env[k];
+    for (k = 0; pt_rt_search_env[k]; k++)
+        m->unset[nu++] = pt_rt_search_env[k];
     add_srvs(m, servers, n, &ok);
     if (!ok) {
         mcp_free(m);

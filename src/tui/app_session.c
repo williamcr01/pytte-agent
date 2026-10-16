@@ -91,6 +91,7 @@ void app_close_session(app *a)
         return;
     while (a->queue.xs) /* the runtime goes: their answers never come */
         app_xreq_drop(a, a->queue.xs);
+    app_rewind_drop(a); /* it borrowed the runtime */
     empty = !a->sess.keep_on_quit && app_session_empty(a);
     app_save_draft(a);
     if (pt_fatal(a->s.a) == PT_FATAL_STORAGE)
@@ -110,6 +111,7 @@ void app_switch_session(app *a, const char *id)
     char back[64];
     snprintf(back, sizeof back, "%s", a->s.id);
     a->o.continue_current = false;
+    app_model_for(a, id, a->o.fork);
     snprintf(a->sess.fallback, sizeof a->sess.fallback, "%s", back);
     a->sess.fallback_created = a->sess.created;
     if (!app_open_session(a, id)) {
@@ -206,6 +208,7 @@ void app_finish_session(app *a)
         return;
     a->sess.opening = NULL;
     if (rc) {
+        pt_buf_reset(&a->rw.text);
         app_group_close(a);
         app_out_note(a, &a->lines, TUI_RED, pt_strz(a->sess.err));
         a->pace.urgent = true;
@@ -224,6 +227,7 @@ void app_finish_session(app *a)
     }
     a->open = true;
     a->sess.fallback[0] = 0;
+    app_perms_note(a);
     {
         char name[CLI_NAME_MAX + 1], dir[4096];
         pt_str cwd = pt_session_cwd(a->s.a);
@@ -273,11 +277,19 @@ void app_finish_session(app *a)
         }
     }
     free(text);
+    if (a->rw.text.n) { /* a rewind's fork: the message is back to be sent again */
+        tui_input_set(&a->in, pt_buf_str(&a->rw.text));
+        pt_buf_reset(&a->rw.text);
+    }
     app_set_config(a);
     app_out_tail(a);
     if (cli_session_note(&a->s)[0])
         app_out_z(a, TUI_DIM, cli_session_note(&a->s));
     app_queued_submit(a);
+    if (a->menu.tools_pending && !a->quit && a->open) {
+        a->menu.tools_pending = false;
+        app_tools_open(a);
+    }
     if (a->pager_pending && !a->quit && a->open) {
         a->pager_pending = false;
         app_pager(a);

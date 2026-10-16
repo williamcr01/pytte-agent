@@ -15,7 +15,8 @@
 #include <unistd.h>
 
 static const char *const keys[CFG_N] = {"model",     "reasoning",        "tui.thinking",     "tui.symbols",
-                                        "tui.pager", "permissions.mode", "compaction.model", "skills.auto"};
+                                        "tui.pager", "permissions.mode", "compaction.model", "skills.auto",
+                                        "search.backend"};
 
 void cli_config_dir(char *out, size_t cap)
 {
@@ -93,6 +94,16 @@ static bool load_file(cli_config *c, const char *path, const char *src, char *wa
                     c->src[k] = src;
                 }
             }
+        }
+        if (!warn[0])
+            cli_perms_check(j, path, warn, cap);
+        {
+            const pt_json *tools = pt_json_get(j, "tools"), *m;
+            for (m = pt_json_is(tools, PT_J_OBJ) ? tools->child : NULL; m; m = m->next)
+                if ((pt_json_is(m, PT_J_TRUE) || pt_json_is(m, PT_J_FALSE)) &&
+                    !cli_tool_set(c, m->key, pt_json_is(m, PT_J_TRUE), src) && !warn[0])
+                    snprintf(warn, cap, "%s: tools.%.*s ignored", path, (int)(m->key.n > 100 ? 100 : m->key.n),
+                             m->key.p);
         }
         if (strcmp(src, "user") == 0)
             cli_catalog_load(pt_json_get(j, "providers"), path, warn, cap);
@@ -311,7 +322,7 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
             break;
         done += (size_t)w;
     }
-    if (done < bytes.n || fchmod(fd, mode) != 0 || fsync(fd) != 0) {
+    if (done < bytes.n || fchmod(fd, mode) != 0 || pt_sys_sync_fd(fd, false) != 0) {
         snprintf(err, cap, "%s: %s", tmp, strerror(errno));
         close(fd);
         unlink(tmp);
@@ -323,6 +334,9 @@ bool cli_write_atomic(const char *path, pt_str bytes, char *err, size_t cap)
         unlink(tmp);
         return false;
     }
+    /* Else a power loss may undo the rename; but the file has changed, so
+     * a failure here is no failure to write it. */
+    (void)pt_sys_sync_parent(path, true);
     return true;
 }
 
@@ -334,11 +348,12 @@ bool cli_config_save(cli_config *c, int k, const char *v, char *err, size_t cap)
     return cli_config_write(c->user_path, k, v, err, cap);
 }
 
-bool cli_config_write(const char *path, int k, const char *v, char *err, size_t cap)
+/* Set key to value (JSON) in the file at path. */
+static bool write_key(const char *path, const char *key, pt_str value, char *err, size_t cap)
 {
     size_t n = 0;
     char *text;
-    pt_buf value, out;
+    pt_buf out;
     bool ok;
     errno = 0;
     text = pt_sys_read_file(path, &n);
@@ -346,16 +361,8 @@ bool cli_config_write(const char *path, int k, const char *v, char *err, size_t 
         snprintf(err, cap, "cannot read %s: %s", path, strerror(errno));
         return false;
     }
-    pt_buf_init(&value, pt_sys_allocator());
     pt_buf_init(&out, pt_sys_allocator());
-    pt_json_quote(&value, pt_strz(v));
-    if (value.oom) {
-        snprintf(err, cap, "out of memory saving setting");
-        ok = false;
-        goto done;
-    }
-    ok = cli_json_set(text ? (pt_str){text, n} : PT_S("{}\n"), keys[k], pt_buf_str(&value), &out, err,
-                      cap);
+    ok = cli_json_set(text ? (pt_str){text, n} : PT_S("{}\n"), key, value, &out, err, cap);
     if (!ok) { /* never overwrite a file that does not parse */
         char why[256];
         snprintf(why, sizeof why, "%s", err);
@@ -363,11 +370,126 @@ bool cli_config_write(const char *path, int k, const char *v, char *err, size_t 
     } else {
         ok = cli_write_atomic(path, pt_buf_str(&out), err, cap);
     }
-done:
-    pt_buf_free(&value);
     pt_buf_free(&out);
     free(text);
     return ok;
+}
+
+bool cli_config_write(const char *path, int k, const char *v, char *err, size_t cap)
+{
+    pt_buf value;
+    bool ok;
+    pt_buf_init(&value, pt_sys_allocator());
+    pt_json_quote(&value, pt_strz(v));
+    if ((ok = !value.oom))
+        ok = write_key(path, keys[k], pt_buf_str(&value), err, cap);
+    else
+        snprintf(err, cap, "out of memory saving setting");
+    pt_buf_free(&value);
+    return ok;
+}
+
+/* ---- tools ---- */
+
+static const char *const tools_off_by_default[] = {"web_fetch", "web_search"};
+/* A tool that only serves another is on and off with it. */
+static const struct {
+    const char *tool, *follower;
+} tool_pairs[] = {{"bash", "bash_poll"}};
+
+const char *cli_tool_leader(pt_str name)
+{
+    size_t i;
+    for (i = 0; i < sizeof tool_pairs / sizeof tool_pairs[0]; i++)
+        if (pt_str_eqz(name, tool_pairs[i].follower))
+            return tool_pairs[i].tool;
+    return NULL;
+}
+
+const char *cli_tool_follower(pt_str name)
+{
+    size_t i;
+    for (i = 0; i < sizeof tool_pairs / sizeof tool_pairs[0]; i++)
+        if (pt_str_eqz(name, tool_pairs[i].tool))
+            return tool_pairs[i].follower;
+    return NULL;
+}
+
+const cli_tool_cfg *cli_tool_entry(const cli_config *c, pt_str name)
+{
+    uint32_t i;
+    for (i = 0; i < c->ntools; i++)
+        if (pt_str_eqz(name, c->tools[i].name))
+            return &c->tools[i];
+    return NULL;
+}
+
+bool cli_tool_on(const cli_config *c, pt_str name)
+{
+    const cli_tool_cfg *t = cli_tool_entry(c, name);
+    size_t i;
+    if (cli_tool_leader(name))
+        return cli_tool_on(c, pt_strz(cli_tool_leader(name)));
+    if (t)
+        return t->on;
+    for (i = 0; i < sizeof tools_off_by_default / sizeof tools_off_by_default[0]; i++)
+        if (pt_str_eqz(name, tools_off_by_default[i]))
+            return false;
+    return true;
+}
+
+bool cli_tool_set(cli_config *c, pt_str name, bool on, const char *src)
+{
+    cli_tool_cfg *t = (cli_tool_cfg *)cli_tool_entry(c, name);
+    if (!name.n || name.n >= sizeof c->tools[0].name || memchr(name.p, '.', name.n) || memchr(name.p, 0, name.n))
+        return false;
+    if (!t) {
+        if (c->ntools == CLI_TOOLS_MAX)
+            return false;
+        t = &c->tools[c->ntools++];
+        memcpy(t->name, name.p, name.n);
+        t->name[name.n] = 0;
+    }
+    t->on = on;
+    t->src = src;
+    return true;
+}
+
+/* Append "name\n"; CLI_TOOLS_OFF_CAP holds every name there can be. */
+static void put_name(char *out, size_t *n, const char *name)
+{
+    size_t len = strlen(name);
+    if (*n + len + 2 > CLI_TOOLS_OFF_CAP)
+        return;
+    memcpy(out + *n, name, len);
+    out[*n + len] = '\n';
+    *n += len + 1;
+    out[*n] = 0;
+}
+
+void cli_tools_off(const cli_config *c, char out[CLI_TOOLS_OFF_CAP])
+{
+    size_t i, n = 0;
+    out[0] = 0;
+    for (i = 0; i < sizeof tools_off_by_default / sizeof tools_off_by_default[0]; i++)
+        if (!cli_tool_entry(c, pt_strz(tools_off_by_default[i])))
+            put_name(out, &n, tools_off_by_default[i]);
+    for (i = 0; i < c->ntools; i++)
+        if (!c->tools[i].on)
+            put_name(out, &n, c->tools[i].name);
+    for (i = 0; i < sizeof tool_pairs / sizeof tool_pairs[0]; i++)
+        if (!cli_tool_on(c, pt_strz(tool_pairs[i].tool)))
+            put_name(out, &n, tool_pairs[i].follower);
+}
+
+bool cli_config_write_tool(const char *path, const char *name, bool on, char *err, size_t cap)
+{
+    char key[160];
+    if (strchr(name, '.') || snprintf(key, sizeof key, "tools.%s", name) >= (int)sizeof key) {
+        snprintf(err, cap, "not saved: %.100s cannot be a config key", name);
+        return false;
+    }
+    return write_key(path, key, on ? PT_S("true") : PT_S("false"), err, cap);
 }
 
 /* ---- API keys (auth.json) ---- */
@@ -602,6 +724,53 @@ bool cli_auth_save(const char *provider, pt_str key, char *err, size_t cap)
     pt_buf_free(&out);
     free(text);
     return ok;
+}
+
+const char *const cli_search_backends[2] = {"exa", "parallel"};
+
+const char *cli_search_env(const char *backend)
+{
+    return strcmp(backend, "exa") == 0 ? "EXA_API_KEY" : strcmp(backend, "parallel") == 0 ? "PARALLEL_API_KEY" : NULL;
+}
+
+/* "search:<backend>", the member of auth.json. */
+static bool search_slot(const char *backend, char out[32])
+{
+    return cli_search_env(backend) && snprintf(out, 32, "search:%s", backend) < 32;
+}
+
+const char *cli_search_saved(const char *backend)
+{
+    char slot[32];
+    return search_slot(backend, slot) ? cli_auth_key(slot) : NULL;
+}
+
+bool cli_search_save(const char *backend, pt_str key, char *err, size_t cap)
+{
+    char slot[32];
+    if (!search_slot(backend, slot)) {
+        snprintf(err, cap, "not a search backend: %s", backend);
+        return false;
+    }
+    return cli_auth_save(slot, key, err, cap);
+}
+
+bool cli_search_key(void *ud, const char *backend, char *out, size_t cap)
+{
+    const char *env = cli_search_env(backend), *e, *saved;
+    (void)ud;
+    if (!env)
+        return false;
+    e = getenv(env);
+    if (e && *e && strlen(e) < cap) {
+        memcpy(out, e, strlen(e) + 1);
+        return true;
+    }
+    saved = cli_search_saved(backend);
+    if (!saved || strlen(saved) >= cap)
+        return false;
+    memcpy(out, saved, strlen(saved) + 1);
+    return true;
 }
 
 bool cli_auth_login(const char *provider, bool reload, cli_login *out)
