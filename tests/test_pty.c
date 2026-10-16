@@ -653,7 +653,7 @@ static void test_resize_while_streaming(void)
     pty_free(&p);
 }
 
-/* Esc Esc interrupts; input sent meanwhile is queued, then answered. */
+/* Esc Esc interrupts; a follow-up (Alt+Enter) sent meanwhile is queued, then answered. */
 static void test_interrupt_and_queue(void)
 {
     pty p;
@@ -662,7 +662,7 @@ static void test_interrupt_and_queue(void)
     CHECK(wait_for(&p, "/help for commands", 3000));
     keys(&p, "list the files\r");
     CHECK(wait_for(&p, "Let me look at the files first.\n", 5000));
-    keys(&p, "and then?\r");
+    keys(&p, "and then?\x1b\r");
     CHECK(wait_for(&p, "queued · and then?", 2000));
     CHECK(wait_for(&p, "No tools are", 5000));
     /* the call shows the gist of its arguments, then how it ended */
@@ -676,6 +676,35 @@ static void test_interrupt_and_queue(void)
     CHECK(wait_for(&p, "and resume.\n", 8000));
     CHECK(wait_idle(&p, 3000));
     CHECK(!has(&p, "queued ·"));
+    keys(&p, "\x1b[100;5u");
+    CHECK(finish(&p, 3000) == 0);
+    modes_restored(&p);
+    pty_free(&p);
+}
+
+/* Enter during a run steers: the message waits under the band, then joins
+ * the run after the tool round, with no run of its own. Alt+Enter queues
+ * a follow-up instead. */
+static void test_steer(void)
+{
+    pty p;
+    const char *args[] = {"-m", "faux/faux", "--script", "tests/faux/slow.json", NULL};
+    pty_start(&p, 24, 80, args);
+    CHECK(wait_for(&p, "/help for commands", 3000));
+    keys(&p, "list the files\r");
+    CHECK(wait_for(&p, "Let me look at the files first.\n", 5000));
+    keys(&p, "actually, only the c files\r");
+    CHECK(wait_for(&p, "↳ will be sent after the current tool calls · actually, only the c files", 2000));
+    /* placed after the round: in the transcript, off the band */
+    CHECK(wait_for(&p, "› actually, only the c files", 5000));
+    CHECK(wait_for(&p, "No tools are", 5000));
+    keys(&p, "then summarize\x1b\r");
+    CHECK(wait_for(&p, "queued · then summarize", 2000));
+    CHECK(wait_for(&p, "› then summarize", 8000));
+    CHECK(wait_for(&p, "and resume.\n", 8000));
+    CHECK(wait_idle(&p, 3000));
+    CHECK(!has(&p, "queued ·"));
+    CHECK(!has(&p, "↳ will be sent"));
     keys(&p, "\x1b[100;5u");
     CHECK(finish(&p, 3000) == 0);
     modes_restored(&p);
@@ -705,7 +734,7 @@ static void test_steady_input(void)
         p.row = p.v->r;
         keys(&p, "build and test\r");
         CHECK(wait_for(&p, "· 6 lines\n", 5000)); /* the running call, in the band */
-        keys(&p, "and then?\r");
+        keys(&p, "and then?\x1b\r");
         CHECK(wait_for(&p, "queued · and then?", 2000));
         CHECK(wait_for(&p, "› and then?", 10000));
         CHECK(wait_idle(&p, 8000));
@@ -1905,6 +1934,7 @@ int main(int argc, char **argv)
     RUN(test_always_allow);
     RUN(test_long_approval);
     RUN(test_tool_rendering);
+    RUN(test_steer);
     RUN(test_short_paths);
     RUN(test_background);
     RUN(test_background_note);

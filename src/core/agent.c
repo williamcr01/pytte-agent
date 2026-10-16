@@ -526,16 +526,19 @@ static input *first_queued(pt_agent *a)
     return NULL;
 }
 
-/* An input becomes a user entry and a run task, in one commit. */
-static void write_placement(pt_agent *a, input *in)
+input *pt_core_next_steer(pt_agent *a, const input *after)
 {
-    task t;
-    input placed = *in;
+    uint32_t i;
+    for (i = 0; i < a->ninputs; i++)
+        if ((!after || a->inputs[i]->id > after->id) && a->inputs[i]->status == IN_QUEUED && a->inputs[i]->kind == INK_USER && a->inputs[i]->steer)
+            return a->inputs[i];
+    return NULL;
+}
+
+/* The user entry of an input; steered: it joined a run in flight. */
+static void write_user_entry(pt_agent *a, const input *in, uint32_t entry_id, bool steered)
+{
     pt_jw *w = &a->commit.w;
-    uint32_t entry_id = pt_core_new_id(a), run_id = pt_core_new_id(a);
-    placed.status = IN_PLACED;
-    placed.run = run_id;
-    pt_write_input(w, &placed);
     pt_core_entry_begin(a, entry_id, "user");
     pt_jw_key(w, "content");
     if (in->blob.n) {
@@ -558,7 +561,35 @@ static void write_placement(pt_agent *a, input *in)
         pt_jw_key(w, "from");
         pt_jw_strz(w, "pytte");
     }
+    if (steered) {
+        pt_jw_key(w, "steer");
+        pt_jw_bool(w, true);
+    }
     pt_core_entry_end(a);
+}
+
+uint32_t pt_core_write_steer(pt_agent *a, input *in, uint32_t run)
+{
+    input placed = *in;
+    uint32_t entry_id = pt_core_new_id(a);
+    placed.status = IN_DONE; /* nothing follows a steer: its run answers it */
+    placed.run = run;
+    pt_write_input(&a->commit.w, &placed);
+    write_user_entry(a, in, entry_id, true);
+    return entry_id;
+}
+
+/* An input becomes a user entry and a run task, in one commit. */
+static void write_placement(pt_agent *a, input *in)
+{
+    task t;
+    input placed = *in;
+    pt_jw *w = &a->commit.w;
+    uint32_t entry_id = pt_core_new_id(a), run_id = pt_core_new_id(a);
+    placed.status = IN_PLACED;
+    placed.run = run_id;
+    pt_write_input(w, &placed);
+    write_user_entry(a, in, entry_id, false);
     memset(&t, 0, sizeof t);
     t.id = run_id;
     t.input = in->id;
@@ -594,6 +625,7 @@ static bool build_submit(pt_agent *a)
     in.task = s.task;
     in.yes = s.yes;
     in.note = s.note;
+    in.steer = s.steer;
     in.blob = s.blob;
     in.images = s.images;
     in.status = IN_QUEUED;
@@ -1101,6 +1133,7 @@ bool pt_submit(pt_agent *a, const pt_input *in)
         pending.text = pt_arena_dup(&a->subs.ar, in->text);
         pending.req = pt_arena_dup(&a->subs.ar, in->req);
         pending.note = in->note;
+        pending.steer = in->steer;
         if (in->nimages) {
             pt_buf b;
             pt_jw w;

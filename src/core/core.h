@@ -118,6 +118,7 @@ typedef struct input {
     uint32_t task; /* approve: the tool task */
     bool yes;      /* approve: the answer */
     bool note;     /* user: from pytte, not the user */
+    bool steer;    /* user: when_busy "steer": joins the active run at its next turn boundary (section 8.5) */
     pt_str req, text; /* approve: text is the reason */
     pt_str blob;      /* "sha256:…" when the log holds text as a blob */
     pt_str images;    /* the attached images: a JSON array as logged, or empty */
@@ -154,6 +155,7 @@ typedef struct sub { /* a submission waiting for its commit */
     uint32_t task; /* approve */
     bool yes;
     bool note;        /* from pytte, not the user */
+    bool steer;       /* pt_input.steer */
     pt_str images;    /* the attached images: a JSON array, or empty */
     pt_str blob;      /* the stored text's ref, once PT_FX_BLOB completed */
     uint32_t blob_fx; /* the PT_FX_BLOB in flight */
@@ -309,6 +311,13 @@ void pt_core_after(pt_agent *a, after_kind k, const char *outcome, pt_str error,
 void pt_core_cancel(pt_agent *a, uint32_t task_id, uint32_t fx_id);
 /* Queue a delete of a task's live file. */
 void pt_core_live_del(pt_agent *a, uint32_t task_id);
+
+/* The oldest queued user input that asked to steer (after `after`, when
+ * given), or NULL. */
+input *pt_core_next_steer(pt_agent *a, const input *after);
+/* Place a steer in the open commit: the input record, now done in run
+ * `run`, and a user entry flagged as steered. Returns the entry's ID. */
+uint32_t pt_core_write_steer(pt_agent *a, input *in, uint32_t run);
 
 /* ---- state.c: records ---- */
 bool pt_state_apply(pt_agent *a, const pt_json *line);

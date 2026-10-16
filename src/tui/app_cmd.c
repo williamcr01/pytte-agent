@@ -424,7 +424,7 @@ static void cmd_help(app *a)
     if (a->mcp && a->mcp->nall)
         app_out_z(a, TUI_DIM, "/server:prompt [args] sends an MCP server's prompt; @server:uri adds a resource to a message");
     app_out_z(a, TUI_DIM,
-          "enter send · shift+enter, alt+enter or ctrl-j newline · esc esc interrupt · ctrl-c clear, "
+          "enter steer a running agent, or send · alt+enter queue a follow-up · shift+enter or ctrl-j newline · esc esc interrupt · ctrl-c clear, "
           "interrupt or quit · ctrl-d quit · ctrl-t thinking · ctrl-o details · ctrl-z suspend · ctrl-l redraw");
 }
 

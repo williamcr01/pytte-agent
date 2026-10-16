@@ -73,7 +73,9 @@ build/pytte approve ID TASK yes              # answer a call -p left waiting (ex
 build/pytte -m faux/faux --script tests/faux/slow.json   # offline
 ```
 
-In the TUI: Enter sends (queued while a run is active or the session is
+In the TUI: Enter sends (during a run it steers: the message joins the run
+at its next turn boundary; Alt+Enter queues a follow-up instead, see
+[docs/input.md](docs/input.md); input is also queued while the session is
 still opening), Shift+Enter or Ctrl-J adds a newline, Esc Esc interrupts,
 Ctrl-C clears the draft, else interrupts the run (twice with nothing to
 clear or interrupt quits), Ctrl-D quits, Ctrl-T toggles thinking (hidden or full),

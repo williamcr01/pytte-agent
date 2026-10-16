@@ -200,6 +200,10 @@ void pt_write_input(pt_jw *w, const input *in)
         pt_jw_key(w, "from");
         pt_jw_strz(w, "pytte");
     }
+    if (in->steer) {
+        pt_jw_key(w, "when_busy");
+        pt_jw_strz(w, "steer");
+    }
     if (in->kind == INK_APPROVE) {
         pt_jw_key(w, "task");
         pt_jw_uint(w, in->task);
@@ -537,6 +541,7 @@ static bool apply_input(pt_agent *a, const pt_json *r, uint32_t id)
     in->task = getid(r, "task");
     in->yes = pt_str_eqz(pt_json_gets(r, "answer", &a->scratch), "yes");
     in->note = pt_str_eqz(pt_json_gets(r, "from", &a->scratch), "pytte");
+    in->steer = pt_str_eqz(pt_json_gets(r, "when_busy", &a->scratch), "steer");
     return true;
 oom:
     pt_core_fail(a, PT_FATAL_OOM, "out of memory", PT_STR_NULL);

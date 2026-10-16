@@ -184,6 +184,7 @@ struct scenario {
     int tools; /* fake tools, run without asking or approved by the client */
     uint32_t window; /* context window (tokens), to make it compact */
     uint32_t together; /* the most looks the reference run has at once; 0: not checked */
+    uint32_t steer;    /* bit i: prompt i is sent as a steer; the reference run is then one run */
     uint32_t rewind;   /* once idle, rewind to this prompt (1 is the first); 0: no */
 };
 
@@ -451,6 +452,7 @@ static pt_rt_result client(world *w, const scenario *sc)
         memset(&in, 0, sizeof in);
         in.text = strcmp(sc->prompts[i], "@big") == 0 ? big_prompt() : pt_strz(sc->prompts[i]);
         in.req = pt_strz(req);
+        in.steer = (sc->steer >> i & 1) != 0;
         CHECK(pt_submit(a, &in));
     }
     do
@@ -687,6 +689,10 @@ static void exhaustive(const scenario *sc)
     CHECK(!sc->together || ref.most_looks == sc->together);
     k = pt_store_memory_appends(ref.store);
     outcome(&ref, &want);
+    if (sc->steer) { /* every steer joined the first run */
+        const char *at = find(pt_buf_str(&want), "run: ");
+        CHECK(at && !find((pt_str){at + 1, (size_t)(want.p + want.n - (at + 1))}, "run: "));
+    }
     if (getenv("SIM_SHOW"))
         fprintf(stderr, "%s:\n%.*s", sc->name, (int)want.n, want.p);
     if (getenv("SIM_LOG") && strcmp(getenv("SIM_LOG"), sc->name) == 0)
@@ -846,6 +852,17 @@ static const scenario scenarios[] = {
      "\"compact\":[{\"status\":529,\"body\":{\"class\":\"retryable\",\"message\":\"busy\"}},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"One short answer.\"}]}]}",
      {"first", "second", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 0},
+    /* A steer waits for the tool round, then joins the next request. */
+    {"steer_tool",
+     "{\"chunk\":11,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"Looking.\"},"
+     "{\"type\":\"tool_call\",\"name\":\"look\",\"args\":{\"at\":\"a\"}}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Looked, and heard the steer.\"}]}]}",
+     {"look at a", "actually, be brief", NULL}, ABORT_NONE, 0, TOOLS_AUTO, 0, 0, 2},
+    /* A run that ends with an answer starts the steer's turn in the same run. */
+    {"steer_answer",
+     "{\"chunk\":6,\"turns\":[{\"content\":[{\"type\":\"text\",\"text\":\"First answer.\"}]},"
+     "{\"content\":[{\"type\":\"text\",\"text\":\"Answer to the steer.\"}]}]}",
+     {"first question", "and one more thing", NULL}, ABORT_NONE, 0, TOOLS_NONE, 0, 0, 2},
     /* Two prompts' worth of file changes, then back to before the second:
      * a.txt as the first left it, c.txt gone. */
     {"rewind",
@@ -859,7 +876,7 @@ static const scenario scenarios[] = {
      "\"edits\":[{\"old\":\"two\",\"new\":\"three\"}]}},"
      "{\"type\":\"tool_call\",\"name\":\"write\",\"args\":{\"path\":\"b.txt\",\"content\":\"bee, again\\n\"}}]},"
      "{\"content\":[{\"type\":\"text\",\"text\":\"Changed them.\"}]}]}",
-     {"make files", "change them", NULL}, ABORT_NONE, 0, TOOLS_FILES, 0, 0, 2},
+     {"make files", "change them", NULL}, ABORT_NONE, 0, TOOLS_FILES, 0, 0, 0, 2},
     {"abort_compact",
      "{\"chunk\":40,\"turns\":["
      "{\"content\":[{\"type\":\"text\",\"text\":\"" LONG "\"}]},"

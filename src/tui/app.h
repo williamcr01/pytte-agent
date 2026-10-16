@@ -125,6 +125,7 @@ typedef struct attach {
 typedef struct queued_input {
     pt_buf text;
     bool command, submitted;
+    bool steer; /* sent while a run was active: joins it at its next turn boundary */
     uint64_t xid;       /* its fetches; 0: not started */
     uint32_t want, got; /* parts asked for, and answered */
     bool failed, prompt; /* prompt: parts[0] is the prompt's text */
@@ -461,7 +462,9 @@ void app_finish_session(app *a);
 /* app_input.c: what is typed: keys, the input queue, MCP prompts and @-mentions */
 void app_xreq_drop(app *a, xreq *x);
 void app_queued_submit(app *a);
-void app_submit(app *a);
+/* follow_up: queue the message to run after the current one (Alt+Enter)
+ * instead of steering it into the run in flight (Enter). */
+void app_submit(app *a, bool follow_up);
 void app_on_key(app *a, const tui_ev *ev);
 
 #endif

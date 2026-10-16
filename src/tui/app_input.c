@@ -7,7 +7,7 @@
 
 #include "tui/app.h"
 
-static bool queue_text(app *a, pt_str text, bool command)
+static bool queue_text(app *a, pt_str text, bool command, bool steer)
 {
     queued_input *q;
     if (a->queue.n == a->queue.cap) {
@@ -35,6 +35,7 @@ static bool queue_text(app *a, pt_str text, bool command)
     if (q->text.oom)
         return false;
     q->command = command;
+    q->steer = steer;
     q->submitted = false;
     q->xid = 0;
     q->want = q->got = 0;
@@ -401,6 +402,7 @@ void app_queued_submit(app *a)
                 continue;
             }
             memset(&in, 0, sizeof in);
+            in.steer = q->steer;
             in.text = pt_buf_str(&q->text);
             for (k = 0; k < q->natt; k++) {
                 imgs[k].blob = pt_strz(q->att[k].ref);
@@ -690,7 +692,7 @@ static void paste_clipboard(app *a)
     pt_buf_free(&img);
 }
 
-void app_submit(app *a)
+void app_submit(app *a, bool follow_up)
 {
     pt_str text = pt_str_trim(pt_buf_str(&a->in.text));
     bool command;
@@ -744,7 +746,7 @@ void app_submit(app *a)
             }
             text = pt_buf_str(&a->tmp);
         }
-        if (!queue_text(a, text, command)) {
+        if (!queue_text(a, text, command, !command && !follow_up && a->run.active)) {
             app_out_z(a, TUI_RED, "out of memory queuing input");
             return;
         }
@@ -757,7 +759,7 @@ void app_submit(app *a)
     a->draft.dirty = true;
 }
 
-static void enter(app *a)
+static void enter(app *a, bool follow_up)
 {
     pt_str d = pt_buf_str(&a->in.text);
     if (d.n && d.p[d.n - 1] == '\\' && a->in.cur == d.n) { /* a trailing \ is a newline */
@@ -791,7 +793,7 @@ static void enter(app *a)
         if (skill || sub)
             return; /* a $skill or @mention picked: the message goes on; /mcp login, /login api: then the name */
     }
-    app_submit(a);
+    app_submit(a, follow_up);
 }
 
 static void settings_key(app *a, const tui_ev *ev)
@@ -953,8 +955,8 @@ void app_on_key(app *a, const tui_ev *ev)
         tools_key(a, ev);
         return;
     }
-    if (k == TK_ENTER && !ev->mods) {
-        enter(a);
+    if (k == TK_ENTER && (!ev->mods || ev->mods == TM_ALT)) {
+        enter(a, ev->mods == TM_ALT);
         return;
     }
     if (k == TK_TAB && !ev->mods) {
